@@ -1,4 +1,4 @@
-# This tutorial contains the Rayleigh-Bernard convection in a rectangular domain
+# This tutorial contains the cavity case
 
 ## Step 1: Generating the mesh using the gmsh script
 
