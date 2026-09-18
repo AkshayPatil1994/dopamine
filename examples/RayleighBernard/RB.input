@@ -1,0 +1,88 @@
+! Rayleigh-Benard convection: closed box, periodic x/y, no-slip
+! isothermal top/bottom walls, flow is purely buoyancy-driven (Boussinesq).
+!
+
+&dopamine_domain
+  mesh_file = 'mesh'
+  mesh_type = 'preprocessed'
+/
+
+&dopamine_numerics
+  advection_scheme        = 'KEP'
+  temperature_scheme      = 'VANLEER_TVD'
+  time_integrator         = 'RK3W'
+  dt                      = 0.1
+  t_end                   = 150.0
+  cfl_max                 = 0.5
+  adapt_dt                = .true.
+  p_tol                   = 1.0e-8
+  p_max_iter              = 500
+  pressure_solver         = 'boomeramg'
+  gradient_scheme         = 'LEAST_SQUARES'
+  use_rotational_projection = .true.
+  use_sgs                 = .false.
+/
+
+&dopamine_physics
+  ! Free-fall non-dimensionalisation
+  ! Pr=1 => nu = alpha_T = sqrt(Pr/Ra) = 6.3246e-4; beta*grav=1 split as beta=1, gz=-1.
+  nu         = 6.3246e-4
+  alpha_T    = 6.3246e-4
+  beta       = 1.0
+  T_ref      = 1.0
+  Pr_t       = 0.85
+
+  gx = 0.0
+  gy = 0.0
+  gz = -1.0
+
+  fx = 0.0
+  fy = 0.0
+  fz = 0.0
+
+  boussinesq = .true.
+/
+
+&dopamine_bc
+  n_patches = 6
+
+  patch_name(1) = 'bottom_wall'
+  patch_type(1) = 'fixedTemperature'
+  patch_T(1)    = 1.0
+
+  patch_name(2) = 'top_wall'
+  patch_type(2) = 'fixedTemperature'
+  patch_T(2)    = 0.0
+
+  patch_name(3) = 'periodic_x0'
+  patch_type(3) = 'periodic'
+  patch_name(4) = 'periodic_xL'
+  patch_type(4) = 'periodic'
+  patch_name(5) = 'periodic_y0'
+  patch_type(5) = 'periodic'
+  patch_name(6) = 'periodic_yL'
+  patch_type(6) = 'periodic'
+/
+
+&dopamine_initial_condition
+  ! Quiescent start: T is uniform at T_ref everywhere so the conductive gradient builds up from the wall BCs via diffusion first.
+  ! A small streamwise seed + multiplicative noise breaks symmetry so the RB
+  ! instability triggers once the gradient is established, matching the intent
+  ! of the reference's ic_type=3 (zero mean + noise) quiescent IC.
+  ic_type = 'uniform'
+  ic_uref = 0.0001
+  ic_lref = 0.0
+  noise_level = 2.0
+  wall_normal_direction = 3
+/
+
+&dopamine_output
+  prefix         = 'RB'
+  write_interval = -1
+  write_time     = 0.5
+/
+
+&dopamine_stats
+  solver_stats_frequency = 100
+  calc_stats_frequency   = 100
+/

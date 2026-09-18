@@ -1,0 +1,89 @@
+! DOPAMINE LES configuration example - RK4 + Skew-symmetric + Dynamic Smagorinsky
+! Temporal convergence study with modern LES numerics (4th-order time integration).
+! Expected: 4th-order temporal convergence in dt.
+
+&dopamine_domain
+  mesh_file = '__MESH_FILE__'
+  mesh_type = 'gmsh'
+/
+
+&dopamine_numerics
+  ! Time integration: RK4 (4th-order, 1 pressure solve/step)
+  time_integrator        = 'RK4'
+
+  ! Advection: skew-symmetric, energy-conserving (KEP)
+  advection_scheme       = 'KEP'
+
+  ! SGS model: Dynamic Smagorinsky (strain-rate based)
+  sgs_model              = 'DYNAMIC_SMAG'
+
+  ! Time stepping
+  dt                     = __DT__
+  t_end                  = 0.5
+  adapt_dt               = .false.
+  cfl_max                = 0.8
+
+  ! Numerics
+  temperature_scheme     = 'VANLEER_TVD'
+  gradient_scheme        = 'LEAST_SQUARES'
+  solver_stats_frequency = 1
+
+  ! Pressure solver
+  p_tol                  = 1.0e-10
+  p_max_iter             = 2000
+  p_target_divU          = 1.0e-8  ! velocity-relative tolerance
+  pressure_solver        = 'boomeramg'
+
+  ! Non-orthogonal correction
+  n_nonortho_corr        = 1
+
+  ! Miscellaneous
+  use_rotational_projection = .true.
+  use_sgs                = .true.
+  gg_iterations          = 2
+/
+
+&dopamine_physics
+  nu         = 6.25e-4
+  alpha_T    = 0.0
+  beta       = 0.0
+  T_ref      = 300.0
+  Pr_t       = 0.85
+  gx         = 0.0
+  gy         = 0.0
+  gz         = 0.0
+  boussinesq = .false.
+/
+
+&dopamine_bc
+  n_patches = 6
+
+  patch_name(1) = 'periodic_x0'
+  patch_type(1) = 'periodic'
+
+  patch_name(2) = 'periodic_xL'
+  patch_type(2) = 'periodic'
+
+  patch_name(3) = 'periodic_y0'
+  patch_type(3) = 'periodic'
+
+  patch_name(4) = 'periodic_yL'
+  patch_type(4) = 'periodic'
+
+  patch_name(5) = 'periodic_z0'
+  patch_type(5) = 'periodic'
+
+  patch_name(6) = 'periodic_zL'
+  patch_type(6) = 'periodic'
+/
+
+&dopamine_initial_condition
+  ic_type = 'taylor_green'
+  ic_uref = 1.0
+  ic_lref = 1.0
+/
+
+&dopamine_output
+  prefix         = '__PREFIX__'
+  write_interval = 999999
+/

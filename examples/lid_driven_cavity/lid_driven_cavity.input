@@ -1,0 +1,80 @@
+! dopamine namelist input: lid-driven cavity (non-periodic benchmark)
+! Unit-cube cavity, moving lid at z=1 in +x direction.
+! No periodic boundaries: useful for isolating periodic-coupling bugs.
+
+&dopamine_domain
+  mesh_file = 'mesh'
+  mesh_type = 'preprocessed'
+/
+
+&dopamine_numerics
+  advection_scheme = 'KEP'
+  time_scheme      = 'RK3'
+  use_sgs = .false.
+  sgs_model = 'VREMAN'
+  dt               = 1.0
+  t_end            = 100.0
+  cfl_max          = 0.5
+  adapt_dt         = .true.
+  p_tol            = 1.0e-10
+  p_max_iter       = 1000
+/
+
+&dopamine_physics
+  ! Re = U_lid * L / nu = 1 * 1 / 0.001 = 1000
+  nu         = 0.001
+  alpha_T    = 0.0
+  beta       = 0.0
+  T_ref      = 300.0
+  Pr_t       = 0.85
+  gx         = 0.0
+  gy         = 0.0
+  gz         = 0.0
+  fx         = 0.0
+  fy         = 0.0
+  fz         = 0.0
+  boussinesq = .false.
+/
+
+&dopamine_bc
+  n_patches = 6
+
+  patch_name(1) = 'bottom_wall'
+  patch_type(1) = 'noSlip'
+
+  patch_name(2) = 'lid_wall'
+  patch_type(2) = 'movingWall'
+  patch_U(2,1)  = 1.0
+  patch_U(2,2)  = 0.0
+  patch_U(2,3)  = 0.0
+
+  patch_name(3) = 'x0_wall'
+  patch_type(3) = 'noSlip'
+
+  patch_name(4) = 'xL_wall'
+  patch_type(4) = 'noSlip'
+
+  patch_name(5) = 'y0_wall'
+  patch_type(5) = 'noSlip'
+
+  patch_name(6) = 'yL_wall'
+  patch_type(6) = 'noSlip'
+/
+
+&dopamine_initial_condition
+  ic_type      = 'uniform'
+  ic_uref      = 0.0
+  ic_lref      = 1.0
+  noise_level  = 0.1
+/
+
+&dopamine_output
+  prefix         = 'lid_cavity'
+  write_interval = -1
+  write_time     = 0.2
+/
+
+
+&dopamine_stats
+  solver_stats_frequency = 100
+/
