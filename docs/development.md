@@ -46,9 +46,9 @@ reader can see the contract before the implementation.
 
 CMake drives everything, including fetching and building PETSc, hypre,
 METIS/GKlib, and NetCDF when not found on the system
-(`-DDOPAMINE_FETCH_PETSC=ON`, etc. — see the README's "Quick Start" and
-"How to Compile" sections for the full flag list). Two points that matter
-during development:
+(`-DDOPAMINE_FETCH_PETSC=ON`, etc. — see [usage.md](usage.md#build) for the
+full flag list, offline/HPC builds, and the PETSc standalone recipe). Two
+points that matter during development:
 
 - `make clean` removes only DOPAMINE's own artifacts; `make cleanall` also
   wipes the fetched external libraries under `DOPAMINE_EXTERNAL_DIR`
@@ -57,8 +57,9 @@ during development:
   rebuilding PETSc from scratch costs minutes.
 - The CUDA (`build-gpu/`) and OpenACC (`build-acc26/`) paths use
   separate build/external directories so they don't disturb a CPU build
-  sharing the same source tree. Follow the README's "GPU (CUDA) Build" /
-  "OpenACC (nvfortran) Build" sections rather than reusing `build/`.
+  sharing the same source tree. Follow [usage.md](usage.md#gpu-cuda-build)'s
+  "GPU (CUDA) build" / "OpenACC (nvfortran) build" sections rather than
+  reusing `build/`.
 
 A typical development build:
 
