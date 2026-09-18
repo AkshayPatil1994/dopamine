@@ -2,8 +2,8 @@
 ! Canonical setup: periodic in streamwise/spanwise and driven by constant dP/dx.
 
 &dopamine_domain
-  mesh_file = 'channel.msh'
-  mesh_type = 'gmsh'
+  mesh_file = 'mesh'
+  mesh_type = 'preprocessed'
 /
 
 &dopamine_numerics

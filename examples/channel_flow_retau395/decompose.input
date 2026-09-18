@@ -1,0 +1,82 @@
+! Channel-flow LES template targeting Re_tau ~= 395 with wall model.
+! Canonical setup: periodic in streamwise/spanwise and driven by constant dP/dx.
+
+&dopamine_domain
+  mesh_file = 'channel.msh'
+  mesh_type = 'gmsh'
+/
+
+&dopamine_numerics
+  advection_scheme       = 'KEP'
+  time_integrator        = 'RK3W'
+  dt               = 5.0e-4
+  t_end            = 20.0
+  cfl_max          = 0.5
+  adapt_dt         = .true.
+  solver_stats_frequency = 1
+  p_tol            = 1.0e-8
+  p_max_iter       = 1000
+/
+
+&dopamine_physics
+  ! For channel half-height delta=1 and u_tau=1, nu = 1/Re_tau.
+  nu         = 2.5316e-3
+  alpha_T    = 0.0
+  beta       = 0.0
+  T_ref      = 300.0
+  Pr_t       = 0.85
+
+  ! No buoyancy in this setup.
+  gx         = 0.0
+  gy         = 0.0
+  gz         = 0.0
+  boussinesq = .false.
+
+  ! Equivalent to constant streamwise pressure gradient forcing.
+  fx         = 1.0
+  fy         = 0.0
+  fz         = 0.0
+/
+
+&dopamine_bc
+  n_patches     = 6
+  patch_name(1) = 'bottom_wall'
+  patch_type(1) = 'wallModel'
+  patch_name(2) = 'top_wall'
+  patch_type(2) = 'wallModel'
+
+  patch_name(3) = 'periodic_x0'
+  patch_type(3) = 'periodic'
+
+  patch_name(4) = 'periodic_xL'
+  patch_type(4) = 'periodic'
+
+  patch_name(5) = 'periodic_y0'
+  patch_type(5) = 'periodic'
+  patch_name(6) = 'periodic_yL'
+  patch_type(6) = 'periodic'
+/
+
+&dopamine_initial_condition
+  ! Initial condition selector.
+  ic_type = 'channel_loglaw'
+
+  ! Bulk streamwise velocity used by the perturbation IC.
+  ic_uref = 17.9
+
+  ! Reference length scale used by IC setup paths that need it.
+  ic_lref = 1.0
+
+  ! Keep deterministic perturbation field only for this case.
+  noise_level = 0.0
+
+  ! Wall-normal direction index for wall-bounded IC logic (1=x, 2=y, 3=z).
+  wall_normal_direction = 3
+/
+
+
+&dopamine_output
+  prefix         = 'channel'
+  write_interval = -50
+  write_time = 0.25
+/
