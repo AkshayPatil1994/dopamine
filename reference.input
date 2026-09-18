@@ -322,9 +322,18 @@
   gz = -9.80665
 
   ! Constant external body force added to momentum RHS [m/s^2]
+  ! Mutually exclusive with constant_mass_flux_forcing (fx/fy/fz must be 0 when it is enabled).
   fx = 0.0
   fy = 0.0
   fz = 0.0
+
+  ! Constant mass flux (bulk velocity) forcing: recomputes a uniform body force each step so the
+  ! volume-averaged velocity tracks (Ux_constant, Uy_constant, Uz_constant) [m/s], e.g. for
+  ! channel/duct flow driven to a target bulk velocity instead of a fixed pressure gradient.
+  constant_mass_flux_forcing = .false.
+  Ux_constant = 1.0
+  Uy_constant = 0.0
+  Uz_constant = 0.0
 
   ! Optional rotating-frame Coriolis forcing: -2 * Omega x U
   use_rotation = .false.

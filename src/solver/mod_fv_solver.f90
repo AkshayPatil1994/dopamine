@@ -38,6 +38,10 @@ module mod_fv_solver
     real(rp)    :: T_ref        = 300.0_rp
     real(rp)    :: g(3)         = [0.0_rp, 0.0_rp, 0.0_rp]
     real(rp)    :: f_const(3)   = [0.0_rp, 0.0_rp, 0.0_rp]
+    !> Dynamic body force recomputed each step to hold the volume-averaged velocity at U_bulk_target;
+    !> mutually exclusive with f_const (enforced in the input parser).
+    logical     :: constant_mass_flux_forcing = .false.
+    real(rp)    :: U_bulk_target(3) = [0.0_rp, 0.0_rp, 0.0_rp]
     logical     :: use_rotation = .false.
     real(rp)    :: omega_rot(3) = [0.0_rp, 0.0_rp, 0.0_rp]
     logical     :: use_harmonic_forcing = .false.
@@ -91,7 +95,7 @@ module mod_fv_solver
   !> matching dst%x = src%x line: copy_solver_params asserts the two stay in sync, since
   !> storage_size() can't be used as a portable completeness check (compiler-dependent
   !> layout: gfortran/nvfortran report different bit sizes for the identical type).
-  integer(ip), parameter :: N_SOLVER_PARAMS_FIELDS = 47
+  integer(ip), parameter :: N_SOLVER_PARAMS_FIELDS = 49
 
   type, public :: FVSolver
     type(Mesh),    pointer :: mesh => null()
@@ -176,7 +180,10 @@ module mod_fv_solver
     ! -- Pressure solver backend
     type(pressure_solver_handle_t) :: psolver
     real(rp)    :: V_min_global  = 0.0_rp  ! global minimum cell volume
+    real(rp)    :: V_total_global = 0.0_rp  ! global domain volume, for bulk-velocity averaging
     real(rp)    :: p_atol_factor = 1.0e-10_rp  ! set to a machine-precision floor in solver_init; atol = factor/dt
+    !> Recomputed each step from the current bulk velocity when constant_mass_flux_forcing is on.
+    real(rp)    :: mass_flux_force(3) = [0.0_rp, 0.0_rp, 0.0_rp]
 
     !> .true. when no face anywhere passes the NONORTHO_SIN2_TOL test, so every Jasak correction is provably zero.
     logical     :: skip_nonortho = .false.
@@ -262,6 +269,8 @@ contains
     dst%T_ref                       = src%T_ref
     dst%g                           = src%g
     dst%f_const                     = src%f_const
+    dst%constant_mass_flux_forcing  = src%constant_mass_flux_forcing
+    dst%U_bulk_target                = src%U_bulk_target
     dst%use_rotation                = src%use_rotation
     dst%omega_rot                   = src%omega_rot
     dst%use_harmonic_forcing        = src%use_harmonic_forcing
@@ -289,7 +298,7 @@ contains
     dst%scalar_scheme               = src%scalar_scheme
     dst%temperature_scheme          = src%temperature_scheme
     dst%debug_diagnostics           = src%debug_diagnostics
-    n_copied = n_copied + 33  ! nu .. debug_diagnostics above
+    n_copied = n_copied + 35  ! nu .. debug_diagnostics above
 
     if (allocated(dst%scalar_names)) deallocate(dst%scalar_names)
     if (allocated(src%scalar_names)) then
@@ -495,6 +504,7 @@ contains
                            MPI_MIN, msh%comm, ierr)
         call MPI_Allreduce(vsum_local, vsum_global, 1, MPI_DOUBLE_PRECISION, &
                            MPI_SUM, msh%comm, ierr)
+        self%V_total_global = vsum_global
         if (msh%n_cells_global > 0) then
           vmean_global = vsum_global / real(msh%n_cells_global, rp)
         else
@@ -910,6 +920,8 @@ contains
       end if
     end if
 
+    if (self%params%constant_mass_flux_forcing) call update_mass_flux_forcing(self, dt)
+
     call advance_rk3w(self, dt)
 
     ! U/p ghosts are already current from the RK3 stage-3 tail; only T/C need a post-RK refresh.
@@ -925,6 +937,28 @@ contains
       call maybe_report_perf(self, .false.)
     end if
   end subroutine solver_advance
+
+  !> Constant mass flux forcing: recompute the uniform body force each step so the volume-averaged
+  !> velocity tracks U_bulk_target. Uniform forces survive the pressure projection on a periodic
+  !> domain (grad of a periodic potential has zero mean), so f = (U_target - <U>) / dt drives the
+  !> bulk velocity to target over successive steps.
+  subroutine update_mass_flux_forcing(self, dt)
+    class(FVSolver), intent(inout) :: self
+    real(rp), intent(in) :: dt
+
+    integer(ip) :: nc, c, ierr
+    real(rp) :: mom_local(3), mom_global(3), U_bulk(3)
+
+    nc = self%mesh%n_cells
+    mom_local = 0.0_rp
+    do c = 1, nc
+      mom_local = mom_local + self%U(:, c) * self%mesh%cells(c)%volume
+    end do
+    call MPI_Allreduce(mom_local, mom_global, 3, MPI_DOUBLE_PRECISION, MPI_SUM, self%mesh%comm, ierr)
+
+    U_bulk = mom_global / max(self%V_total_global, SMALL)
+    self%mass_flux_force = (self%params%U_bulk_target - U_bulk) / dt
+  end subroutine update_mass_flux_forcing
 
   subroutine refresh_halos_and_bc(self)
     class(FVSolver), intent(inout) :: self
@@ -1441,7 +1475,11 @@ contains
 
     ! Precompute cell-independent body force: constant + time-varying harmonic.
     ! Coriolis (-2 Omega x U) is U-dependent and remains inside the loop.
-    force_bg = self%params%f_const
+    if (self%params%constant_mass_flux_forcing) then
+      force_bg = self%mass_flux_force
+    else
+      force_bg = self%params%f_const
+    end if
     if (self%params%use_harmonic_forcing) then
       dir_n = sqrt(sum(self%params%forcing_dir**2))
       if (dir_n > SMALL) then

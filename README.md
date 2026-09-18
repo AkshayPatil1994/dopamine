@@ -233,10 +233,10 @@ PDF/HTML manual via `bash docs/build.sh` (see [docs/README.md](docs/README.md)).
 <table>
   <tr>
     <td align="center"><img src="figures/TGV128.gif" width="400"/><br/><sub>Taylor-Green Vortex</sub></td>
-    <td align="center"><img src="figures/channel.gif" width="400"/><br/><sub>Channel Flow (Re<sub>τ</sub>=395)</sub></td>
+    <td align="center"><img src="figures/cavity.gif" width="400"/><br/><sub>Lid-Driven Cavity</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="figures/cavity.gif" width="400"/><br/><sub>Lid-Driven Cavity</sub></td>
+    <td align="center"><img src="figures/channel.gif" width="400"/><br/><sub>Channel Flow (Re<sub>τ</sub>=395)</sub></td>
     <td align="center"><img src="figures/rb.gif" width="400"/><br/><sub>Rayleigh-Bénard Convection</sub></td>
   </tr>
 </table>

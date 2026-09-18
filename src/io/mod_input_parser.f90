@@ -338,6 +338,10 @@ contains
     real(rp)    :: fx         = 0.0_rp
     real(rp)    :: fy         = 0.0_rp
     real(rp)    :: fz         = 0.0_rp
+    logical     :: constant_mass_flux_forcing = .false.
+    real(rp)    :: Ux_constant = 0.0_rp
+    real(rp)    :: Uy_constant = 0.0_rp
+    real(rp)    :: Uz_constant = 0.0_rp
     logical     :: use_rotation = .false.
     real(rp)    :: omega_x    = 0.0_rp
     real(rp)    :: omega_y    = 0.0_rp
@@ -354,6 +358,7 @@ contains
 
     namelist /dopamine_physics/ nu, alpha_T, beta, T_ref, Pr_t, &
                   gx, gy, gz, fx, fy, fz, &
+                  constant_mass_flux_forcing, Ux_constant, Uy_constant, Uz_constant, &
                   use_rotation, omega_x, omega_y, omega_z, &
                   use_harmonic_forcing, forcing_amp, forcing_omega, forcing_phase, &
                   forcing_dir_x, forcing_dir_y, forcing_dir_z, boussinesq
@@ -361,6 +366,11 @@ contains
     read(iunit, nml=dopamine_physics, iostat=ios)
     if (ios /= 0 .and. ios /= -1) &
       write(*,'(A,I0)') 'WARNING: error reading &dopamine_physics, ios=', ios
+
+    ! Constant pressure-gradient (fx/fy/fz) and constant mass-flux forcing are mutually exclusive.
+    if (constant_mass_flux_forcing .and. &
+        (abs(fx) > SMALL .or. abs(fy) > SMALL .or. abs(fz) > SMALL)) &
+      error stop 'dopamine_physics: fx/fy/fz must be zero when constant_mass_flux_forcing = .true.'
 
     associate(p => config%params)
       p%nu         = nu
@@ -370,6 +380,8 @@ contains
       p%Pr_t       = Pr_t
       p%g          = [gx, gy, gz]
       p%f_const    = [fx, fy, fz]
+      p%constant_mass_flux_forcing = constant_mass_flux_forcing
+      p%U_bulk_target = [Ux_constant, Uy_constant, Uz_constant]
       p%use_rotation = use_rotation
       p%omega_rot  = [omega_x, omega_y, omega_z]
       p%use_harmonic_forcing = use_harmonic_forcing
