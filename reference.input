@@ -1,0 +1,753 @@
+! SPDX-FileCopyrightText: 2026 DOPAMINE contributors
+! SPDX-License-Identifier: AGPL-3.0-only
+
+! dopamine reference input file
+! =============================================================================
+! This file documents all currently supported namelist options in mod_input_parser.
+! Any namelist block can be omitted; internal defaults will be used.
+!
+! OFFLINE MESH DECOMPOSITION (dopamine-decompose)
+! -----------------------------------------------------------------------------
+! CHOOSING A MESH PATH
+!
+!   Direct read ('gmsh' / 'openfoam'): rank 0 reads the whole mesh, partitions
+!   it in memory and scatters. Simplest, nothing to prepare, and you can change
+!   the rank count freely. Rank 0 must hold the entire global mesh, so this is
+!   what limits you on large cases.
+!
+!   Preprocessed: decompose once offline, then every rank reads only its own
+!   processorN/mesh.bin. No rank-0 ceiling at solver start, much faster startup,
+!   and the result is reusable. Tied to one rank count: change nranks and you
+!   must decompose again.
+!
+!   Rule of thumb: direct read below ~10M cells; decompose above that, or as
+!   soon as rank 0 runs out of memory at startup, or when you will launch the
+!   same mesh repeatedly at a fixed rank count.
+!
+! For large meshes or to avoid rank-0 memory bottleneck during mesh partitioning:
+!
+! 1. Pre-decompose your mesh offline using the dopamine-decompose tool:
+!
+!      mpirun -np 1 ./dopamine-decompose input.input --nranks 128 \
+!                                       --output-dir ./my_mesh_decomposed
+!
+!    Decomposition memory depends on mesh size/topology and selected options.
+!    Use --max-memory-gb to cap peak memory; face geometry is staged to disk
+!    when the budget is active.
+!
+!    Flags: --nranks N (required)     partitions to write
+!           --output-dir DIR          destination for processorN/mesh.bin
+!           --threads N               writer threads (default: all cores)
+!           --max-memory-gb G         cap peak memory, stages geometry to disk
+!           --chunk-size M            face scan chunk (default 2M)
+!           --weight-by-volume        balance volume per rank instead of cells
+!
+!    Partitions carry equal cell counts by default, which is what solver cost
+!    scales with. --weight-by-volume restores the old volume-equalising split;
+!    on a wall-graded mesh that imbalances cell counts several-fold, so leave
+!    it off unless you have a specific reason.
+!
+!    The decomposer runs on one core; --threads parallelises the write phase.
+!
+! 2. In your solver input file, set mesh_type = 'preprocessed' and point
+!    mesh_file to the decomposed mesh directory:
+!
+!      &dopamine_domain
+!        mesh_file = './my_mesh_decomposed'
+!        mesh_type = 'preprocessed'
+!      /
+!
+! 3. Run the solver normally (each rank reads its local processorR/mesh.bin):
+!
+!      mpirun -n 128 ./dopamine input_preprocessed.input
+!
+! Benefits:
+!   - Avoids rank-0 mesh partition bottlenecks during solver startup
+!   - Each rank reads local data only (faster startup, scalable I/O)
+!   - Reusable decomposed meshes across multiple runs
+! =============================================================================
+
+&dopamine_domain
+  ! Path to mesh file or preprocessed mesh directory.
+  ! - For 'gmsh': path to .msh file
+  ! - For 'openfoam'/'foam': path to OpenFOAM polyMesh directory
+  ! - For 'preprocessed': path to decomposed mesh directory (from dopamine-decompose)
+  mesh_file = 'examples/taylor_green/taylor_green.msh'
+
+  ! Mesh reader type: 'gmsh' | 'openfoam' | 'foam' | 'preprocessed'
+  !   'gmsh'        - Gmsh format (.msh file); rank 0 reads and partitions
+  !   'openfoam'    - OpenFOAM format (polyMesh dir); rank 0 reads and partitions
+  !   'foam'        - Alias for 'openfoam'
+  !   'preprocessed' - Offline-decomposed mesh (each rank reads its local part).
+  !                    Use with dopamine-decompose tool first:
+  !                      mpirun -np 1 ./dopamine-decompose <input_file> --nranks N
+  !                    Then point mesh_file to the output directory above.
+  !                    Must be run with exactly the nranks it was decomposed for.
+  ! See "CHOOSING A MESH PATH" in the header for when to prefer each.
+  mesh_type = 'gmsh'
+/
+
+&dopamine_numerics
+  ! ===========================================================================
+  ! NUMERICAL METHODS & SOLVER CONFIGURATION
+  ! ===========================================================================
+  ! Convection/advection discretization for momentum:
+  !   'CENTRAL' | 'CDS' | 'KEP' | 'SKEW' | 'QUICK' | 'KOREN_TVD' | 'VANLEER_TVD'
+  ! Recommended default: 'QUICK' (geometry-aware quadratic upwind; stable, accurate baseline).
+  ! 'CDS', 'KEP' and 'QUICK' are 2nd order on refined/snapped meshes: each applies a
+  ! skewness correction from the cell gradient, so they stay exact for linear fields
+  ! at hanging-node interfaces. QUICK is unlimited (can overshoot) and its upwind bias
+  ! leaves an O(h^2) dissipative term that competes with the SGS model; prefer 'KEP'
+  ! for LES where subgrid dissipation should come from the model.
+  ! 'CENTRAL'/'CDS' - lowest dissipation
+  ! 'KEP'/'SKEW'    - kinetic-energy preservation; exact where the face centre is the
+  !                   centroid-segment midpoint, O(h^2) conservation error on skewed
+  !                   faces in exchange for 2nd-order accuracy there.
+  ! 'KOREN_TVD'     - bounded Koren-TVD MUSCL; still 1st order at skewed faces
+  ! 'VANLEER_TVD'   - bounded van-Leer MUSCL; still 1st order at skewed faces
+  advection_scheme = 'QUICK'
+
+  ! Convection/advection discretization for temperature (T field).
+  ! Independent of advection_scheme; same options as above.
+  ! Defaults to VANLEER_TVD for bounded, oscillation-free temperature transport.
+  ! Only takes effect when boussinesq = .true.; a neutral run (including a neutral
+  ! ABL) does not transport T at all, so this setting is then inert.
+  !   Recommended: 'VANLEER_TVD' or 'KOREN_TVD' for most flows;
+  !                'KEP'/'CENTRAL' only if temperature is near-smooth.
+  temperature_scheme = 'VANLEER_TVD'
+
+  ! Time integrator: 'RK3W' (default and only stable option).
+  !   'RK3W' - Wray low-storage RK3 (3 stages, 3 pressure solves); 3rd-order accurate, stable.
+  time_integrator = 'RK3W'
+
+  ! Deprecated and ignored. Set advection_scheme = 'KEP' for the energy-conserving form.
+  use_skew_symmetric_advection = .false.
+
+  ! Subgrid-scale (SGS) model type: 'VREMAN' (default), 'SMAGORINSKY', or 'DYNAMIC_SMAG'.
+  !   'VREMAN'       - Vreman 2004 model (baseline); filter width is a tensor, valid on any polyhedron.
+  !   'SMAGORINSKY'  - Constant-coefficient Smagorinsky; nu_t = (Cs*Delta)^2*|S|, Cs fixed at 0.1.
+  !   'DYNAMIC_SMAG' - Germano-Lilly dynamic Smagorinsky; Cs^2 computed locally each step from a
+  !                    compact test-filtered Germano identity (no homogeneous-direction averaging,
+  !                    so noisier than the classic channel-flow formulation), clipped to >= 0.
+  !                    Not GPU-ported (host-only under -acc); see mod_dynamic_smagorinsky.f90.
+  sgs_model = 'VREMAN'
+
+  ! Wall-model sampling height in mesh units; <= 0 (default) samples the wall-adjacent cell.
+  ! Set it above the buffer layer (y+ > 50) to avoid log-layer mismatch; the walk stops at rank boundaries.
+  wall_model_height = 0.0
+
+  ! Wall-model velocity filter time constant; <= 0 (default) disables filtering.
+  ! Damps the instantaneous sampled velocity (Yang et al. 2017); try ~ delta/u_tau.
+  wall_model_filter_time = 0.0
+
+  ! Time step size. With adapt_dt = .true. this is a CEILING, not a seed: the
+  ! CFL/diffusion-based adaptive dt is clamped to min(dt_cfl, dt) every step
+  ! (see solver_compute_dt in mod_fv_solver.f90), so setting this too small
+  ! silently defeats adaptive stepping -- CFL will sit far below cfl_max
+  ! instead of climbing to it. Set it comfortably above the dt you expect
+  ! the CFL limit to produce.
+  dt = 1.0e-3
+
+  ! End time for simulation
+  t_end = 100.0
+
+  ! CFL cap used when adapt_dt = .true. Recommended: 0.5 for RK3W.
+  cfl_max = 0.5
+
+  ! Enable adaptive time stepping
+  adapt_dt = .false.
+
+  ! Pressure Poisson residual tolerance
+  p_tol = 1.0e-8
+
+  ! Maximum pressure solver iterations per time step
+  p_max_iter = 500
+
+  ! Pressure preconditioner.
+  !
+  !   'boomeramg' (default) - hypre BoomerAMG algebraic multigrid.
+  !       Best choice for large meshes and high MPI rank counts.
+  !       Requires PETSc built with --download-hypre=1 (DOPAMINE_PETSC_WITH_HYPRE=ON).
+  !
+  !   'gamg'                - PETSc native smoothed-aggregation AMG.
+  !       Good for small/medium meshes or when hypre is unavailable.
+  !
+  ! Either solver can be further tuned via &dopamine_PetscParams below.
+  pressure_solver = 'boomeramg'
+
+  ! Gradient reconstruction scheme for velocity, temperature, and scalar fields.
+  !   'LEAST_SQUARES' (default) - weighted least-squares; accurate on skewed meshes.
+  !   'GREEN_GAUSS'             - cell-based Green-Gauss; faster but less accurate.
+  gradient_scheme = 'LEAST_SQUARES'
+
+  ! Currently unused: parsed but not wired into the Poisson absolute tolerance.
+  ! atol is computed internally from a fixed machine-precision floor
+  ! (see solver_init/p_atol_factor in mod_fv_solver.f90); this value has no effect.
+  p_target_divU = 1.0e-8
+
+  ! Enable rotational pressure correction (Brown, Cortez & Minion 2001).
+  !   p^{n+1} = phi - nu.div u*   Reduces splitting error from O(deltat) to O(deltat^2).
+  !   Requires an extra halo exchange per step; negligible cost.
+  !   Recommended for wall-resolved LES and urban flows with no-slip surfaces.
+  !   Default: .true. for improved accuracy on fractional-step schemes.
+  use_rotational_projection = .true.
+
+  ! Maximum number of time steps. 0 = unlimited (simulation runs to t_end).
+  nstep_max = 0
+
+  ! Enable subgrid-scale (SGS) eddy-viscosity model (Vreman 2004 or Dynamic Smagorinsky).
+  !   .true.  - SGS model (selected by sgs_model) active; nu_sgs added to viscous fluxes.
+  !   .false. - DNS mode; no SGS model applied.
+  use_sgs = .true.
+
+  ! Number of iterative Green-Gauss gradient sweeps (only active when
+  ! gradient_scheme = 'GREEN_GAUSS'). Each sweep applies a skewness correction
+  ! using the gradient from the previous iteration.
+  !   1  - single sweep (standard GG, no skewness correction)
+  !   2+ - iterative correction; 2 is sufficient for most meshes
+  gg_iterations = 2
+
+  ! Number of non-orthogonal pressure gradient correction iterations per step.
+  ! The Jasak deferred correction adds the non-orthogonal face flux to the Poisson RHS.
+  !   0  - auto (default): 1 if the mesh is orthogonal, else 2
+  !   1  - single correction pass (sufficient for mildly non-orthogonal meshes)
+  !   2+ - extra passes for highly skewed or non-orthogonal polyhedral meshes
+  n_nonortho_corr = 0
+
+  ! Verbose runtime diagnostics: startup projection-idempotency check, per-report interface
+  ! KE budget/conservation error, and the worst-divergence-cell report. Off by default; the
+  ! periodic performance snapshot (sec/step, every PERF_REPORT_INTERVAL steps) is unaffected.
+  debug_diagnostics = .false.
+/
+
+! PETSc solver fine-tuning options (optional)
+! Each entry is a raw PETSc option string, exactly as you would pass on the
+! command line.  These are injected into PETSc's global options database before
+! KSPSetFromOptions, so they override any programmatic defaults set by dopamine.
+! n_petsc_options = number of options provided (max 32).
+!
+! -- BoomerAMG examples (pressure_solver = 'boomeramg') ---------------------
+!   Override strong threshold (default 0.5; raise to 0.6 for anisotropic meshes,
+!   lower to 0.25 for 2-D problems):
+!     petsc_options_tmp(1) = '-pc_hypre_boomeramg_strong_threshold 0.6'
+!
+!   Switch coarsening algorithm (default HMIS; PMIS is faster but less robust):
+!     petsc_options_tmp(2) = '-pc_hypre_boomeramg_coarsen_type PMIS'
+!
+!   Enable aggressive coarsening (default 0; use for very large meshes):
+!     petsc_options_tmp(3) = '-pc_hypre_boomeramg_agg_nl 1'
+!
+!   Override smoother (default symmetric-sor/jacobi = Sym-GS; see -help for names):
+!     petsc_options_tmp(4) = '-pc_hypre_boomeramg_relax_type_all l1-gauss-seidel'
+!
+! -- GAMG examples (pressure_solver = 'gamg') -------------------------------
+!   Override aggregation threshold (default 0.02):
+!     petsc_options_tmp(1) = '-pc_gamg_threshold 0.05'
+!
+!   Override coarse equation limit per rank (default 200):
+!     petsc_options_tmp(2) = '-pc_gamg_coarse_eq_limit 500'
+!
+! -- Diagnostics (any solver) -----------------------------------------------
+!     petsc_options_tmp(N) = '-ksp_monitor_true_residual'
+!     petsc_options_tmp(N) = '-ksp_view'
+!
+! -- GPU (CUDA) builds, PETSc-GPU branch -------------------------------------
+!   Only the pressure solve runs on GPU (MATAIJCUSPARSE/VECCUDA + BoomerAMG on
+!   device); nothing else in the solver is GPU-accelerated yet. Controlled by
+!   env vars at runtime, not here: DOPAMINE_PETSC_USE_GPU=0 forces CPU PETSc
+!   objects even in a CUDA build; DOPAMINE_PETSC_USE_GPU_AWARE_MPI=0 disables
+!   device-to-device MPI transfers (needed unless your MPI was built with CUDA
+!   support -- most distro packages aren't). See README.md "GPU (CUDA) Build".
+!
+!   If overriding BoomerAMG tuning above while running with
+!   DOPAMINE_PETSC_USE_GPU=1, do not set -pc_hypre_boomeramg_interp_type or
+!   -pc_hypre_boomeramg_coarsen_type to a host-only value (e.g. interp_type
+!   'FF1', 'FF', or 'classical' -- the solver's own CPU-path default is
+!   'FF1', which is exactly the one that crashes on GPU). hypre's setup
+!   segfaults applying a host-only routine to a device-resident matrix. The
+!   GPU path already sets safe defaults (coarsen_type PMIS, interp_type
+!   ext+i, relax_type_all l1scaled-Jacobi); only override with other
+!   GPU-supported values if you need to.
+!
+!   OpenACC: the explicit kernels (advection, viscous, SGS, gradients) carry
+!   !$acc directives and run on-device under nvfortran. No PETSc options or
+!   namelist settings are affected by it -- this is purely a CMake build-time
+!   toggle (DOPAMINE_ENABLE_OPENACC), nothing to set here. See README.md
+!   "OpenACC (nvfortran) Build".
+!
+&dopamine_PetscParams
+  n_petsc_options = 0
+! Uncomment and populate to override defaults, e.g.:
+!  n_petsc_options = 1
+!  petsc_options_tmp(1) = '-pc_hypre_boomeramg_strong_threshold 0.6'
+/
+
+&dopamine_stats
+  ! Global scalar stats cadence (screen + CSV).
+  solver_stats_frequency = 0
+  calc_stats_frequency = 0
+
+  ! Advanced sampling cadence controls.
+  ! These are defaults for objects that do not specify per-object write_frequency.
+  slice_write_frequency = 0
+  probe_write_frequency = 0
+  line_write_frequency  = 0
+  curve_write_frequency = 0
+
+  ! Optional controls used when generating curve samples from
+  ! STL/OBJ surface-plane intersections.
+  intersection_decimate_spacing = 0.0
+  sort_intersection_points = .true.
+/
+
+&dopamine_physics
+  ! Kinematic viscosity [m^2/s]
+  nu = 1.0e-5
+
+  ! Thermal diffusivity [m^2/s]
+  alpha_T = 1.4e-5
+
+  ! Thermal expansion coefficient [1/K] for Boussinesq term
+  beta = 0.0
+
+  ! Reference temperature [K]
+  T_ref = 300.0
+
+  ! Turbulent Prandtl number for SGS scalar flux model
+  Pr_t = 0.85
+
+  ! Gravity vector used by the Boussinesq buoyancy term [m/s^2]
+  gx = 0.0
+  gy = 0.0
+  gz = -9.80665
+
+  ! Constant external body force added to momentum RHS [m/s^2]
+  fx = 0.0
+  fy = 0.0
+  fz = 0.0
+
+  ! Optional rotating-frame Coriolis forcing: -2 * Omega x U
+  use_rotation = .false.
+  omega_x = 0.0
+  omega_y = 0.0
+  omega_z = 0.0
+
+  ! Optional harmonic forcing: A*cos(omega*t + phase) * forcing_dir
+  use_harmonic_forcing = .false.
+  forcing_amp = 0.0
+  forcing_omega = 0.0
+  forcing_phase = 0.0
+  forcing_dir_x = 1.0
+  forcing_dir_y = 0.0
+  forcing_dir_z = 0.0
+
+  ! Enable Boussinesq buoyancy coupling. This also gates temperature transport:
+  ! with .false. the run is isothermal (T stays at T_ref) even when use_abl = .true.,
+  ! and MOST reduces to the neutral log law.
+  boussinesq = .false.
+/
+
+&dopamine_abl
+  ! Atmospheric Boundary Layer (ABL) module for realistic urban flow simulations.
+  ! Provides:
+  !   - Monin-Obukhov Similarity Theory (MOST) stratified wall model
+  !   - Synthetic Eddy Method (SEM) for turbulent inflow generation
+  !   - Davies relaxation (nudging) to large-scale atmospheric profiles
+  !
+  ! The three are independent: enable any combination.
+  !   wall_model  - which wall treatment wallModel patches use
+  !   use_sem     - synthetic-eddy inflow at ablInlet patches
+  !   use_nudging - Davies relaxation to large-scale profiles
+
+  ! Wall treatment for 'wallModel' patches:
+  !   'loglaw' - smooth-wall log law (default). Use for smooth channels and
+  !              canonical LES validation; needs the first cell in the log
+  !              layer, y+ >~ 30.
+  !   'most'   - Monin-Obukhov, rough and/or stratified. Requires z0_m below
+  !              the first cell height; the run stops if y_w <= z0_m.
+  !   'none'   - no wall stress at all (free-slip in effect).
+  wall_model = 'loglaw'
+
+  ! Legacy alias: use_abl = .true. means wall_model = 'most' when wall_model
+  ! is not set. It no longer gates SEM or nudging, which stand on their own.
+  use_abl = .false.
+
+  ! MOST Log-law profile parameters
+  ! Reference wind speed at z_ref [m/s]
+  u_ref = 8.0
+
+  ! Reference height for u_ref [m]
+  z_ref = 100.0
+
+  ! Momentum surface roughness [m]; per-patch patch_z0_m in &dopamine_bc overrides this
+  z0_m = 0.1
+
+  ! Thermal surface roughness [m] (typically z0_h << z0_m)
+  z0_h = 0.01
+
+  ! Surface temperature (fixed or used in wall model) [K]
+  T_surface = 300.0
+
+  ! Reference/background temperature [K] for stability corrections
+  T_ref = 300.0
+
+  ! Obukhov length for stability regime (0=neutral, >0=stable, <0=unstable) [m]
+  ! Seeds the first wall-model call; afterwards each boundary face tracks its own L.
+  L_obukhov = 0.0
+
+  ! Enable dynamic computation of Obukhov length from wall fluxes
+  ! When true, L = u*^2 T/(kappa g T*) is recomputed each step, per face
+  compute_L = .true.
+
+  ! Wind direction (meteorological convention: 270deg = westerly) [degrees]
+  wind_dir_deg = 270.0
+
+  ! - Synthetic Eddy Method (SEM) for turbulent inflow ----------------------
+  ! Enable SEM inflow turbulence generation
+  use_sem = .true.
+
+  ! Number of synthetic eddies to place in recycle box
+  n_eddies = 500
+
+  ! Eddy length scale / box depth. If 0, estimated as 0.1*min inlet-plane span [m]
+  ! When non-zero, overrides automatic estimate.
+  sem_sigma = 0.0
+
+  ! Prescribed inflow profiles. Empty = analytic neutral log law with
+  ! Panofsky-Dutton stress ratios. Otherwise a CSV, '#' comments allowed,
+  ! one row per height, in either of two layouts (detected from the column count):
+  !
+  !   6 columns, wind-aligned:  z  U  uu  vv  ww  uw
+  !     U is a speed along wind_dir_deg; stresses are streamwise/lateral/vertical
+  !     and are rotated into the wind direction with the mean.
+  !
+  !   10 columns, global axes:  z  U  V  W  uu  vv  ww  uv  uw  vw
+  !     Everything is in x,y,z; wind_dir_deg is not applied. Use this for
+  !     measured or WRF-derived data already in domain coordinates.
+  !
+  ! Heights need not be sorted. Values are linearly interpolated in z and
+  ! clamped outside the table range, so extend it past the domain top.
+  ! Stresses are in m2/s2 (kinematic).
+  sem_profile_file = ''
+
+  ! - Davies Relaxation (Nudging) to large-scale profiles ------------------
+  ! Enable nudging relaxation toward time-varying reference profiles
+  use_nudging = .false.
+
+  ! Path to weather profile file (CSV or netCDF format)
+  ! CSV rows must form a rectangular grid: all levels of one time, then the next time.
+  ! CSV columns are [time(s), z(m), u(m/s), v(m/s), w(m/s), T(K)]
+  nudging_file = ''
+
+  ! Relaxation timescale for nudging [s] (e.g., 1800 s for weather models)
+  ! Clamped internally so the explicit relaxation stays stable at the current dt.
+  nudging_tau = 1800.0
+
+  ! Height above which nudging is applied (below: free evolution) [m]
+  nudging_z_start = 0.0
+
+  ! Height of full nudging strength; the coefficient ramps from zero at z_start.
+  ! Leave at 0.0 (or below z_start) for the old hard switch at z_start.
+  nudging_z_full = 0.0
+
+  ! Leave the vertical component unforced. Nudging w damps resolved vertical motion,
+  ! so keep this .true. unless you deliberately want the full vector relaxed.
+  nudging_horizontal_only = .true.
+/
+
+&dopamine_bc
+  ! Number of patch entries used below (max supported = 32)
+  ! This block matches the periodic Taylor-Green mesh from &dopamine_domain
+  ! above, so reference.input parses and starts as one coherent, runnable case
+  ! (generate the mesh first: gmsh -3 -format msh4 examples/taylor_green/taylor_green.geo).
+  ! For a non-periodic case (inlet/outlet/walls), see the BC type aliases documented
+  ! below and examples/channel_flow_retau395/channel.input for a working example.
+  n_patches = 6
+
+  ! Patch names must match boundary patch names in the mesh
+  patch_name(1) = 'periodic_x0'
+  patch_name(2) = 'periodic_xL'
+  patch_name(3) = 'periodic_y0'
+  patch_name(4) = 'periodic_yL'
+  patch_name(5) = 'periodic_z0'
+  patch_name(6) = 'periodic_zL'
+
+  ! BC type per patch.
+  ! Supported aliases:
+  !  velocity | inlet | fixedValue          -> velocity inlet BC
+  !  outlet | fixedPressure | outflow       -> outlet BC
+  !  zeroGradient                           -> zero-gradient BC
+  !  noSlip                                 -> no-slip wall BC
+  !  movingWall | wallVelocity              -> moving wall BC (prescribed velocity)
+  !  wallModel | wall                       -> wall-model BC
+  !  slip                                   -> slip wall BC
+  !  symmetry                               -> symmetry BC
+  !  periodic | cyclic                      -> periodic BC
+  !  fixedTemperature                       -> fixed temperature BC
+  !  ablInlet                               -> ABL turbulent inflow (SEM) BC
+  patch_type(1) = 'periodic'
+  patch_type(2) = 'periodic'
+  patch_type(3) = 'periodic'
+  patch_type(4) = 'periodic'
+  patch_type(5) = 'periodic'
+  patch_type(6) = 'periodic'
+
+  ! Velocity value used by velocity/inlet/fixedValue BC [Ux, Uy, Uz] (unused: no such patch above)
+  patch_U(1,1) = 1.0
+  patch_U(1,2) = 0.0
+  patch_U(1,3) = 0.0
+
+  ! Optional values per patch (used according to BC type); unused by periodic patches.
+  ! Temperature for fixedTemperature BCs; defaults to T_ref when not set
+  patch_T(1) = 300.0
+  patch_T(2) = 300.0
+  patch_T(3) = 300.0
+  patch_T(4) = 300.0
+
+  ! Pressure value for outlet/fixedPressure style BCs; unused by periodic patches.
+  patch_p(1) = 0.0
+  patch_p(2) = 0.0
+  patch_p(3) = 0.0
+  patch_p(4) = 0.0
+
+  ! Per-patch surface roughness [m] for wallModel patches under the ABL MOST wall model.
+  ! Leave at 0 to inherit z0_m / z0_h from &dopamine_abl.
+  ! Typical z0_m: open water 2e-4, short grass 0.02, crops 0.1, forest 1.0, urban 1.5.
+  ! patch_z0_m(3) = 2.0e-4
+  ! patch_z0_m(4) = 1.0
+  ! A negative patch_z0_h derives the thermal roughness from z0_m via kB^-1 = ln(z0_m/z0_h) = 2.
+  ! patch_z0_h(4) = -1.0
+
+  ! Per-patch, per-scalar BC controls for the passive scalars declared in &dopamine_scalars
+  ! (indexed patch_scalar_*(patch, scalar); unused by periodic patches, shown here for patch 3).
+  !   patch_scalar_mode(p,s)  = 'dirichlet' | 'neumann' | 'zeroGradient' (default)
+  !   patch_scalar_value(p,s) = fixed scalar value for dirichlet mode
+  !   patch_scalar_flux(p,s)  = fixed diffusive flux for neumann mode
+  !   patch_scalar_flux_omega/phase(p,s) = optional harmonic modulation of the neumann flux:
+  !     flux(t) = patch_scalar_flux * cos(omega*t + phase)
+  ! patch_scalar_mode(3,1) = 'dirichlet'
+  ! patch_scalar_value(3,1) = 1.0
+  ! patch_scalar_mode(3,2) = 'neumann'
+  ! patch_scalar_flux(3,2) = 0.05
+/
+
+&dopamine_initial_condition
+  ! Initial condition selector.
+  ! Common values used in the code path are 'uniform' and 'taylor_green'.
+  ic_type = 'uniform'
+
+  ! Reference velocity magnitude used by IC setup paths that need it.
+  ic_uref = 1.0
+
+  ! Reference length scale used by IC setup paths that need it.
+  ic_lref = 0.0
+
+  ! Random perturbation amplitude added in IC setup when applicable.
+  noise_level = 0.0
+
+  ! Wall-normal direction index for wall-bounded IC logic (1=x, 2=y, 3=z).
+  wall_normal_direction = 3
+/
+
+&dopamine_output
+  ! Output prefix used for XMF and field files
+  prefix = 'dopamine'
+
+  ! Output cadence in steps; ignored when write_interval < 0 (see write_time below).
+  write_interval = 100
+
+  ! Physical-time output cadence: active when write_interval < 0 and write_time > 0.
+  ! dt is snapped down (never up, so stability is unaffected) to land exactly on
+  ! write_time multiples -- useful for evenly time-spaced snapshots under adapt_dt.
+  write_time = 0.0
+
+  ! HDF5 file locking behavior for NetCDF-4/HDF5 output.
+  ! .false. allows live readers to open files during simulation in many setups.
+  ! .true. keeps strict HDF5 locking semantics.
+  hdf5_use_file_locking = .false.
+
+  ! File that runtime warnings (nu_sgs caps, wall-model matching-point cap, etc.) are appended to.
+  warn_log_file = 'solver_warnings.txt'
+
+  ! How often (in steps) the warning log is flushed to disk.
+  warn_flush_interval = 100
+/
+
+&dopamine_checkpoint
+  ! ===========================================================================
+  ! CHECKPOINT / RESTART CONFIGURATION
+  ! ===========================================================================
+  ! Write/read per-rank binary checkpoint files for fast I/O without collective
+  ! MPI. Ghost cells are excluded (refilled by halo exchange on restart).
+  ! Each rank writes: <output_prefix>/processorR/checkpoint_XXXXXXXX.bin
+  ! Manifest file:   <output_prefix>/checkpoint_latest (step number)
+  !
+  ! WORKFLOW 1: Simple restart (same rank count)
+  ! -------------------------------------------
+  ! Initial run (run1):
+  !   checkpoint_interval = 5000        ! Write checkpoints every 5000 steps
+  !   restart_enabled     = .false.
+  !
+  ! Restart from run1:
+  !   checkpoint_interval = 2500        ! Can change frequency
+  !   restart_enabled     = .true.
+  !   restart_dir         = 'output1'   ! Directory with processorR/checkpoint_*.bin
+  !   restart_step        = -1          ! -1 = auto-read checkpoint_latest
+  !                                      ! or explicit: 10000
+  !
+  ! WORKFLOW 2: Repartition to different rank count
+  ! ------------------------------------------------
+  ! Original run (4 ranks):
+  !   mpirun -np 4 ./dopamine run1.input
+  !   Produces: output1/processorR/checkpoint_*.bin for R=0..3
+  !
+  ! Repartition 4-rank -> 6-rank checkpoints:
+  !   # 1. Pre-decompose mesh for 6 ranks
+  !   mpirun -np 1 ./dopamine-decompose run1.input --nranks 6 \
+  !         --output-dir ./mesh_6ranks
+  !
+  !   # 2. Repartition checkpoint(s) to 6 ranks
+  !   dopamine-checkpoint-partition --old-dir output1 --old-nranks 4 \
+  !                                 --new-dir mesh_6ranks --new-nranks 6 \
+  !                                 --step 10000
+  !
+  !   # 3. Run 6-rank simulation from repartitioned checkpoint
+  !   mpirun -np 6 ./dopamine run1_6ranks.input
+  !   (with restart_enabled = .true., restart_dir = 'mesh_6ranks')
+  !
+  ! ===========================================================================
+
+  ! Enable checkpoint writing during simulation
+  checkpoint_interval = 0
+
+  ! Enable restart from checkpoint
+  restart_enabled = .false.
+
+  ! Directory containing checkpoint files to restart from
+  ! (should have processorR/checkpoint_XXXXXXXX.bin files)
+  restart_dir = ''
+
+  ! Which checkpoint step to load.
+  ! -1 (default) = auto-read checkpoint_latest
+  ! N >= 0      = load checkpoint step N explicitly
+  restart_step = -1
+/
+
+&dopamine_scalars
+  ! Number of additional passive scalars to solve.
+  n_scalars = 2
+
+  ! Optional names used for NetCDF/XMF variable names.
+  scalar_name(1) = 'tracer_a'
+  scalar_name(2) = 'tracer_b'
+
+  ! Molecular diffusivity per scalar [m^2/s].
+  scalar_diffusivity(1) = 1.0e-5
+  scalar_diffusivity(2) = 2.0e-5
+
+  ! Turbulent Prandtl-like closure coefficient per scalar.
+  scalar_pr_t(1) = 1.0
+  scalar_pr_t(2) = 1.0
+
+  ! TVD/convective scheme for passive scalars (C fields only; not temperature).
+  ! To control the temperature advection scheme, use temperature_scheme in
+  ! &dopamine_numerics instead.
+  ! Supported: VANLEER_TVD | KOREN_TVD | QUICK | CENTRAL | CDS
+  scalar_tvd_scheme = 'VANLEER_TVD'
+/
+
+&dopamine_scalar_sources
+  ! Volume/line/surface/point/OBJ-based injection sources for scalars.
+  n_scalar_sources = 2
+
+  ! Source #1: analytic spherical volume source on scalar 1.
+  source_scalar_id(1) = 1
+  source_name(1) = 'sphere_injector'
+  source_kind(1) = 'volume'
+  source_shape(1) = 'sphere'
+  source_center(1,1) = 0.0
+  source_center(1,2) = 0.0
+  source_center(1,3) = 0.0
+  source_radius(1) = 0.10
+  source_magnitude(1) = 5.0
+  source_time_mode(1) = 'constant'
+
+  ! Source #2: OBJ/STL/xyz point-tagged harmonic source on scalar 2.
+  source_scalar_id(2) = 2
+  source_name(2) = 'obj_injector'
+  source_kind(2) = 'obj'
+  source_file(2) = 'injector.obj'
+  source_tag_radius(2) = 0.01
+  source_magnitude(2) = 2.0
+  source_time_mode(2) = 'harmonic'
+  source_omega(2) = 6.283185307179586
+  source_phase(2) = 0.0
+
+  ! source_kind selects the injection geometry; source_shape only applies to the
+  ! 'volume' kind (the default) and picks the volume's shape:
+  !   source_kind:  'volume' (default) | 'point' | 'line' | 'surface'/'plane' | 'obj'/'stl'/'points'
+  !   source_shape: 'sphere' (default, uses source_center/source_radius) |
+  !                 'box'/'aabb' (uses source_box_min/source_box_max) |
+  !                 'plane'/'surface' (uses source_center/source_normal/source_half_thickness,
+  !                                    optionally clipped to a disk of source_radius)
+  ! 'point' uses source_center/source_radius; 'line' uses source_p0/source_p1/source_radius
+  ! (a capsule of that radius around the segment); 'obj' uses source_file/source_tag_radius.
+  ! Uncomment for a box source on scalar 1, in place of/alongside source #1 above:
+  ! source_kind(1) = 'volume'
+  ! source_shape(1) = 'box'
+  ! source_box_min(1,:) = -0.1, -0.1, -0.1
+  ! source_box_max(1,:) =  0.1,  0.1,  0.1
+/
+
+&dopamine_sampling_planes
+  ! Analytic planes sampled on a structured in-plane grid.
+  n_planes = 1
+  plane_name(1) = 'mid_z'
+  plane_origin(1,1) = 0.0
+  plane_origin(1,2) = 0.0
+  plane_origin(1,3) = 0.0
+  plane_normal(1,1) = 0.0
+  plane_normal(1,2) = 0.0
+  plane_normal(1,3) = 1.0
+  plane_tangent_hint(1,1) = 1.0
+  plane_tangent_hint(1,2) = 0.0
+  plane_tangent_hint(1,3) = 0.0
+  plane_half_width(1)  = 0.5
+  plane_half_height(1) = 0.5
+  plane_nx(1) = 64
+  plane_ny(1) = 64
+  plane_write_frequency(1) = 0
+/
+
+&dopamine_sampling_lines
+  ! Analytical line/curve sampling in time (line variant).
+  n_lines = 1
+  line_name(1) = 'centerline_x'
+  line_p0(1,1) = -0.5
+  line_p0(1,2) = 0.0
+  line_p0(1,3) = 0.0
+  line_p1(1,1) =  0.5
+  line_p1(1,2) = 0.0
+  line_p1(1,3) = 0.0
+  line_npts(1) = 256
+  line_write_frequency(1) = 0
+/
+
+&dopamine_sampling_curves
+  ! Curve points loaded from ASCII xyz (one point per line), OBJ vertices, or ASCII STL vertices.
+  n_curves = 0
+  curve_name(1) = 'curve_a'
+  curve_file(1) = 'curve_points.xyz'
+  curve_write_frequency(1) = 0
+/
+
+&dopamine_sampling_surfaces
+  ! Surface probes loaded from OBJ/STL/xyz point clouds and sampled on the fly.
+  n_surfaces = 0
+  surface_name(1) = 'body_surface'
+  surface_file(1) = 'body.stl'
+  surface_write_frequency(1) = 0
+  surface_intersect_with_planes(1) = .true.
+  surface_intersection_decimate_spacing(1) = 0.0
+  surface_sort_intersection_points(1) = .true.
+/

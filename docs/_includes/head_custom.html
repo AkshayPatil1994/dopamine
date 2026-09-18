@@ -1,0 +1,18 @@
+<!-- SPDX-FileCopyrightText: 2026 DOPAMINE contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- MathJax for $...$ / $$...$$ equations in theory.md and usage.md. -->
+<script>
+  MathJax = {
+    tex: {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$', '$$'], ['\\[', '\\]']]
+    }
+  };
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.2/es5/tex-mml-chtml.min.js"></script>
+
+<!-- Client-side rendering of pandoc-style [@key] citations (no citeproc on GitHub Pages). -->
+<script>
+  window.DOPAMINE_REFERENCES = {{ site.data.references | jsonify }};
+</script>
+<script src="{{ '/assets/js/citations.js' | relative_url }}"></script>

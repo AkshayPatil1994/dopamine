@@ -1,0 +1,32 @@
+# Build directories
+build/
+build-gpu/
+build-acc/
+build-acc26/
+external/
+external-gpu/
+external-acc/
+external-acc26/
+docs/external-lib-guidance/
+docs/build/
+
+# Fortran module files
+*.mod
+
+# Documentation
+*.pdf
+*.html
+!docs/_includes/*.html
+
+# Output files
+*.nc
+*.xmf
+*.csv
+
+# IDE and editor files
+.vscode/
+.claude/
+.venv/
+
+# macOS
+.DS_Store

@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: 2026 DOPAMINE contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# GitHub Pages config: publish this repo with Pages source set to
+# "Deploy from a branch" -> branch "main" (or your default), folder "/docs".
+# GitHub Pages runs Jekyll automatically on that folder; no separate build
+# step is required for the Pages site (the Pandoc PDF/HTML manual built by
+# build.sh is a second, independent output — see README.md).
+
+title: DOPAMINE
+description: >-
+  DOPAMINE — Discrete Operator-based Parallel Algorithm for Modeling
+  Incompressible Navier-Stokes Equations. Theory, usage, and development
+  documentation.
+url: "https://akshaypatil1994.github.io"
+baseurl: "/dopamine"
+
+remote_theme: just-the-docs/just-the-docs
+plugins:
+  - jekyll-remote-theme
+
+# just-the-docs settings
+color_scheme: light
+search_enabled: true
+heading_anchors: true
+nav_sort: default
+back_to_top: true
+back_to_top_text: "Back to top"
+
+aux_links:
+  "DOPAMINE on GitHub":
+    - "https://github.com/AkshayPatil1994/dopamine"
+
+footer_content: >-
+  DOPAMINE is licensed under AGPL-3.0-only. See <a href="https://github.com/AkshayPatil1994/dopamine/blob/main/LICENSE">LICENSE</a>.
+
+# MathJax rendering for the $$...$$ / $...$ equations used throughout
+# theory.md and usage.md is injected via docs/_includes/head_custom.html
+# (just-the-docs has no built-in math support).
+
+# remote_theme does not inherit the theme's own _config.yml defaults, so
+# "layout: default" must be set explicitly here or every page renders as a
+# bare content fragment with no theme CSS (unstyled headings/links).
+defaults:
+  - scope:
+      path: ""
+      type: "pages"
+    values:
+      layout: "default"
+
+exclude:
+  - build/
+  - build.sh
+  - build_manual_tmp.md
+  - references.bib
+  - external-lib-guidance/
+  - manual.md
+  - Gemfile
+  - Gemfile.lock

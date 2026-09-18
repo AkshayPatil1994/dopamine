@@ -1,0 +1,158 @@
+# SPDX-FileCopyrightText: 2026 DOPAMINE contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Bibliography metadata for the [@key] citations used across theory.md and
+# usage.md. This is the Jekyll-side counterpart to references.bib (used by
+# build.sh/Pandoc for the standalone manual) — keep entries actually cited
+# in sync between the two. Rendered client-side by assets/js/citations.js.
+
+williamson1980:
+  authors: "J. H. Williamson"
+  title: "Low-storage Runge-Kutta schemes"
+  venue: "Journal of Computational Physics, vol. 35, no. 1, pp. 48-56"
+  year: 1980
+  doi: "10.1016/0021-9991(80)90033-9"
+
+chorin1968:
+  authors: "A. J. Chorin"
+  title: "Numerical solution of the Navier-Stokes equations"
+  venue: "Mathematics of Computation, vol. 22, no. 104, pp. 745-762"
+  year: 1968
+  doi: "10.1090/S0025-5718-1968-0242392-2"
+
+kim1985:
+  authors: "J. Kim and P. Moin"
+  title: "Application of a fractional-step method to incompressible Navier-Stokes equations"
+  venue: "Journal of Computational Physics, vol. 59, no. 2, pp. 308-323"
+  year: 1985
+  doi: "10.1016/0021-9991(85)90148-2"
+
+perot1993:
+  authors: "J. B. Perot"
+  title: "An analysis of the fractional step method"
+  venue: "Journal of Computational Physics, vol. 108, no. 1, pp. 51-58"
+  year: 1993
+  doi: "10.1006/jcph.1993.1162"
+
+morinishi1998:
+  authors: "Y. Morinishi, T. S. Lund, O. V. Vasilyev, and P. Moin"
+  title: "Fully conservative higher order finite difference schemes for incompressible flow"
+  venue: "Journal of Computational Physics, vol. 143, no. 1, pp. 90-124"
+  year: 1998
+  doi: "10.1006/jcph.1998.5962"
+
+verstappen2003:
+  authors: "R. Verstappen and A. Veldman"
+  title: "Symmetry-preserving discretization of turbulent flow"
+  venue: "Journal of Computational Physics, vol. 187, no. 1, pp. 343-368"
+  year: 2003
+  doi: "10.1016/S0021-9991(03)00126-8"
+
+vanleer1974:
+  authors: "B. van Leer"
+  title: "Towards the ultimate conservative difference scheme. II. Monotonicity and conservation combined in a second-order scheme"
+  venue: "Journal of Computational Physics, vol. 14, no. 4, pp. 361-370"
+  year: 1974
+  doi: "10.1016/0021-9991(74)90019-9"
+
+sweby1984:
+  authors: "P. K. Sweby"
+  title: "High resolution schemes using flux limiters for hyperbolic conservation laws"
+  venue: "SIAM Journal on Numerical Analysis, vol. 21, no. 5, pp. 995-1011"
+  year: 1984
+  doi: "10.1137/0721062"
+
+koren1993:
+  authors: "B. Koren"
+  title: "A Robust Upwind Discretization Method for Advection, Diffusion and Source Terms"
+  venue: "Centrum voor Wiskunde en Informatica, report NM-R9308"
+  year: 1993
+
+leonard1979:
+  authors: "B. P. Leonard"
+  title: "A stable and accurate convective modelling procedure based on quadratic upstream interpolation"
+  venue: "Computer Methods in Applied Mechanics and Engineering, vol. 19, no. 1, pp. 59-98"
+  year: 1979
+  doi: "10.1016/0045-7825(79)90034-3"
+
+jasak1996:
+  authors: "H. Jasak"
+  title: "Error Analysis and Estimation for the Finite Volume Method with Applications to Fluid Flows"
+  venue: "PhD thesis, Imperial College London"
+  year: 1996
+
+moukalled2016:
+  authors: "F. Moukalled, L. Mangani, and M. Darwish"
+  title: "The Finite Volume Method in Computational Fluid Dynamics: An Advanced Introduction with OpenFOAM and Matlab"
+  venue: "Springer"
+  year: 2016
+  doi: "10.1007/978-3-319-16874-6"
+
+vreman2004:
+  authors: "B. Vreman"
+  title: "An eddy-viscosity subgrid-scale model for turbulent shear flow: Algebraic theory and applications"
+  venue: "Physics of Fluids, vol. 16, no. 10, pp. 3670-3681"
+  year: 2004
+  doi: "10.1063/1.1785131"
+
+germano1991:
+  authors: "M. Germano, U. Piomelli, P. Moin, and W. H. Cabot"
+  title: "A dynamic subgrid-scale eddy viscosity model"
+  venue: "Physics of Fluids A, vol. 3, no. 7, pp. 1760-1765"
+  year: 1991
+  doi: "10.1063/1.857955"
+
+lilly1992:
+  authors: "D. K. Lilly"
+  title: "A proposed modification of the Germano subgrid-scale closure method"
+  venue: "Physics of Fluids A, vol. 4, no. 3, pp. 633-635"
+  year: 1992
+  doi: "10.1063/1.858280"
+
+piomelli2002:
+  authors: "U. Piomelli and E. Balaras"
+  title: "Wall-layer models for large-eddy simulations"
+  venue: "Annual Review of Fluid Mechanics, vol. 34, no. 1, pp. 349-374"
+  year: 2002
+  doi: "10.1146/annurev.fluid.34.082901.144919"
+
+monin1954:
+  authors: "A. S. Monin and A. M. Obukhov"
+  title: "The basic laws of turbulent mixing in the ground layer of the atmosphere"
+  venue: "Trudy Geofiz. Inst., Akad. Nauk. SSSR, vol. 24, no. 151, pp. 163-187"
+  year: 1954
+
+businger1971:
+  authors: "J. A. Businger, J. C. Wyngaard, Y. Izumi, and E. F. Bradley"
+  title: "Flux-profile relationships in the atmospheric surface layer"
+  venue: "Journal of the Atmospheric Sciences, vol. 28, no. 2, pp. 181-189"
+  year: 1971
+  doi: "10.1175/1520-0469(1971)028<0181:FPRITA>2.0.CO;2"
+
+poletto2013:
+  authors: "R. Poletto, T. Craft, and A. Revell"
+  title: "A new divergence free synthetic eddy method for the reproduction of inlet flow conditions for LES"
+  venue: "Flow, Turbulence and Combustion, vol. 91, no. 3, pp. 519-539"
+  year: 2013
+  doi: "10.1007/s10494-013-9488-2"
+
+davies1976:
+  authors: "H. C. Davies"
+  title: "A lateral boundary formulation for multi-level prediction models"
+  venue: "Quarterly Journal of the Royal Meteorological Society, vol. 102, no. 432, pp. 405-418"
+  year: 1976
+  doi: "10.1002/qj.49710243210"
+
+bader2012:
+  authors: "M. Bader"
+  title: "Space-Filling Curves: An Introduction with Applications in Scientific Computing"
+  venue: "Springer"
+  year: 2012
+  doi: "10.1007/978-3-642-31046-1"
+
+balay2021petsc:
+  authors: "S. Balay and others"
+  title: "PETSc/TAO Users Manual"
+  venue: "Argonne National Laboratory Report ANL-21/39 - Revision 3.16"
+  year: 2021
+  doi: "10.2172/2205494"

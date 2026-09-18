@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/AkshayPatil1994/dopamine/tree/main/docs
+    about: Theory, usage, and development guides (also published via GitHub Pages).

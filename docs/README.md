@@ -1,0 +1,69 @@
+<!-- SPDX-FileCopyrightText: 2026 DOPAMINE contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+
+# DOPAMINE Documentation
+
+This folder contains user and method documentation for DOPAMINE. It is
+published in two independent ways from the same source files:
+
+1. **GitHub Pages**, served directly from this folder (Settings → Pages →
+   Deploy from a branch → folder `/docs`) using Jekyll + the
+   [just-the-docs](https://just-the-docs.com) theme (`_config.yml`).
+2. **A standalone PDF/HTML manual**, built locally with Pandoc (`build.sh`).
+
+Both outputs are generated from the same three pages, so a heading added to
+one of them shows up in both the Pages sidebar and the manual's table of
+contents.
+
+## Files
+
+- `index.md`: GitHub Pages home page (not included in the Pandoc manual).
+- `theory.md`: Governing equations, time integration, advection/gradient/
+  diffusion methods, SGS/wall modeling, atmospheric boundary layer (MOST,
+  SEM, Davies relaxation), mesh partitioning, and pressure backend details
+  with method-specific citations.
+- `usage.md`: Build/run workflow, input structure, advection naming,
+  recommended numerics, ABL setup (MOST wall model, SEM inflow, nudging),
+  and long-time stability checks.
+- `development.md`: Code layout, build system internals, testing, coding
+  style, how to add a scheme/BC/ABL feature, git workflow, and how to report
+  bugs.
+- `manual.md`: Legacy Pandoc title-page/outline stub kept for reference; the
+  actual manual content is assembled directly by `build.sh` (see below), not
+  by processing this file.
+- `references.bib`: DOI-backed bibliography used by Pandoc citeproc.
+- `build.sh`: Concatenates `usage.md` + `theory.md` + `development.md`
+  (front matter stripped) behind a single title block, then renders HTML and
+  PDF with table of contents and citation processing via Pandoc.
+- `_config.yml`, `_includes/head_custom.html`: Jekyll/just-the-docs
+  configuration for the GitHub Pages site (theme, nav, search, MathJax).
+- `external-lib-guidance/`: Reference notes for DOPAMINE's external
+  dependencies (GKlib, METIS, PETSc) and a PETSc GPU porting plan
+  (gitignored; not published to Pages or the manual).
+
+## Build the standalone manual
+
+From repository root:
+
+```bash
+bash docs/build.sh
+```
+
+Outputs:
+
+- `docs/build/dopamine_manual.html`
+- `docs/build/dopamine_manual.pdf`
+
+Requires `pandoc`, and `lualatex` (e.g. from a TeX Live install) for the PDF
+target.
+
+## Preview the GitHub Pages site locally
+
+```bash
+cd docs
+bundle exec jekyll serve
+```
+
+Requires Ruby + Bundler and a `Gemfile` with `github-pages` (or `jekyll` plus
+`jekyll-remote-theme`) — not checked in, since GitHub Pages itself needs none
+of this locally; add one only if you want to preview before pushing.

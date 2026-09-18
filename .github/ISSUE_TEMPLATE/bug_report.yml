@@ -1,0 +1,80 @@
+name: Bug report
+description: Report incorrect, unstable, or crashing solver behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. See `docs/development.md`'s "Reporting
+        Issues and Bugs" section for why each field below matters — most
+        numerics bugs in this codebase have turned out to be
+        interpolant/coefficient inconsistencies that only show up at
+        specific mesh skewness, rank counts, or scheme combinations, so the
+        reproduction details are usually the fastest path to root cause.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+
+  - type: input
+    id: branch-commit
+    attributes:
+      label: Branch and commit
+      description: Output of `git rev-parse --abbrev-ref HEAD` and `git rev-parse --short HEAD`.
+      placeholder: "e.g. PETSc-GPU @ 4968e5e"
+    validations:
+      required: true
+
+  - type: textarea
+    id: build-config
+    attributes:
+      label: Build configuration
+      description: >-
+        CMake flags used (DOPAMINE_ENABLE_PETSC, DOPAMINE_PETSC_WITH_CUDA,
+        DOPAMINE_FETCH_PETSC, etc.), compiler and version, and whether this
+        is the CPU, GPU (CUDA), or OpenACC build path.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: input-file
+    attributes:
+      label: Input file / minimal reproduction
+      description: >-
+        The exact input file, or a minimal namelist that reproduces the
+        issue. Prefer a small case (mesh size, extent) over a large
+        production mesh.
+      render: fortran
+    validations:
+      required: true
+
+  - type: input
+    id: rank-count
+    attributes:
+      label: Rank / process count
+      description: MPI rank count (`mpirun -np N`) and OMP_NUM_THREADS if set.
+      placeholder: "e.g. -np 8, OMP_NUM_THREADS=4"
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Runtime diagnostics
+      description: >-
+        For a suspected divergence-control or conservation regression,
+        include max|divU|, pressure residual (p_resid_max), and kinetic
+        energy E from the solver log around the point of failure, ideally
+        compared against a known-good commit.
+      render: text
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Mesh source (gmsh/OpenFOAM/preprocessed), advection/gradient scheme names, ABL settings, or other context.
