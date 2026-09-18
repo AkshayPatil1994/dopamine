@@ -13,7 +13,7 @@ description: >-
   Incompressible Navier-Stokes Equations. Theory, usage, and development
   documentation.
 url: "https://akshaypatil1994.github.io"
-baseurl: "/dopamine"
+baseurl: ""
 
 remote_theme: just-the-docs/just-the-docs
 plugins:
