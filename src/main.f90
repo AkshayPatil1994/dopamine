@@ -148,7 +148,7 @@ program dopamine_main
     ! Build local connectivity and geometry
     call mesh_local%build_connectivity()
     call mesh_local%compute_geometry()
-    ! mesh_global is destroyed inside partition_mesh_hilbert on rank 0
+    ! mesh_global is destroyed inside partition_mesh_morton on rank 0
   else
     if (rank == 0) write(*, '(A)') ' Single-rank: no partitioning needed.'
     mesh_local = mesh_global

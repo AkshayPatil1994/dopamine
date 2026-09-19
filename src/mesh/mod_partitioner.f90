@@ -9,9 +9,9 @@ module mod_partitioner
   implicit none
   private
 
-  public :: partition_mesh, build_hilbert_partition
+  public :: partition_mesh, build_morton_partition
   public :: pack_global_mesh, sort_and_offset_partition, build_local_partition_mesh
-  public :: compute_hilbert_key
+  public :: compute_morton_key
 
 contains
 
@@ -30,13 +30,13 @@ contains
       return
     end if
 
-    call partition_mesh_hilbert(mesh_global, mesh_local, comm)
+    call partition_mesh_morton(mesh_global, mesh_local, comm)
 
   end subroutine partition_mesh
 
 
-  !> Build a Hilbert space-filling curve partition; cell_centroid must be broadcast to every rank first.
-  subroutine build_hilbert_partition(nc, nranks, rank, cell_centroid, part, cell_volume, weight_by_volume)
+  !> Build a Morton (Z-order) space-filling curve partition; cell_centroid must be broadcast to every rank first.
+  subroutine build_morton_partition(nc, nranks, rank, cell_centroid, part, cell_volume, weight_by_volume)
     integer(ip), intent(in)  :: nc, nranks, rank
     real(rp), intent(in)     :: cell_centroid(3, nc)
     real(rp), intent(in), optional :: cell_volume(nc)
@@ -47,7 +47,7 @@ contains
     real(rp)    :: avg_cnt, xmin, xmax, ymin, ymax, zmin, zmax, scale
     real(rp)    :: total_volume, target_volume, cumul_volume
     integer(ip), allocatable :: idx(:), part_counts(:)
-    integer(lp), allocatable :: hilbert_keys(:)
+    integer(lp), allocatable :: morton_keys(:)
     logical :: use_load_balance
 
     ! Guard against zero-size array (nc == 0)
@@ -69,15 +69,15 @@ contains
     ! Expand slightly to avoid boundary cells mapping to 2^order
     scale = max(xmax - xmin, ymax - ymin, zmax - zmin) * 1.001_rp + 1.0e-14_rp
 
-    ! Compute Hilbert keys for all cells
-    allocate(hilbert_keys(nc), idx(nc))
+    ! Compute Morton keys for all cells
+    allocate(morton_keys(nc), idx(nc))
     do i = 1, nc
-      hilbert_keys(i) = compute_hilbert_key(cell_centroid(1:3, i), &
+      morton_keys(i) = compute_morton_key(cell_centroid(1:3, i), &
                                             [xmin, ymin, zmin], scale)
     end do
 
-    ! Argsort by Hilbert key
-    call argsort_int64(hilbert_keys, idx)
+    ! Argsort by Morton key
+    call argsort_int64(morton_keys, idx)
 
     ! Assign sorted cells to ranks
     if (use_load_balance) then
@@ -123,13 +123,13 @@ contains
       deallocate(part_counts)
     end if
 
-    deallocate(idx, hilbert_keys)
+    deallocate(idx, morton_keys)
 
-  end subroutine build_hilbert_partition
+  end subroutine build_morton_partition
 
-  !> Compute 3D Hilbert curve index for a point.
+  !> Compute 3D Morton curve index for a point.
   !> Normalized coordinates in [xmin, xmin+scale) mapped to integer space.
-  function compute_hilbert_key(xyz, origin, scale) result(key)
+  function compute_morton_key(xyz, origin, scale) result(key)
     real(rp), intent(in)  :: xyz(3), origin(3), scale
     integer(lp)           :: key
 
@@ -151,29 +151,29 @@ contains
     z = iz
     h = 0_lp
 
-    ! 3D Hilbert curve: process bits from MSB to LSB with rotation
+    ! 3D Morton (Z-order) curve: interleave bits from MSB to LSB
     do i = ORDER - 1, 0, -1
       rx = ibits(x, i, 1)
       ry = ibits(y, i, 1)
       rz = ibits(z, i, 1)
 
-      ! Compute Hilbert index bit using rotation
-      h = h * 8_lp + int(hilbert_combine_bits(rx, ry, rz), lp)
+      ! Append the 3-bit octant index for this level
+      h = h * 8_lp + int(morton_combine_bits(rx, ry, rz), lp)
     end do
 
     key = h
 
-  end function compute_hilbert_key
+  end function compute_morton_key
 
-  !> Combine 3 bits into Hilbert index with rotation.
-  pure function hilbert_combine_bits(rx, ry, rz) result(h_idx)
+  !> Combine 3 bits into a Morton octant index.
+  pure function morton_combine_bits(rx, ry, rz) result(h_idx)
     integer(ip), intent(in) :: rx, ry, rz
     integer(ip) :: h_idx
 
-    ! Map (rx, ry, rz) to Hilbert octant index [0..7]
+    ! Map (rx, ry, rz) to Morton octant index [0..7]
     h_idx = ior(ior(ishft(rx, 2), ishft(ry, 1)), rz)
 
-  end function hilbert_combine_bits
+  end function morton_combine_bits
 
   !> Argsort array of 64-bit integers using quicksort, return indices in ascending order.
   subroutine argsort_int64(arr, idx)
@@ -187,13 +187,13 @@ contains
       idx(i) = i
     end do
 
-    ! Use radix sort for Hilbert keys (5-10x faster than quicksort for uniformly distributed keys)
+    ! Use radix sort for Morton keys (5-10x faster than quicksort for uniformly distributed keys)
     call radix_sort_int64(arr, idx, n)
 
   end subroutine argsort_int64
 
   !> Radix sort for 64-bit integers using counting sort by bytes (256 radices).
-  !> O(8*n) complexity, much faster than quicksort for uniformly distributed keys like Hilbert curves.
+  !> O(8*n) complexity, much faster than quicksort for uniformly distributed keys like Morton curves.
   subroutine radix_sort_int64(arr, idx, n)
     integer(ip), intent(in)    :: n
     integer(lp), intent(in)    :: arr(:)
@@ -1319,9 +1319,9 @@ contains
     call compute_rank_offsets(cell_order, part, nc, nranks, rank_offsets)
   end subroutine sort_and_offset_partition
 
-  !> Hilbert space-filling curve partitioning with memory-efficient local mesh distribution.
+  !> Morton (Z-order) space-filling curve partitioning with memory-efficient local mesh distribution.
   !> Only rank 0 builds/holds global mesh. Non-zero ranks receive their local mesh via MPI.
-  subroutine partition_mesh_hilbert(mesh_global, mesh_local, comm)
+  subroutine partition_mesh_morton(mesh_global, mesh_local, comm)
     type(Mesh), intent(inout) :: mesh_global, mesh_local
     type(MPI_Comm), intent(in) :: comm
 
@@ -1414,7 +1414,7 @@ contains
       call MPI_Bcast(face_vertices, total_face_conn, MPI_INTEGER, 0, comm, ierr)
     end if
 
-    ! --- Broadcast cell centroids only (needed for Hilbert SFC) ---
+    ! --- Broadcast cell centroids only (needed for Morton SFC) ---
     allocate(cell_centroid(3, nc))
     if (rank == 0) then
       do i = 1, nc
@@ -1424,11 +1424,11 @@ contains
 
     call MPI_Bcast(cell_centroid, 3*nc, MPI_DOUBLE_PRECISION, 0, comm, ierr)
 
-    if (rank == 0) write(*, '(A)') ' [HILBERT] Computing partition from centroids...'
+    if (rank == 0) write(*, '(A)') ' [MORTON] Computing partition from centroids...'
 
-    ! --- All ranks compute Hilbert partition ---
+    ! --- All ranks compute Morton partition ---
     allocate(part(nc))
-    call build_hilbert_partition(nc, nranks, rank, cell_centroid, part)
+    call build_morton_partition(nc, nranks, rank, cell_centroid, part)
 
     ! --- b: Rank 0 sorts cells by partition for efficient rank-contiguous processing ---
     if (rank == 0) then
@@ -1436,9 +1436,9 @@ contains
       do i = 1, nc
         cell_order(i) = i
       end do
-      if (rank == 0) write(*, '(A)') ' [HILBERT] Sorting cells by partition (quicksort)...'
+      if (rank == 0) write(*, '(A)') ' [MORTON] Sorting cells by partition (quicksort)...'
       call quicksort_cells_by_partition(cell_order, part, 1, nc)
-      if (rank == 0) write(*, '(A)') ' [HILBERT] Computing rank offsets...'
+      if (rank == 0) write(*, '(A)') ' [MORTON] Computing rank offsets...'
       call compute_rank_offsets(cell_order, part, nc, nranks, rank_offsets)
     end if
 
@@ -1534,9 +1534,9 @@ contains
 
     call MPI_Barrier(comm, ierr)
 
-    if (rank == 0) write(*, '(A)') ' [HILBERT] Partitioning complete.'
+    if (rank == 0) write(*, '(A)') ' [MORTON] Partitioning complete.'
 
-  end subroutine partition_mesh_hilbert
+  end subroutine partition_mesh_morton
 
   !> Send a local mesh from rank 0 to a destination rank.
   !> Serializes mesh data and sends via MPI.

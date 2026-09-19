@@ -156,7 +156,7 @@ contains
 
     ! Validate mesh_type
     select case (trim(config%mesh_type))
-    case ('gmsh', 'openfoam', 'foam', 'preprocessed')
+    case ('gmsh', 'openfoam', 'foam', 'icem', 'fluent', 'cgns', 'preprocessed')
       ! Valid types
     case default
       write(*, '(A,A)') 'WARNING: unrecognized mesh_type: ', trim(config%mesh_type)

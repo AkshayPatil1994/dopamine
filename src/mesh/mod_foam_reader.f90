@@ -74,10 +74,10 @@ contains
 
     ! Compute face geometry
     do f = 1, n_faces
-      call compute_foam_face_geometry(f, face_pts, face_offset, points, &
-                                       msh%faces(f)%centre, &
-                                       msh%faces(f)%normal, &
-                                       msh%faces(f)%area)
+      call compute_polygon_face_geometry(f, face_pts, face_offset, points, &
+                                          msh%faces(f)%centre, &
+                                          msh%faces(f)%normal, &
+                                          msh%faces(f)%area)
       msh%faces(f)%sf = msh%faces(f)%area * msh%faces(f)%normal
     end do
 
@@ -87,7 +87,7 @@ contains
       msh%cells(c)%volume   = 0.0_rp
       msh%global_id(c)      = int(c, lp)
     end do
-    call compute_cell_centroids_volumes(msh, n_cells, n_faces, face_pts, face_offset, points)
+    call compute_polyhedron_cell_moments(msh, n_cells, n_faces, face_pts, face_offset, points)
 
     ! Read boundary patches
     call foam_read_boundary(trim(polyMesh_dir)//'/boundary', msh, n_int_faces)
@@ -474,97 +474,6 @@ contains
     end do
     close(iunit)
   end subroutine foam_read_boundary
-
-  !> Compute cell centroids and volumes from face-triangulated signed moments.
-  subroutine compute_cell_centroids_volumes(msh, n_cells, n_faces, face_pts, face_offset, points)
-    type(Mesh),  intent(inout) :: msh
-    integer(ip), intent(in)    :: n_cells, n_faces
-    integer(ip), intent(in)    :: face_pts(:), face_offset(:)
-    real(rp),    intent(in)    :: points(:,:)
-    integer(ip) :: f, o, nb, start_idx, end_idx, i
-    real(rp)    :: v0(3), v1(3), v2(3), signed_vol, signed_moment(3)
-    real(rp)    :: cell_moment(3, n_cells)
-
-    cell_moment = 0.0_rp
-
-    do f = 1, n_faces
-      o  = msh%faces(f)%owner
-      nb = msh%faces(f)%neighbour
-      start_idx = face_offset(f)
-      end_idx   = face_offset(f + 1) - 1
-      if (end_idx - start_idx + 1 < 3) cycle
-
-      v0 = points(:, face_pts(start_idx))
-      do i = start_idx + 1, end_idx - 1
-        v1 = points(:, face_pts(i))
-        v2 = points(:, face_pts(i + 1))
-        signed_vol = dot_product(v0, cross3(v1, v2)) / 6.0_rp
-        signed_moment = signed_vol * (v0 + v1 + v2) / 4.0_rp
-
-        msh%cells(o)%volume = msh%cells(o)%volume + signed_vol
-        cell_moment(:, o)   = cell_moment(:, o) + signed_moment
-
-        if (nb >= 1) then
-          msh%cells(nb)%volume = msh%cells(nb)%volume - signed_vol
-          cell_moment(:, nb)   = cell_moment(:, nb) - signed_moment
-        end if
-      end do
-    end do
-
-    do f = 1, n_cells
-      if (abs(msh%cells(f)%volume) > SMALL) then
-        msh%cells(f)%centroid = cell_moment(:, f) / msh%cells(f)%volume
-      else
-        msh%cells(f)%centroid = 0.0_rp
-      end if
-      msh%cells(f)%volume = abs(msh%cells(f)%volume)
-    end do
-  end subroutine compute_cell_centroids_volumes
-
-  subroutine compute_foam_face_geometry(f, face_pts, face_offset, points, &
-                                         centre, normal, area)
-    integer(ip), intent(in)  :: f, face_pts(:), face_offset(:)
-    real(rp),    intent(in)  :: points(:,:)
-    real(rp),    intent(out) :: centre(3), normal(3), area
-
-    integer(ip) :: i, nn, ni, ni1
-    real(rp)    :: pref(3), p_i(3), p_i1(3), tri_vec(3), n_acc(3)
-    real(rp)    :: tri_area, area_sum, tri_centroid(3)
-
-    nn = face_offset(f+1) - face_offset(f)
-    centre = 0.0_rp
-    n_acc = 0.0_rp
-    area_sum = 0.0_rp
-
-    if (nn < 3) then
-      area = SMALL
-      normal = 0.0_rp
-      return
-    end if
-
-    pref = points(:, face_pts(face_offset(f)))
-    do i = face_offset(f) + 1, face_offset(f + 1) - 2
-      ni  = face_pts(i)
-      ni1 = face_pts(i + 1)
-      p_i  = points(:, ni)
-      p_i1 = points(:, ni1)
-      tri_vec = 0.5_rp * cross3(p_i - pref, p_i1 - pref)
-      tri_area = sqrt(sum(tri_vec**2))
-      if (tri_area <= SMALL) cycle
-      tri_centroid = (pref + p_i + p_i1) / 3.0_rp
-      centre = centre + tri_area * tri_centroid
-      area_sum = area_sum + tri_area
-      n_acc = n_acc + tri_vec
-    end do
-
-    area  = sqrt(sum(n_acc**2)) + SMALL
-    normal = n_acc / area
-    if (area_sum > SMALL) then
-      centre = centre / area_sum
-    else
-      centre = pref
-    end if
-  end subroutine compute_foam_face_geometry
 
   subroutine build_cell_topology_metadata(msh, points, face_pts, face_offset, owner, neighbour, n_points, n_faces, n_cells)
     type(Mesh),       intent(inout) :: msh
@@ -1255,14 +1164,5 @@ contains
       bc_type_to_id = BC_ZEROGRADIENT
     end select
   end function bc_type_to_id
-
-  pure function cross3(a, b) result(c)
-    real(rp), intent(in) :: a(3), b(3)
-    real(rp) :: c(3)
-
-    c(1) = a(2) * b(3) - a(3) * b(2)
-    c(2) = a(3) * b(1) - a(1) * b(3)
-    c(3) = a(1) * b(2) - a(2) * b(1)
-  end function cross3
 
 end module mod_foam_reader

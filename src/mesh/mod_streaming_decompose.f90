@@ -1,16 +1,18 @@
 ! SPDX-FileCopyrightText: 2026 DOPAMINE contributors
 ! SPDX-License-Identifier: AGPL-3.0-only
-!> Streaming multi-pass Hilbert-based mesh decomposition for large meshes.
+!> Streaming multi-pass Morton-ordered mesh decomposition for large meshes.
 module mod_streaming_decompose
   use mod_kinds
   use mod_mesh
   use mod_gmsh_reader
   use mod_foam_reader
+  use mod_icem_reader
+  use mod_cgns_reader
   use mod_mesh_io
   use mod_bc,           only: BCConfig
   use mod_bc_setup,     only: build_bc_configs
   use mod_input_parser
-  use mod_partitioner,  only: build_hilbert_partition, pack_global_mesh, sort_and_offset_partition, &
+  use mod_partitioner,  only: build_morton_partition, pack_global_mesh, sort_and_offset_partition, &
                               build_local_partition_mesh
   use mod_nonconforming, only: enforce_face_conformity
   use mpi_f08
@@ -103,6 +105,10 @@ contains
       call gmsh_read(trim(mesh_path), mesh_global)
     case ('openfoam', 'foam')
       call foam_read(trim(mesh_path), mesh_global)
+    case ('icem', 'fluent')
+      call icem_read(trim(mesh_path), mesh_global)
+    case ('cgns')
+      call cgns_read(trim(mesh_path), mesh_global)
     case default
       write(*, '(A)') 'ERROR: unknown mesh_type '//trim(config%mesh_type)
       error stop 'decompose_streaming: unknown mesh_type'
@@ -254,11 +260,11 @@ contains
         ' s  |  Total elapsed: ', real(t_now - t_wall_start, rp)/real(clock_rate, rp), ' s'
     t_step_start = t_now
 
-    ! Pass 3: Compute Hilbert partition with volume-weighted load balancing
+    ! Pass 3: Compute Morton partition with volume-weighted load balancing
     write(*, '(A)') ' '
-    write(*, '(A)') ' [4/6]  Partitioning mesh (Hilbert SFC)...'
+    write(*, '(A)') ' [4/6]  Partitioning mesh (Morton SFC)...'
     allocate(part(nc))
-    call build_hilbert_partition(nc, nranks_target, 0, cell_centroid, part, cell_volume, &
+    call build_morton_partition(nc, nranks_target, 0, cell_centroid, part, cell_volume, &
                                  weight_by_volume=vol_weight)
 
     ! Sort cells by partition and compute offsets
