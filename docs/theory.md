@@ -493,14 +493,15 @@ ordering into equal pieces [@bader2012]. An SFC gives a locality-preserving
 ordering, so geometrically nearby cells land on nearby ranks and the number of
 cross-rank face neighbours stays small.
 
-Despite the `hilbert` naming throughout the source, the curve actually computed
-is Morton (Z-order): the octant index is $$(r_x \ll 2)\,|\,(r_y \ll 1)\,|\,r_z$$
-with no per-level rotation state. Measured against a true Hilbert construction
-on periodic structured grids this makes almost no difference — the two produce
-identical cuts on power-of-two cubes and land within 1–3% of each other
-otherwise, with Morton often yielding slightly fewer neighbours per rank. Both
-sit within about 6% of the theoretical minimum surface area of ideal Cartesian
-blocks, so partition shape is not a limiting factor for box-like domains.
+The curve used is Morton (Z-order): at each level the octant index is
+$$(r_x \ll 2)\,|\,(r_y \ll 1)\,|\,r_z$$ with no per-level rotation state,
+which makes the key cheap to compute and radix-sortable. Measured against a true
+Hilbert construction on periodic structured grids this makes almost no
+difference: the two produce identical cuts on power-of-two cubes and land within
+1–3% of each other otherwise, with Morton often yielding slightly fewer
+neighbours per rank. Both sit within about 6% of the theoretical minimum surface
+area of ideal Cartesian blocks, so partition shape is not a limiting factor for
+box-like domains.
 
 Cells are assigned so that each rank owns an equal *count*, since solver cost
 scales with cell count rather than volume. Equalising volume instead is
@@ -536,7 +537,7 @@ For current defaults and updated implementation:
    in both viscous momentum and pressure operators [@jasak1996].
 4. Periodic coupling uses geometric distance-ratio $$g_c$$ rather than a hardcoded
    $$0.5$$ interpolant on non-uniform meshes.
-5. Parallel mesh partitioning uses Hilbert SFC by default for scalability.
+5. Parallel mesh partitioning uses a Morton (Z-order) SFC by default for scalability.
 
 These choices are aimed at robust long-time LES behavior on realistic
 unstructured meshes where hidden discretization inconsistencies can dominate
