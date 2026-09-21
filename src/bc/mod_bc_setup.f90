@@ -54,6 +54,10 @@ contains
       if (.not. matched .and. msh%patches(p)%bc_id /= 0) then
         bc_configs_out(p)%bc_id = msh%patches(p)%bc_id
       end if
+      if (.not. matched .and. msh%rank == 0) &
+        write(*, '(A,A,A,I0,A)') ' WARNING: mesh patch "', trim(msh%patches(p)%name), &
+          '" is not listed in &dopamine_bc; using default bc_id=', &
+          merge(msh%patches(p)%bc_id, BC_ZEROGRADIENT, msh%patches(p)%bc_id /= 0), ' (open boundary if 9)'
 
       msh%patches(p)%bc_id = bc_configs_out(p)%bc_id
     end do

@@ -15,6 +15,7 @@ contains
     ! Import types locally to avoid module-level dependency issues
     use mod_mesh,    only: Mesh
     use mod_fv_solver, only: FVSolver
+    use mpi_f08
     type(FVSolver),       intent(in) :: solver
     type(Mesh),           intent(in) :: msh
     character(len=*),     intent(in) :: checkpoint_dir
@@ -37,11 +38,14 @@ contains
     ! Pack header
     header(1) = nc
     header(2) = ns
-    header(3) = solver%step
+    ! Layout shared with dopamine-checkpoint-partition: header(3) is the history-record count
+    ! (RK3W keeps none, so 0), header(4) the step. header(7) flags a trailing U_face record.
+    header(3) = 0
     header(4) = solver%step
     header(5) = has_C
     header(6) = 0  ! reserved
-    header(7) = 0  ! reserved
+    header(7) = 0
+    if (solver%u_face_ready .and. allocated(solver%U_face)) header(7) = 1
     header(8) = 0  ! reserved
 
     ! Create processorR directory if needed (each rank creates its own to avoid race condition)
@@ -92,7 +96,13 @@ contains
       write(iunit) solver%C(1:ns, 1:nc)
     end if
 
+    ! Divergence-free face flux: advection reads it on the first stage after a restart.
+    if (header(7) == 1) write(iunit) solver%U_face
+
     close(iunit)
+
+    ! All ranks must finish their files before the manifest advertises this step.
+    call MPI_Barrier(msh%comm, ios)
 
     ! Rank 0 writes checkpoint_latest manifest
     if (rank == 0) then
@@ -163,6 +173,10 @@ contains
     if (nc > 0) then
       allocate(global_id_ckpt(nc))
       read(iunit) global_id_ckpt
+      if (allocated(msh%global_id)) then
+        if (any(global_id_ckpt /= msh%global_id(1:nc))) &
+          error stop 'read_checkpoint: global_id mismatch (checkpoint was written for a different partition)'
+      end if
       deallocate(global_id_ckpt)
     end if
 
@@ -177,6 +191,14 @@ contains
     ! Record 8: Passive scalars
     if (ns_ckpt > 0 .and. nc > 0) then
       read(iunit) solver%C(1:ns, 1:nc)
+    end if
+
+    if (header(7) == 1 .and. allocated(solver%U_face)) then
+      read(iunit) solver%U_face
+      solver%u_face_ready = .true.
+      !$acc update device(solver%U_face) if_present
+    else
+      write(*, '(A)') 'WARNING: checkpoint has no face flux; first stage after restart has no convective flux'
     end if
 
     ! Restore step counter

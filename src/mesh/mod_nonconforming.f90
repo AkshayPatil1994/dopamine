@@ -35,6 +35,10 @@ contains
     type(FaceData), allocatable :: new_faces(:)
     integer(ip), allocatable :: pcount(:)
     integer(ip) :: p, cnt_p
+    ! Uniform grid over boundary-face centres: candidates for face a lie within ~0.76*sqrt(A_a).
+    integer(ip) :: jj, ncand, nx, ny, nz, nbin
+    integer(ip), allocatable :: cand(:), bin_start(:), bin_face(:), bin_of(:)
+    real(rp) :: gx0(3), gh
 
     n_bnd = msh%n_bnd_faces
     if (n_bnd < 2) return
@@ -44,6 +48,9 @@ contains
     do b = 1, n_bnd
       bnd_idx(b) = msh%n_int_faces + b
     end do
+
+    call build_grid()
+    allocate(cand(n_bnd))
 
     allocate(n_fine_of(n_bnd), source=0_ip)
     allocate(area_sum_of(n_bnd), source=0.0_rp)
@@ -56,7 +63,9 @@ contains
       area_A   = msh%faces(ia)%area
       char_len = sqrt(max(area_A, SMALL))
 
-      do b = 1, n_bnd
+      call get_candidates(a, char_len)
+      do jj = 1, ncand
+        b = cand(jj)
         if (b == a) cycle
 
         ib     = bnd_idx(b)
@@ -109,7 +118,9 @@ contains
       area_A   = msh%faces(ia)%area
       char_len = sqrt(max(area_A, SMALL))
 
-      do b = 1, n_bnd
+      call get_candidates(a, char_len)
+      do jj = 1, ncand
+        b = cand(jj)
         if (b == a) cycle
         ib     = bnd_idx(b)
         area_B = msh%faces(ib)%area
@@ -247,6 +258,88 @@ contains
     end if
 
     deallocate(bnd_idx, n_fine_of, area_sum_of, fine_off, fine_list, assigned_to)
+  contains
+
+    subroutine build_grid()
+      real(rp) :: lo(3), hi(3), mean_char, ext(3)
+      integer(ip) :: i, ix, iy, iz, k
+      integer(ip), allocatable :: fill(:)
+
+      lo =  huge(1.0_rp); hi = -huge(1.0_rp); mean_char = 0.0_rp
+      do i = 1, n_bnd
+        lo = min(lo, msh%faces(bnd_idx(i))%centre)
+        hi = max(hi, msh%faces(bnd_idx(i))%centre)
+        mean_char = mean_char + sqrt(max(msh%faces(bnd_idx(i))%area, SMALL))
+      end do
+      mean_char = mean_char / real(n_bnd, rp)
+      gh = max(0.76_rp * mean_char, 1.0e-12_rp)
+      gx0 = lo
+      ext = max(hi - lo, 0.0_rp)
+      do
+        nx = int(ext(1) / gh) + 1; ny = int(ext(2) / gh) + 1; nz = int(ext(3) / gh) + 1
+        if (real(nx, rp) * real(ny, rp) * real(nz, rp) <= 4.0_rp * real(n_bnd, rp) + 8.0_rp) exit
+        gh = gh * 1.5_rp
+      end do
+      nbin = nx * ny * nz
+      allocate(bin_start(nbin + 1), source=0_ip)
+      allocate(fill(nbin), source=0_ip)
+      allocate(bin_face(n_bnd), bin_of(n_bnd))
+      do i = 1, n_bnd
+        ix = min(nx - 1, int((msh%faces(bnd_idx(i))%centre(1) - gx0(1)) / gh))
+        iy = min(ny - 1, int((msh%faces(bnd_idx(i))%centre(2) - gx0(2)) / gh))
+        iz = min(nz - 1, int((msh%faces(bnd_idx(i))%centre(3) - gx0(3)) / gh))
+        bin_of(i) = 1 + ix + nx * (iy + ny * iz)
+        bin_start(bin_of(i) + 1) = bin_start(bin_of(i) + 1) + 1
+      end do
+      bin_start(1) = 1
+      do k = 1, nbin
+        bin_start(k + 1) = bin_start(k + 1) + bin_start(k)
+      end do
+      do i = 1, n_bnd
+        k = bin_of(i)
+        bin_face(bin_start(k) + fill(k)) = i
+        fill(k) = fill(k) + 1
+      end do
+      deallocate(fill)
+    end subroutine build_grid
+
+    !> All boundary faces that can pass the proximity tests for face a (superset; the exact
+    !> tests stay in the caller). Falls back to every face when the window spans too many bins.
+    subroutine get_candidates(a_idx, char_a)
+      integer(ip), intent(in) :: a_idx
+      real(rp),    intent(in) :: char_a
+      real(rp) :: r, c(3)
+      integer(ip) :: lo3(3), hi3(3), ix, iy, iz, k, kk
+      real(rp) :: nwin
+
+      r = 0.76_rp * char_a
+      c = msh%faces(bnd_idx(a_idx))%centre
+      lo3(1) = max(0, int((c(1) - r - gx0(1)) / gh)); hi3(1) = min(nx - 1, int((c(1) + r - gx0(1)) / gh))
+      lo3(2) = max(0, int((c(2) - r - gx0(2)) / gh)); hi3(2) = min(ny - 1, int((c(2) + r - gx0(2)) / gh))
+      lo3(3) = max(0, int((c(3) - r - gx0(3)) / gh)); hi3(3) = min(nz - 1, int((c(3) + r - gx0(3)) / gh))
+      ncand = 0
+      nwin = real(max(0, hi3(1) - lo3(1) + 1), rp) * real(max(0, hi3(2) - lo3(2) + 1), rp) &
+           * real(max(0, hi3(3) - lo3(3) + 1), rp)
+      if (nwin > real(n_bnd, rp)) then
+        do kk = 1, n_bnd
+          cand(kk) = kk
+        end do
+        ncand = n_bnd
+        return
+      end if
+      do iz = lo3(3), hi3(3)
+        do iy = lo3(2), hi3(2)
+          do ix = lo3(1), hi3(1)
+            k = 1 + ix + nx * (iy + ny * iz)
+            do kk = bin_start(k), bin_start(k + 1) - 1
+              ncand = ncand + 1
+              cand(ncand) = bin_face(kk)
+            end do
+          end do
+        end do
+      end do
+    end subroutine get_candidates
+
   end subroutine enforce_face_conformity
 
 end module mod_nonconforming

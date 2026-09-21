@@ -542,6 +542,8 @@ contains
 
     if (self%abl_config%use_nudging) then
       call nudging_load(self%nudging_data, self%abl_config%nudging_file)
+      if (.not. self%nudging_data%loaded) &
+        error stop 'solver_init: use_nudging is set but the nudging file could not be loaded'
     end if
 
     call report_wall_model_setup(self)
@@ -2058,20 +2060,21 @@ contains
 
         ! Try periodic_pair_dcf first (precomputed distance from partner face)
         if (allocated(self%mesh%periodic_pair_dcf)) then
-          if (f_bnd_gc >= 1 .and. f_bnd_gc <= size(self%mesh%periodic_pair_dcf) .and. &
-              self%mesh%periodic_pair_dcf(f_bnd_gc) > SMALL) then
-            d_cf_nb_gc = self%mesh%periodic_pair_dcf(f_bnd_gc)
+          if (f_bnd_gc >= 1 .and. f_bnd_gc <= size(self%mesh%periodic_pair_dcf)) then
+            if (self%mesh%periodic_pair_dcf(f_bnd_gc) > SMALL) &
+              d_cf_nb_gc = self%mesh%periodic_pair_dcf(f_bnd_gc)
           end if
         end if
 
         ! Fallback: find partner face and extract d_cf from it
         if (d_cf_nb_gc <= SMALL .and. allocated(self%mesh%periodic_pair)) then
-          if (f_bnd_gc >= 1 .and. f_bnd_gc <= size(self%mesh%periodic_pair) .and. &
-              self%mesh%periodic_pair(f_bnd_gc) >= 1) then
-            pair_bnd_gc = self%mesh%periodic_pair(f_bnd_gc)
-            pair_face_gc = self%mesh%n_int_faces + pair_bnd_gc
-            if (pair_face_gc >= 1 .and. pair_face_gc <= size(self%mesh%faces)) then
-              d_cf_nb_gc = self%mesh%faces(pair_face_gc)%d_cf
+          if (f_bnd_gc >= 1 .and. f_bnd_gc <= size(self%mesh%periodic_pair)) then
+            if (self%mesh%periodic_pair(f_bnd_gc) >= 1) then
+              pair_bnd_gc = self%mesh%periodic_pair(f_bnd_gc)
+              pair_face_gc = self%mesh%n_int_faces + pair_bnd_gc
+              if (pair_face_gc >= 1 .and. pair_face_gc <= size(self%mesh%faces)) then
+                d_cf_nb_gc = self%mesh%faces(pair_face_gc)%d_cf
+              end if
             end if
           end if
         end if
@@ -2926,8 +2929,11 @@ contains
     if (.not. (dt > 0.0_rp)) then
       dt = self%params%dt
     else if (dt < dt_min) then
-      ! Signal potential instability; keep dt but log warning in main
-      dt = dt_min
+      ! dt this far below the requested value means the explicit limits are violated (blow-up);
+      ! clamping up would run an unstable step, so stop. Every rank sees the same reduced dt.
+      if (self%mesh%rank == 0) write(*,'(A,ES12.4,A,ES12.4)') &
+        ' ERROR: stable dt =', dt, ' fell below 1e-6*dt =', dt_min
+      error stop 'solver_compute_dt: stable time step collapsed (solution diverging)'
     else
       dt = max(dt, dt_min)
     end if

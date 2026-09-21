@@ -470,6 +470,10 @@ contains
         self%faces(f)%is_refine = .false.
         cycle
       end if
+      ! eps is derived and not serialised in mesh.bin: rebuild it here so the preprocessed path
+      ! gets the same skewness correction as mesh_compute_geometry (idempotent there).
+      self%faces(f)%eps = self%faces(f)%centre - (self%cells(o)%centroid + &
+        (1.0_rp - self%faces(f)%gc) * (self%cells(nb)%centroid - self%cells(o)%centroid))
       eps_mid = self%faces(f)%centre - 0.5_rp * (self%cells(o)%centroid + self%cells(nb)%centroid)
       self%faces(f)%skew = sqrt(sum(eps_mid**2)) / max(self%faces(f)%d_cf, 1.0e-30_rp)
       self%faces(f)%is_refine = (self%faces(f)%skew > REFINE_SKEW_TOL)
@@ -1353,11 +1357,34 @@ contains
     integer(ip), intent(in)    :: n_cells, n_faces
     integer(ip), intent(in)    :: face_pts(:), face_offset(:)
     real(rp),    intent(in)    :: points(:,:)
-    integer(ip) :: f, o, nb, start_idx, end_idx, i
-    real(rp)    :: v0(3), v1(3), v2(3), signed_vol, signed_moment(3)
-    real(rp)    :: cell_moment(3, n_cells)
+    integer(ip) :: f, o, nb, start_idx, end_idx, i, side, c
+    real(rp)    :: v0(3), v1(3), v2(3), signed_vol, signed_moment(3), ref(3)
+    real(rp), allocatable :: cell_moment(:,:), cell_ref(:,:)
+    logical,  allocatable :: ref_set(:)
 
-    cell_moment = 0.0_rp
+    allocate(cell_moment(3, n_cells), source=0.0_rp)
+    ! Tetrahedra are taken about a per-cell reference point (a vertex of the cell), not the global
+    ! origin: with georeferenced coordinates the origin-based form cancels catastrophically.
+    allocate(cell_ref(3, n_cells), source=0.0_rp)
+    allocate(ref_set(n_cells), source=.false.)
+
+    do f = 1, n_faces
+      start_idx = face_offset(f)
+      end_idx   = face_offset(f + 1) - 1
+      if (end_idx - start_idx + 1 < 3) cycle
+      do side = 1, 2
+        if (side == 1) then
+          c = msh%faces(f)%owner
+        else
+          c = msh%faces(f)%neighbour
+        end if
+        if (c < 1) cycle
+        if (.not. ref_set(c)) then
+          cell_ref(:, c) = points(:, face_pts(start_idx))
+          ref_set(c) = .true.
+        end if
+      end do
+    end do
 
     do f = 1, n_faces
       o  = msh%faces(f)%owner
@@ -1366,31 +1393,41 @@ contains
       end_idx   = face_offset(f + 1) - 1
       if (end_idx - start_idx + 1 < 3) cycle
 
-      v0 = points(:, face_pts(start_idx))
-      do i = start_idx + 1, end_idx - 1
-        v1 = points(:, face_pts(i))
-        v2 = points(:, face_pts(i + 1))
-        signed_vol = dot_product(v0, cross3(v1, v2)) / 6.0_rp
-        signed_moment = signed_vol * (v0 + v1 + v2) / 4.0_rp
-
-        msh%cells(o)%volume = msh%cells(o)%volume + signed_vol
-        cell_moment(:, o)   = cell_moment(:, o) + signed_moment
-
-        if (nb >= 1) then
-          msh%cells(nb)%volume = msh%cells(nb)%volume - signed_vol
-          cell_moment(:, nb)   = cell_moment(:, nb) - signed_moment
+      do side = 1, 2
+        if (side == 1) then
+          c = o
+          ref = cell_ref(:, o)
+        else
+          if (nb < 1) exit
+          c = nb
+          ref = cell_ref(:, nb)
         end if
+        v0 = points(:, face_pts(start_idx)) - ref
+        do i = start_idx + 1, end_idx - 1
+          v1 = points(:, face_pts(i)) - ref
+          v2 = points(:, face_pts(i + 1)) - ref
+          signed_vol = dot_product(v0, cross3(v1, v2)) / 6.0_rp
+          signed_moment = signed_vol * (v0 + v1 + v2) / 4.0_rp
+          if (side == 1) then
+            msh%cells(c)%volume = msh%cells(c)%volume + signed_vol
+            cell_moment(:, c)   = cell_moment(:, c) + signed_moment
+          else
+            msh%cells(c)%volume = msh%cells(c)%volume - signed_vol
+            cell_moment(:, c)   = cell_moment(:, c) - signed_moment
+          end if
+        end do
       end do
     end do
 
     do f = 1, n_cells
       if (abs(msh%cells(f)%volume) > SMALL) then
-        msh%cells(f)%centroid = cell_moment(:, f) / msh%cells(f)%volume
+        msh%cells(f)%centroid = cell_ref(:, f) + cell_moment(:, f) / msh%cells(f)%volume
       else
         msh%cells(f)%centroid = 0.0_rp
       end if
       msh%cells(f)%volume = abs(msh%cells(f)%volume)
     end do
+    deallocate(cell_moment, cell_ref, ref_set)
   end subroutine compute_polyhedron_cell_moments
 
   !> Fan-triangulated area, unit normal and area-weighted centroid for an arbitrary polygon face.

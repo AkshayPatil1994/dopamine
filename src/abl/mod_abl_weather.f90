@@ -134,7 +134,7 @@ contains
     type(NudgingData), intent(inout) :: data
     character(len=*),  intent(in)    :: filename
 
-    integer(ip) :: ncid, status, dimid_time, dimid_z, varid_time, varid_z, varid_u, varid_v, varid_w, varid_temp
+    integer(ip) :: ncid, status, dimid_time, dimid_z
     integer(ip) :: nt, nz, stat_close
     real(rp), allocatable :: times_tmp(:), z_tmp(:), U_tmp(:,:,:), T_tmp(:,:)
 
@@ -184,39 +184,13 @@ contains
     allocate(U_tmp(3, nz, nt), source=0.0_rp)
     allocate(T_tmp(nz, nt), source=0.0_rp)
 
-    ! Read time variable
-    status = nf90_inq_varid(ncid, 'time', varid_time)
-    if (status == nf90_noerr) then
-      status = nf90_get_var(ncid, varid_time, times_tmp)
-    end if
-
-    ! Read z variable
-    status = nf90_inq_varid(ncid, 'z', varid_z)
-    if (status == nf90_noerr) then
-      status = nf90_get_var(ncid, varid_z, z_tmp)
-    end if
-
-    ! Read velocity components
-    status = nf90_inq_varid(ncid, 'U', varid_u)
-    if (status == nf90_noerr) then
-      status = nf90_get_var(ncid, varid_u, U_tmp(1, :, :))
-    end if
-
-    status = nf90_inq_varid(ncid, 'V', varid_v)
-    if (status == nf90_noerr) then
-      status = nf90_get_var(ncid, varid_v, U_tmp(2, :, :))
-    end if
-
-    status = nf90_inq_varid(ncid, 'W', varid_w)
-    if (status == nf90_noerr) then
-      status = nf90_get_var(ncid, varid_w, U_tmp(3, :, :))
-    end if
-
-    ! Read temperature
-    status = nf90_inq_varid(ncid, 'T', varid_temp)
-    if (status == nf90_noerr) then
-      status = nf90_get_var(ncid, varid_temp, T_tmp)
-    end if
+    ! Every variable is required: a silent zero would nudge toward U=0 / T=0 K.
+    call nc_read_required(ncid, 'time', filename, vec1=times_tmp)
+    call nc_read_required(ncid, 'z',    filename, vec1=z_tmp)
+    call nc_read_required(ncid, 'U',    filename, mat=U_tmp(1, :, :))
+    call nc_read_required(ncid, 'V',    filename, mat=U_tmp(2, :, :))
+    call nc_read_required(ncid, 'W',    filename, mat=U_tmp(3, :, :))
+    call nc_read_required(ncid, 'T',    filename, mat=T_tmp)
 
     ! Close file
     stat_close = nf90_close(ncid)
@@ -235,6 +209,24 @@ contains
 
     data%loaded = .true.
   end subroutine nudging_load_netcdf
+
+  subroutine nc_read_required(ncid, name, filename, vec1, mat)
+    integer(ip),      intent(in)  :: ncid
+    character(len=*), intent(in)  :: name, filename
+    real(rp), intent(out), optional :: vec1(:)
+    real(rp), intent(out), optional :: mat(:,:)
+    integer(ip) :: st, varid
+
+    st = nf90_inq_varid(ncid, name, varid)
+    if (st == nf90_noerr) then
+      if (present(vec1)) st = nf90_get_var(ncid, varid, vec1)
+      if (present(mat))  st = nf90_get_var(ncid, varid, mat)
+    end if
+    if (st /= nf90_noerr) then
+      write(*, '(A)') 'ERROR: weather file '//trim(filename)//' variable "'//name//'": '//trim(nf90_strerror(st))
+      error stop 'nudging_load_netcdf: required variable missing or unreadable'
+    end if
+  end subroutine nc_read_required
 
   !> Apply Davies nudging: add relaxation term to the explicit RHS
   !> For each cell with z > z_start, add source:

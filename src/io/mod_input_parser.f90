@@ -148,8 +148,10 @@ contains
     namelist /dopamine_domain/ mesh_file, mesh_type
 
     read(iunit, nml=dopamine_domain, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_domain, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_domain, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     if (len_trim(mesh_file) > 0) config%mesh_file = mesh_file
     config%mesh_type = mesh_type
@@ -204,8 +206,10 @@ contains
                                wall_model_height, wall_model_filter_time, debug_diagnostics
 
     read(iunit, nml=dopamine_numerics, iostat=ios)
-    if (ios > 0) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_numerics, ios=', ios
+    if (ios > 0) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_numerics, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     associate(p => config%params)
       select case (trim(advection_scheme))
@@ -305,8 +309,10 @@ contains
     sort_intersection_points = config%stats_sort_intersection_points
 
     read(iunit, nml=dopamine_stats, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_stats, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_stats, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     if (solver_stats_frequency > 0) then
       config%stats_global_frequency = solver_stats_frequency
@@ -364,8 +370,10 @@ contains
                   forcing_dir_x, forcing_dir_y, forcing_dir_z, boussinesq
 
     read(iunit, nml=dopamine_physics, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_physics, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_physics, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     ! Constant pressure-gradient (fx/fy/fz) and constant mass-flux forcing are mutually exclusive.
     if (constant_mass_flux_forcing .and. &
@@ -433,8 +441,10 @@ contains
     patch_scalar_mode = 'zeroGradient'
 
     read(iunit, nml=dopamine_bc, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_bc, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_bc, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     config%n_bcs = min(n_patches, MAX_BC_PATCHES)
     do p = 1, config%n_bcs
@@ -491,8 +501,10 @@ contains
     scalar_tvd_scheme = 'VANLEER_TVD'
 
     read(iunit, nml=dopamine_scalars, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_scalars, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_scalars, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     config%n_scalars = min(max(0_ip, n_scalars), MAX_PASSIVE_SCALARS)
     if (config%n_scalars <= 0) then
@@ -562,8 +574,10 @@ contains
                             nudging_z_full, nudging_horizontal_only
 
     read(iunit, nml=dopamine_abl, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_abl, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_abl, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     config%use_abl           = use_abl
     config%abl_u_ref         = u_ref
@@ -651,8 +665,10 @@ contains
     source_tag_radius = 0.0_rp
 
     read(iunit, nml=dopamine_scalar_sources, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_scalar_sources, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_scalar_sources, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     config%n_scalar_sources = min(max(0_ip, n_scalar_sources), MAX_SCALAR_SOURCES)
     if (config%n_scalar_sources <= 0) then
@@ -711,8 +727,10 @@ contains
     namelist /dopamine_initial_condition/ ic_type, ic_uref, ic_lref, noise_level, wall_normal_direction
 
     read(iunit, nml=dopamine_initial_condition, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_initial_condition, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_initial_condition, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     config%ic_type = trim(ic_type)
     config%ic_uref = ic_uref
@@ -737,8 +755,10 @@ contains
                                warn_log_file, warn_flush_interval
 
     read(iunit, nml=dopamine_output, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_output, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_output, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     config%output_prefix             = trim(prefix)
     config%params%write_interval     = write_interval
@@ -761,8 +781,10 @@ contains
     namelist /dopamine_checkpoint/ restart_enabled, restart_dir, restart_step, checkpoint_interval
 
     read(iunit, nml=dopamine_checkpoint, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_checkpoint, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_checkpoint, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     config%restart_enabled      = restart_enabled
     config%restart_dir          = trim(restart_dir)
@@ -796,8 +818,10 @@ contains
     plane_write_frequency = config%stats_slice_frequency
 
     read(iunit, nml=dopamine_sampling_planes, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_sampling_planes, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_sampling_planes, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     config%n_planes = min(max(0_ip, n_planes), MAX_SAMPLE_OBJECTS)
     do p = 1, config%n_planes
@@ -835,8 +859,10 @@ contains
     line_write_frequency = config%stats_line_frequency
 
     read(iunit, nml=dopamine_sampling_lines, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_sampling_lines, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_sampling_lines, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     config%n_lines = min(max(0_ip, n_lines), MAX_SAMPLE_OBJECTS)
     do p = 1, config%n_lines
@@ -869,8 +895,10 @@ contains
     curve_write_frequency = config%stats_curve_frequency
 
     read(iunit, nml=dopamine_sampling_curves, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_sampling_curves, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_sampling_curves, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     config%n_curves = min(max(0_ip, n_curves), MAX_SAMPLE_OBJECTS)
     do p = 1, config%n_curves
@@ -908,8 +936,10 @@ contains
     surface_intersection_decimate_spacing = config%stats_intersection_decimate_spacing
 
     read(iunit, nml=dopamine_sampling_surfaces, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_sampling_surfaces, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_sampling_surfaces, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
 
     config%n_surfaces = min(max(0_ip, n_surfaces), MAX_SAMPLE_OBJECTS)
     do p = 1, config%n_surfaces
@@ -939,8 +969,10 @@ contains
     n_petsc_options = 0
 
     read(iunit, nml=dopamine_PetscParams, iostat=ios)
-    if (ios /= 0 .and. ios /= -1) &
-      write(*,'(A,I0)') 'WARNING: error reading &dopamine_PetscParams, ios=', ios
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_PetscParams, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
     if (n_petsc_options > 0) then
       if (allocated(config%petsc_options)) deallocate(config%petsc_options)
       allocate(character(len=256) :: config%petsc_options(n_petsc_options))

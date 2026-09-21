@@ -607,6 +607,7 @@ int fvm_petsc_solve_pressure(const int n_cells_local,
   PetscReal current_rtol;
   PetscReal current_atol;
   PetscReal petsc_residual = 0.0;
+  PetscInt petsc_its = 0;
   KSPConvergedReason reason;
   int status = 0;
   int ctx_status;
@@ -747,8 +748,9 @@ int fvm_petsc_solve_pressure(const int n_cells_local,
   if (ierr != PETSC_SUCCESS) return -33;
   ierr = KSPGetConvergedReason(g_pressure_ctx.ksp, &reason);
   if (ierr != PETSC_SUCCESS) return -34;
-  ierr = KSPGetIterationNumber(g_pressure_ctx.ksp, (PetscInt *) iteration_count);
+  ierr = KSPGetIterationNumber(g_pressure_ctx.ksp, &petsc_its);
   if (ierr != PETSC_SUCCESS) return -35;
+  *iteration_count = (int) petsc_its;
   {
     Vec true_resid = NULL;
     PetscReal true_resid_norm = 0.0;
@@ -784,8 +786,9 @@ int fvm_petsc_solve_pressure(const int n_cells_local,
     if (ierr != PETSC_SUCCESS) return -33;
     ierr = KSPGetConvergedReason(g_pressure_ctx.ksp, &reason);
     if (ierr != PETSC_SUCCESS) return -34;
-    ierr = KSPGetIterationNumber(g_pressure_ctx.ksp, (PetscInt *) iteration_count);
+    ierr = KSPGetIterationNumber(g_pressure_ctx.ksp, &petsc_its);
     if (ierr != PETSC_SUCCESS) return -35;
+    *iteration_count = (int) petsc_its;
     {
       Vec true_resid = NULL;
       PetscReal true_resid_norm = 0.0;

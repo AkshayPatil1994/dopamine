@@ -137,12 +137,9 @@ contains
           if (has_prev .and. nb <= n_prev) then
             gc        = gc_soa(f)
             eps       = eps_soa(:, f)  ! precomputed at mesh setup: static interior-face geometry
-            ! At partition-boundary ghosts use owner-side gradient only (stale halo guard).
-            if (nb <= nc) then
-              grad_mean = gc * gg_s_grad_prev_buf(:, o) + (1.0_rp - gc) * gg_s_grad_prev_buf(:, nb)
-            else
-              grad_mean = gg_s_grad_prev_buf(:, o)
-            end if
+            ! Ghost gradients are halo-exchanged before each sweep, so both sides of a processor
+            ! face see the same mean gradient (result independent of the partitioning).
+            grad_mean = gc * gg_s_grad_prev_buf(:, o) + (1.0_rp - gc) * gg_s_grad_prev_buf(:, nb)
             phi_f_plain = gc * phi(o) + (1.0_rp - gc) * phi(nb)
             phi_f       = phi_f_plain + dot_product(grad_mean, eps)
             ! Fade the eps-correction out toward refinement interfaces; see refine_blend_weight.
@@ -288,12 +285,7 @@ contains
             gc   = gc_soa(f)
             eps  = eps_soa(:, f)  ! precomputed at mesh setup: static interior-face geometry
             do k = 1, 3
-              ! One-sided at ghost-cell faces: stale remote gradient guard (see scalar).
-              if (nb <= nc) then
-                grad_mean = gc * gg_v_grad_prev_buf(:, k, o) + (1.0_rp - gc) * gg_v_grad_prev_buf(:, k, nb)
-              else
-                grad_mean = gg_v_grad_prev_buf(:, k, o)
-              end if
+              grad_mean = gc * gg_v_grad_prev_buf(:, k, o) + (1.0_rp - gc) * gg_v_grad_prev_buf(:, k, nb)
               Uf(k) = gc * U(k, o) + (1.0_rp - gc) * U(k, nb) + dot_product(grad_mean, eps)
             end do
             ! Fade the eps-correction out toward refinement interfaces; see refine_blend_weight.
