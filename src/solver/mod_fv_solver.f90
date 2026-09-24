@@ -1116,16 +1116,8 @@ contains
     integer(ip) :: nc, c, k, jno, p_iter
     real(rp)    :: gk_dt, time_n
     real(rp)    :: t_perf, t_sub, p_resid
-    logical     :: share_residency
 
     nc = self%mesh%n_cells
-    ! U/U_bnd/grad_U/nu_sgs/grad_T[/grad_C] stay device-resident through the predictor for any
-    ! nranks: mesh_end_halos_vec/scalar/scalars/state and exchange_grad_halos all push their
-    ! received ghost cells to device after the host-side MPI exchange (see mod_mesh.f90), so a
-    ! multi-rank run's device ghost cells no longer go stale the way they would have before that
-    ! fix. Correctness of this path has only been exercised via multi-rank CPU tests and a
-    ! multi-rank run sharing a single physical GPU here -- not true multi-GPU/multi-node hardware.
-    share_residency = .true.
     associate(H_U => self%w_H_U(:, 1:nc), H_T => self%w_H_T(1:nc), &
           rhs_p => self%w_rhs_p(1:nc), &
           H_C => self%w_H_C(1:max(1_ip,self%params%n_scalars), 1:nc), &
@@ -1158,23 +1150,8 @@ contains
       call prof_pop()
       self%perf_t_halo_bc = self%perf_t_halo_bc + (wall_time_now() - t_perf)
 
-      ! -- SGS viscosity, gradients, wall model, predictor, pre-correction, grad_U refresh.
-      ! Outer region spans through the predicted-field grad_U refresh: U/T/C are read-only here, so they stay device-resident (see pred_regrad finding
-#ifdef _OPENACC
-      !$acc data copyin(self%U(:,1:nc+self%mesh%n_ghost), self%U_bnd, self%T(:)) if(share_residency)
-      if (self%params%n_scalars > 0) then
-        !$acc enter data copyin(self%C) if(share_residency)
-      end if
-#endif
+      ! -- SGS viscosity, gradients, wall model, explicit RHS.
       t_perf = wall_time_now()
-      ! Inner region closes before the predictor so the second gradient call sees grad_U as absent again and re-zeroes on device instead of accumulating stale data.
-#ifdef _OPENACC
-      !$acc data copyout(self%grad_U(:,:,1:nc+self%mesh%n_ghost), self%nu_sgs(1:nc+self%mesh%n_ghost), &
-      !$acc      self%grad_T(:,1:nc+self%mesh%n_ghost)) if(share_residency)
-      if (self%params%n_scalars > 0) then
-        !$acc enter data create(self%grad_C) if(share_residency)
-      end if
-#endif
       t_sub = wall_time_now()
       call prof_push('gradients')
       call compute_all_gradients(self)
@@ -1196,34 +1173,8 @@ contains
         end select
       else
         self%nu_sgs(1:nc) = 0.0_rp
-        ! Push the host zero to device: the outer region opened above (copyout(grad_U,nu_sgs,grad_T))
-        ! still copies device nu_sgs back to host at its "!$acc end data" further down, so device
-        ! nu_sgs must hold this zero too or that later copyout clobbers the host zero with whatever
-        ! stale value (a previous stage's/step's SGS result, or uninitialized on the first call) is
-        ! still sitting in the device buffer.
-#ifdef _OPENACC
-        !$acc update device(self%nu_sgs(1:nc)) if(share_residency)
-#endif
       end if
 
-#ifdef _OPENACC
-      ! Host sync for advection_rhs_* (host-only); uses update not copyout so U/grad_U stay device-resident
-      ! afterward. nu_sgs is deliberately excluded here: every SGS model (vreman_sgs_viscosity,
-      ! smagorinsky_sgs, dynamic_smagorinsky_sgs) already does its own copyout(nu_sgs) back to host, and
-      ! when SGS is disabled the device push above already made the host/device copies agree -- so this
-      ! statement would only ever re-copy a value that's already correct on the host.
-      ! grad_T is likewise excluded when temperature isn't solved: compute_all_gradients never touches
-      ! it on device in that case (measured at 792 MB/step of pure zero-filled transfer on a 64^3 case).
-      if (self%solve_temperature) then
-        !$acc update host(self%grad_U(:,:,1:nc+self%mesh%n_ghost), &
-        !$acc      self%grad_T(:,1:nc+self%mesh%n_ghost)) if(share_residency)
-      else
-        !$acc update host(self%grad_U(:,:,1:nc+self%mesh%n_ghost)) if(share_residency)
-      end if
-      if (self%params%n_scalars > 0) then
-        !$acc update host(self%grad_C(:,:,:)) if(share_residency)
-      end if
-#endif
       call exchange_nu_sgs_halo(self)
       select case (self%abl_config%wall_model_id)
       case (WM_MOST)
@@ -1241,17 +1192,10 @@ contains
       call prof_pop()
       self%perf_t_rhs_sgs = self%perf_t_rhs_sgs + (wall_time_now() - t_sub)
 
-      ! -- Explicit RHS H(u^k); still inside the inner region so viscous_rhs_vector/scalar
-      ! (called from within) reuse the U/grad_U/nu_sgs already resident above.
+      ! -- Explicit RHS H(u^k)
       call prof_push('explicit_rhs')
       call compute_explicit_rhs(self, H_U, H_T, H_C, self%time)
       call prof_pop()
-#ifdef _OPENACC
-      if (self%params%n_scalars > 0) then
-        !$acc exit data copyout(self%grad_C) if(share_residency)
-      end if
-      !$acc end data
-#endif
       self%perf_t_rhs = self%perf_t_rhs + (wall_time_now() - t_perf)
 
       ! -- Predictor: u* = u^k + dt*(alpha_k*H + beta_k*H_prev)
@@ -1297,24 +1241,12 @@ contains
       call apply_velocity_bc(self%U, self%U_bnd, self%bc_configs, self%mesh, periodic_only=.true.)
       self%perf_t_predictor_bc = self%perf_t_predictor_bc + (wall_time_now() - t_sub)
 
-      ! Refresh grad_U on the predicted field (mass-flux skewness correction is O(1) at refinement faces); push U/T/C to device to reuse the outer region's buffer.
+      ! Refresh grad_U on the predicted field (mass-flux skewness correction is O(1) at refinement faces).
       t_sub = wall_time_now()
-#ifdef _OPENACC
-      !$acc update device(self%U(:,1:nc+self%mesh%n_ghost), self%U_bnd, self%T(:)) if(share_residency)
-      if (self%params%n_scalars > 0) then
-        !$acc update device(self%C(:,:)) if(share_residency)
-      end if
-#endif
       call compute_all_gradients(self)
       self%perf_t_predictor_regrad = self%perf_t_predictor_regrad + (wall_time_now() - t_sub)
       call prof_pop()
       self%perf_t_predictor = self%perf_t_predictor + (wall_time_now() - t_perf)
-#ifdef _OPENACC
-      if (self%params%n_scalars > 0) then
-        !$acc exit data delete(self%C) if(share_residency)
-      end if
-      !$acc end data
-#endif
 
       ! -- Save p^{k-1/2} into phi_prev for the Rhie-Chow correction.
       ! phi_prev is frozen across jno iterations; RC always sees the same pressure.
@@ -1401,7 +1333,7 @@ contains
       self%U_face(:) = self%face_flux(:)               ! persist divergence-free flux
       self%u_face_ready = .true.
 #ifdef _OPENACC
-      !$acc update device(self%U_face) if(share_residency)
+      !$acc update device(self%U_face)
 #endif
       if (self%diag_interface) call record_divergence_split(self, jno)
       call correct_velocity_psolver_dual(self, gk_dt, with_cross=.true.)  ! u^{k+1} = u* - gk_dt*grad(phi)
