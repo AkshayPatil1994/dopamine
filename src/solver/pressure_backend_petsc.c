@@ -2,6 +2,7 @@
 /* SPDX-License-Identifier: AGPL-3.0-only */
 
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -9,8 +10,15 @@
 /* Runtime-selected pressure preconditioner: boomeramg (default) or gamg. */
 static char g_pc_solver_type[64] = "boomeramg";
 
+/* Node-local rank handed over by mod_device before PetscInitialize; -1 = unset (PETSc then
+ * falls back to its own MPI_COMM_WORLD-rank % ndev choice). */
+static int g_device_local_rank = -1;
+
 #ifdef FVM_HAVE_PETSC
 #include <petscksp.h>
+#if defined(PETSC_HAVE_CUDA)
+#include <cuda_runtime.h>
+#endif
 
 typedef struct {
   int ready;
@@ -511,6 +519,12 @@ int fvm_petsc_backend_available(void) {
 #endif
 }
 
+/* Record the node-local rank so PETSc's CUDA device matches the one OpenACC was bound to in
+ * mod_device (both use local_rank % ndev). Must be called before fvm_petsc_backend_initialize. */
+void fvm_petsc_set_device_local_rank(int local_rank) {
+  g_device_local_rank = local_rank;
+}
+
 int fvm_petsc_backend_initialize(void) {
 #ifdef FVM_HAVE_PETSC
   PetscBool is_initialized = PETSC_FALSE;
@@ -520,7 +534,11 @@ int fvm_petsc_backend_initialize(void) {
   char gpu_aware_mpi_option[] = "-use_gpu_aware_mpi";
   char gpu_aware_mpi_value_on[] = "1";
   char gpu_aware_mpi_value_off[] = "0";
-  char *argv_values[6] = {program_name, no_x_option, no_signal_handler, NULL, NULL, NULL};
+#if defined(PETSC_HAVE_CUDA)
+  char device_select_option[] = "-device_select";
+  char device_select_value[16];
+#endif
+  char *argv_values[8] = {program_name, no_x_option, no_signal_handler, NULL, NULL, NULL, NULL, NULL};
   char **argv = argv_values;
 #if defined(PETSC_HAVE_CUDA)
   /* -use_gpu_aware_mpi is read during PETSc's device init, which runs as part of
@@ -535,6 +553,16 @@ int fvm_petsc_backend_initialize(void) {
   int argc = 5;
   argv_values[3] = gpu_aware_mpi_option;
   argv_values[4] = use_gpu_aware_mpi ? gpu_aware_mpi_value_on : gpu_aware_mpi_value_off;
+  /* PETSc's default device choice is MPI_COMM_WORLD rank % ndev, which disagrees with the
+   * node-local binding mod_device gives OpenACC once ranks span nodes; pin it explicitly. */
+  if (fvm_petsc_gpu_backend_enabled() && g_device_local_rank >= 0) {
+    int ndev = 0;
+    if (cudaGetDeviceCount(&ndev) == cudaSuccess && ndev > 0) {
+      snprintf(device_select_value, sizeof(device_select_value), "%d", g_device_local_rank % ndev);
+      argv_values[argc++] = device_select_option;
+      argv_values[argc++] = device_select_value;
+    }
+  }
 #else
   int argc = 3;
 #endif

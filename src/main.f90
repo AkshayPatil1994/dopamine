@@ -23,6 +23,7 @@ program dopamine_main
   use mod_stats
   use mod_sampling
   use mod_initconditions
+  use mod_device, only: device_bind
   use mpi_f08
   implicit none
 
@@ -89,6 +90,9 @@ program dopamine_main
     write(*, '(A,I6)')  ' n_ranks      :', nranks
     write(*, '(A)') '-------------------------------------------------'
   end if
+
+  ! One rank per GPU; must precede every !$acc region and PETSc initialisation.
+  call device_bind(MPI_COMM_WORLD)
 
   ! Read mesh (skip for preprocessed type; will be read per-rank later)
   if (trim(config%mesh_type) /= 'preprocessed') then
