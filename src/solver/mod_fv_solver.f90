@@ -21,6 +21,7 @@ module mod_fv_solver
   use mod_pressure_solver
   use mod_bc
   use mod_warn_log
+  use mod_profiling, only: prof_push, prof_pop
   use mpi_f08
   implicit none
   private
@@ -924,7 +925,9 @@ contains
 
     if (self%params%constant_mass_flux_forcing) call update_mass_flux_forcing(self, dt)
 
+    call prof_push('step')
     call advance_rk3w(self, dt)
+    call prof_pop()
 
     ! U/p ghosts are already current from the RK3 stage-3 tail; only T/C need a post-RK refresh.
     call apply_scalar_bc(self)
@@ -1150,7 +1153,9 @@ contains
 
       ! -- BCs + halos
       t_perf = wall_time_now()
+      call prof_push('halo_bc')
       call refresh_halos_and_bc(self)
+      call prof_pop()
       self%perf_t_halo_bc = self%perf_t_halo_bc + (wall_time_now() - t_perf)
 
       ! -- SGS viscosity, gradients, wall model, predictor, pre-correction, grad_U refresh.
@@ -1171,10 +1176,13 @@ contains
       end if
 #endif
       t_sub = wall_time_now()
+      call prof_push('gradients')
       call compute_all_gradients(self)
+      call prof_pop()
       self%perf_t_rhs_grad = self%perf_t_rhs_grad + (wall_time_now() - t_sub)
 
       t_sub = wall_time_now()
+      call prof_push('sgs_wall_model')
       if (self%params%use_sgs) then
         select case (trim(self%params%sgs_model))
         case ('SMAGORINSKY')
@@ -1230,11 +1238,14 @@ contains
                                  t_filt=self%params%wall_model_filter_time, &
                                  dt=merge(dt, 0.0_rp, k == 1))
       end select
+      call prof_pop()
       self%perf_t_rhs_sgs = self%perf_t_rhs_sgs + (wall_time_now() - t_sub)
 
       ! -- Explicit RHS H(u^k); still inside the inner region so viscous_rhs_vector/scalar
       ! (called from within) reuse the U/grad_U/nu_sgs already resident above.
+      call prof_push('explicit_rhs')
       call compute_explicit_rhs(self, H_U, H_T, H_C, self%time)
+      call prof_pop()
 #ifdef _OPENACC
       if (self%params%n_scalars > 0) then
         !$acc exit data copyout(self%grad_C) if(share_residency)
@@ -1245,6 +1256,7 @@ contains
 
       ! -- Predictor: u* = u^k + dt*(alpha_k*H + beta_k*H_prev)
       t_perf = wall_time_now()
+      call prof_push('predictor')
       t_sub = wall_time_now()
       !$omp parallel do schedule(static)
       do c = 1, nc
@@ -1295,6 +1307,7 @@ contains
 #endif
       call compute_all_gradients(self)
       self%perf_t_predictor_regrad = self%perf_t_predictor_regrad + (wall_time_now() - t_sub)
+      call prof_pop()
       self%perf_t_predictor = self%perf_t_predictor + (wall_time_now() - t_perf)
 #ifdef _OPENACC
       if (self%params%n_scalars > 0) then
@@ -1310,6 +1323,7 @@ contains
 
       ! -- Pressure Poisson with effective sub-step gk_dt
       t_perf = wall_time_now()
+      call prof_push('pressure')
       block
         real(rp) :: u_bulk_local(2), u_bulk_global(2), u_scale, atol_dynamic
         integer :: ierr_tol
@@ -1347,9 +1361,11 @@ contains
           ! its nonzero initial guess with O(1) p^{k-1/2} instead of the O(dt*div u*) increment
           ! wastes iterations and loosens the effective (relative) convergence tolerance.
           if (jno == 1) self%p(1:nc) = 0.0_rp
+          call prof_push('ksp_solve')
           call pressure_solver_solve(self%psolver, rhs_p, self%p(1:nc), tol=self%params%p_tol, &
                          max_iter=self%params%p_max_iter, n_iter=p_iter, residual=p_resid, &
                          atol_in=atol_dynamic)
+          call prof_pop()
           call self%mesh%begin_halos_scalar(self%p)
           if (self%skip_grad_p) then
             call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, &
@@ -1374,10 +1390,12 @@ contains
           divU_norm_prev = divU_norm_curr
         end do
       end block
+      call prof_pop()
       self%perf_t_pressure = self%perf_t_pressure + (wall_time_now() - t_perf)
 
       ! -- Project: correct face fluxes and velocity (uses final phi from outer loop)
       t_perf = wall_time_now()
+      call prof_push('projection')
 
       call correct_face_fluxes(self, gk_dt)            ! phi -> divergence-free
       self%U_face(:) = self%face_flux(:)               ! persist divergence-free flux
@@ -1392,6 +1410,7 @@ contains
                              periodic_only=.false., grad_U=self%grad_U, u_fluc_bnd=self%sem_fluc_bnd, u_mean_bnd=self%abl_mean_bnd)
       call self%mesh%end_halos_vec(self%U)
       call apply_velocity_bc(self%U, self%U_bnd, self%bc_configs, self%mesh, periodic_only=.true.)
+      call prof_pop()
       self%perf_t_projection = self%perf_t_projection + (wall_time_now() - t_perf)
 
       ! -- Rotational correction to phi: phi = phi - (nu+nu_sgs)*div(u*) (Brown, Cortez & Minion 2001)

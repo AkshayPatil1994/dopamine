@@ -31,6 +31,7 @@ option(DOPAMINE_PETSC_WITH_HYPRE  "Build PETSc with hypre (enables BoomerAMG pre
 option(DOPAMINE_PETSC_WITH_CUDA   "Build PETSc with CUDA GPU support"         OFF)
 option(DOPAMINE_PETSC_USE_GPU_AWARE_MPI "Request GPU-aware MPI in PETSc CUDA builds" ON)
 option(DOPAMINE_ENABLE_OPENACC   "Enable OpenACC GPU offload (requires NVHPC/nvfortran)" OFF)
+option(DOPAMINE_ENABLE_NVTX      "NVTX profiler ranges for Nsight Systems (needs nvtx3 headers from a CUDA toolkit)" ${DOPAMINE_ENABLE_OPENACC})
 set(DOPAMINE_OPENACC_GPU_ARCH "" CACHE STRING "Optional -gpu= target for OpenACC (e.g. cc86); empty lets nvfortran pick defaults")
 option(DOPAMINE_FETCH_NETCDF      "Auto-build NetCDF C/Fortran when missing"  ON)
 option(DOPAMINE_FETCH_CGNS        "Auto-build CGNS (Fortran+HDF5) when missing" ON)
@@ -600,6 +601,25 @@ if(DOPAMINE_HAVE_PETSC)
   target_compile_definitions(petsc_pressure_backend PRIVATE FVM_HAVE_PETSC)
 endif()
 
+# NVTX ranges (mod_profiling): header-only nvtx3 from the CUDA toolkit, bound through a C shim.
+if(DOPAMINE_ENABLE_NVTX)
+  set(_nvtx_hints)
+  if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
+    get_filename_component(_nvtx_bin "${CMAKE_Fortran_COMPILER}" DIRECTORY)
+    file(GLOB _nvtx_hints "${_nvtx_bin}/../../cuda/*/targets/x86_64-linux/include")
+  endif()
+  find_path(DOPAMINE_NVTX_INCLUDE_DIR nvtx3/nvToolsExt.h
+    HINTS ${_nvtx_hints} ENV CUDA_HOME PATH_SUFFIXES include
+    PATHS /usr/local/cuda/include)
+  if(DOPAMINE_NVTX_INCLUDE_DIR)
+    add_library(nvtx_shim OBJECT src/io/nvtx_shim.c)
+    target_include_directories(nvtx_shim PRIVATE "${DOPAMINE_NVTX_INCLUDE_DIR}")
+    message(STATUS "dopamine: NVTX ranges enabled (${DOPAMINE_NVTX_INCLUDE_DIR})")
+  else()
+    message(WARNING "DOPAMINE_ENABLE_NVTX=ON but nvtx3/nvToolsExt.h was not found; ranges disabled")
+  endif()
+endif()
+
 # ============================================================================
 # Fortran source list (dependency order for module compilation)
 # ============================================================================
@@ -607,6 +627,7 @@ set(DOPAMINE_FORTRAN_SOURCES
   src/mod_kinds.f90
   src/mod_parameters.f90
   src/mod_scalar.f90
+  src/io/mod_profiling.f90
   src/io/mod_warn_log.f90
   src/stats/mod_sampling_types.f90
   src/mesh/mod_mesh.f90
@@ -650,6 +671,11 @@ set(DOPAMINE_FORTRAN_SOURCES
 add_library(dopamine_lib STATIC
   ${DOPAMINE_FORTRAN_SOURCES}
   $<TARGET_OBJECTS:petsc_pressure_backend>)
+if(TARGET nvtx_shim)
+  target_sources(dopamine_lib PRIVATE $<TARGET_OBJECTS:nvtx_shim>)
+  set_source_files_properties(src/io/mod_profiling.f90 PROPERTIES COMPILE_DEFINITIONS DOPAMINE_NVTX)
+  target_link_libraries(dopamine_lib PUBLIC ${CMAKE_DL_LIBS})
+endif()
 
 set_target_properties(dopamine_lib PROPERTIES
   Fortran_MODULE_DIRECTORY "${CMAKE_BINARY_DIR}/mod")
@@ -781,6 +807,7 @@ set_source_files_properties(
   src/numerics/mod_viscous.f90
   src/numerics/mod_advection.f90
   src/solver/mod_fv_solver.f90
+  src/io/mod_profiling.f90
   src/main.f90
   PROPERTIES Fortran_PREPROCESS ON)
 
