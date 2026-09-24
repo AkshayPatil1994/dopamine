@@ -122,9 +122,15 @@ program dopamine_main
 
       ! Build periodic face pairing on the global mesh before partitioning.
       ! Local (post-partition) geometry cannot always infer cross-rank periodic pairs.
+      ! Only rank 0 gets here, so the global mesh must not run its collectives on
+      ! MPI_COMM_WORLD (the other ranks are already waiting in partition_mesh).
       if (nranks > 1) then
+        mesh_global%comm   = MPI_COMM_SELF
+        mesh_global%nranks = 1
         call build_bc_configs(config, mesh_global, bc_configs_global)
         deallocate(bc_configs_global)
+        mesh_global%comm   = MPI_COMM_WORLD
+        mesh_global%nranks = nranks
       end if
     end if
   end if
