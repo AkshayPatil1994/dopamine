@@ -230,7 +230,7 @@ program dopamine_main
   !$acc      mesh_local%cell_centroid_soa, mesh_local%face_normal_soa, mesh_local%face_area_soa, &
   !$acc      mesh_local%face_centre_soa, mesh_local%face_dcf_soa, mesh_local%face_patch_id_soa, &
   !$acc      mesh_local%patch_bc_id_soa, mesh_local%periodic_neighbor_soa, &
-  !$acc      mesh_local%periodic_pair_soa, mesh_local%periodic_pair_dcf_soa, &
+  !$acc      mesh_local%periodic_pair_soa, mesh_local%periodic_pair_dcf_soa, mesh_local%periodic_gc_soa, &
   !$acc      mesh_local%face_skew_soa, mesh_local%cell_face_offset_soa, mesh_local%cell_faces)
   if (allocated(mesh_local%face_color_perm)) then
     !$acc enter data copyin(mesh_local%face_color_perm)
