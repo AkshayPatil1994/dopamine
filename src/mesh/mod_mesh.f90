@@ -133,9 +133,18 @@ module mod_mesh
     integer(ip), allocatable   :: halo_send_off_cells(:)
     integer(ip), allocatable   :: halo_recv_off_cells(:)
     type(MPI_Request), allocatable :: halo_reqs(:)
-    real(rp), allocatable      :: halo_sbuf_scalar(:), halo_rbuf_scalar(:)
-    real(rp), allocatable      :: halo_sbuf_vec(:), halo_rbuf_vec(:)
-    real(rp), allocatable      :: halo_sbuf_scalars(:), halo_rbuf_scalars(:)
+    integer(ip)                :: halo_nreq = 0
+    !> Send/receive cell lists of all neighbours concatenated in halos(:) order, so pack/unpack
+    !> is one flat loop (offsets per neighbour in halo_send/recv_off_cells).
+    integer(ip), allocatable   :: halo_send_idx(:), halo_recv_idx(:)
+    !> Pack buffers, n_fields values per cell, cell-major; shared by every exchange kind since
+    !> only one exchange is ever in flight (halo_exchange_active). Grow-only.
+    real(rp), allocatable      :: halo_sbuf(:), halo_rbuf(:)
+    !> Fields live on the device (set via set_halo_device once the solver makes them resident):
+    !> pack/unpack run there, and MPI gets device buffers when halo_gpu_aware, else the packed
+    !> buffers alone are staged through the host.
+    logical                    :: halo_on_device = .false.
+    logical                    :: halo_gpu_aware = .false.
 
     ! -- F9: face coloring for thread-safe parallel face accumulation.
     ! face_color_perm(:) is a permutation of 1..n_faces grouped by color so
@@ -184,6 +193,7 @@ module mod_mesh
     procedure :: begin_halos_scalars       => mesh_begin_halos_scalars
     procedure :: end_halos_scalars         => mesh_end_halos_scalars
     procedure :: exchange_halos_state      => mesh_exchange_halos_state
+    procedure :: set_halo_device           => mesh_set_halo_device
     procedure :: begin_halos_state         => mesh_begin_halos_state
     procedure :: end_halos_state           => mesh_end_halos_state
     procedure :: destroy                   => mesh_destroy
@@ -727,354 +737,178 @@ contains
     n = ls_degenerate_count
   end function mesh_ls_degenerate_count
 
+  !> Switch halo pack/unpack to the device (fields must stay device-resident from now on).
+  !> gpu_aware: MPI accepts device buffers directly; otherwise only the packed buffers are
+  !> staged through the host.
+  subroutine mesh_set_halo_device(self, on_device, gpu_aware)
+    class(Mesh), intent(inout) :: self
+    logical,     intent(in)    :: on_device, gpu_aware
+
+    call ensure_halo_layout(self)
+    if (on_device .and. .not. self%halo_on_device .and. self%halo_layout_ready .and. &
+        allocated(self%halo_send_idx)) then
+      !$acc enter data copyin(self%halo_send_idx, self%halo_recv_idx)
+      if (allocated(self%halo_sbuf)) then
+        !$acc enter data create(self%halo_sbuf, self%halo_rbuf)
+      end if
+    end if
+    self%halo_on_device = on_device .and. allocated(self%halo_send_idx)
+    self%halo_gpu_aware = gpu_aware .and. self%halo_on_device
+  end subroutine mesh_set_halo_device
+
   !> MPI halo exchange for a scalar field (n_cells + n_ghost).
   subroutine mesh_exchange_halos_scalar(self, phi)
-    class(Mesh),  intent(inout) :: self
-    real(rp),     intent(inout) :: phi(:)
+    class(Mesh), intent(inout), target :: self
+    real(rp),    intent(inout) :: phi(:)  ! (n_cells + n_ghost)
     call mesh_begin_halos_scalar(self, phi)
     call mesh_end_halos_scalar(self, phi)
   end subroutine mesh_exchange_halos_scalar
 
   subroutine mesh_begin_halos_scalar(self, phi)
-    class(Mesh),  intent(inout) :: self
-    real(rp),     intent(inout) :: phi(:)
+    class(Mesh), intent(inout), target :: self
+    real(rp),    intent(inout) :: phi(:)  ! (n_cells + n_ghost)
 
-    integer(ip) :: h, i, nh
-    integer(ip) :: nreq, tag, send_total, recv_total
+    integer(ip) :: k, ns
+    integer(ip), pointer :: sidx(:)
+    real(rp),    pointer :: sb(:)
+    logical :: dev
 
-    if (self%nranks == 1 .or. .not. allocated(self%halos)) return
-    if (self%halo_exchange_active) error stop 'mesh_begin_halos_scalar: halo exchange already active'
-
-    call ensure_halo_layout(self)
-
-    nh = size(self%halos)
-    if (nh <= 0) return
-
-    send_total = self%halo_send_cells_total
-    recv_total = self%halo_recv_cells_total
-    call ensure_real_buffer_size(self%halo_sbuf_scalar, send_total)
-    call ensure_real_buffer_size(self%halo_rbuf_scalar, recv_total)
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        do i = 1, halo%n_send
-          self%halo_sbuf_scalar(self%halo_send_off_cells(h) + i) = phi(halo%send_cells(i))
-        end do
-      end associate
+    if (.not. halo_begin_checks(self, 1_ip, 'mesh_begin_halos_scalar')) return
+    ns = self%halo_send_cells_total
+    sidx => self%halo_send_idx
+    sb => self%halo_sbuf
+    dev = self%halo_on_device
+    !$acc parallel loop if(dev) default(present)
+    do k = 1, ns
+      sb(k) = phi(sidx(k))
     end do
-
-    if (2*nh > size(self%halo_reqs)) error stop 'halo_reqs array too small - internal error'
-    nreq = 0
-    tag = HALO_TAG_SCALAR
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        nreq = nreq + 1
-        call MPI_Irecv(self%halo_rbuf_scalar(self%halo_recv_off_cells(h) + 1), halo%n_recv, MPI_DOUBLE_PRECISION, &
-                       halo%rank, tag, self%comm, self%halo_reqs(nreq))
-      end associate
-    end do
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        nreq = nreq + 1
-        call MPI_Isend(self%halo_sbuf_scalar(self%halo_send_off_cells(h) + 1), halo%n_send, MPI_DOUBLE_PRECISION, &
-                       halo%rank, tag, self%comm, self%halo_reqs(nreq))
-      end associate
-    end do
-
-    self%halo_exchange_active = .true.
+    call halo_post(self, 1_ip, HALO_TAG_SCALAR)
   end subroutine mesh_begin_halos_scalar
 
   subroutine mesh_end_halos_scalar(self, phi)
-    class(Mesh),  intent(inout) :: self
-    real(rp),     intent(inout) :: phi(:)
+    class(Mesh), intent(inout), target :: self
+    real(rp),    intent(inout) :: phi(:)  ! (n_cells + n_ghost)
 
-    integer(ip) :: h, i, nh, nreq
+    integer(ip) :: k, nr
+    integer(ip), pointer :: ridx(:)
+    real(rp),    pointer :: rb(:)
+    logical :: dev
 
-    if (self%nranks == 1 .or. .not. allocated(self%halos)) return
-    if (.not. self%halo_exchange_active) return
-
-    nh = size(self%halos)
-    if (nh <= 0) then
-      self%halo_exchange_active = .false.
-      return
-    end if
-
-    nreq = 2 * nh
-    if (nreq > 0) call MPI_Waitall(nreq, self%halo_reqs(1:nreq), MPI_STATUSES_IGNORE)
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        do i = 1, halo%n_recv
-          phi(halo%recv_cells(i)) = self%halo_rbuf_scalar(self%halo_recv_off_cells(h) + i)
-        end do
-      end associate
+    if (.not. halo_wait(self, 1_ip)) return
+    nr = self%halo_recv_cells_total
+    ridx => self%halo_recv_idx
+    rb => self%halo_rbuf
+    dev = self%halo_on_device
+    !$acc parallel loop if(dev) default(present)
+    do k = 1, nr
+      phi(ridx(k)) = rb(k)
     end do
-
-    ! See mesh_end_halos_vec: keeps a device-resident field's ghost tail in sync with the
-    ! host scatter above; if_present makes this a no-op when phi isn't on device (required,
-    ! not automatic -- update on absent data errors without it).
-    !$acc update device(phi(self%n_cells+1:self%n_cells+self%n_ghost)) if(self%n_ghost > 0) if_present
-
-    self%halo_exchange_active = .false.
+    ! Host-side exchange (fields not resident): keep a device copy some caller still holds in
+    ! a structured data region in sync; a no-op for arrays not on the device.
+    if (.not. dev) then
+      !$acc update device(phi(self%n_cells+1:self%n_cells+self%n_ghost)) if(self%n_ghost > 0) if_present
+    end if
   end subroutine mesh_end_halos_scalar
 
   !> MPI halo exchange for a 3-vector field.
   subroutine mesh_exchange_halos_vec(self, U)
-    class(Mesh), intent(inout) :: self
-    real(rp),    intent(inout) :: U(:,:)  ! U(3, n_cells+n_ghost)
+    class(Mesh), intent(inout), target :: self
+    real(rp),    intent(inout) :: U(:,:)  ! (3, n_cells + n_ghost)
     call mesh_begin_halos_vec(self, U)
     call mesh_end_halos_vec(self, U)
   end subroutine mesh_exchange_halos_vec
 
   subroutine mesh_begin_halos_vec(self, U)
-    class(Mesh), intent(inout) :: self
-    real(rp),    intent(inout) :: U(:,:)  ! U(3, n_cells+n_ghost)
-
-    integer(ip) :: h, i, nh
-    integer(ip) :: nreq, tag, send_total, recv_total
-
-    if (self%nranks == 1 .or. .not. allocated(self%halos)) return
-    if (self%halo_exchange_active) error stop 'mesh_begin_halos_vec: halo exchange already active'
-
-    call ensure_halo_layout(self)
-
-    nh = size(self%halos)
-    if (nh <= 0) return
-
-    send_total = 3 * self%halo_send_cells_total
-    recv_total = 3 * self%halo_recv_cells_total
-    call ensure_real_buffer_size(self%halo_sbuf_vec, send_total)
-    call ensure_real_buffer_size(self%halo_rbuf_vec, recv_total)
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        do i = 1, halo%n_send
-          self%halo_sbuf_vec(3*self%halo_send_off_cells(h) + 3*(i-1) + 1:3*self%halo_send_off_cells(h) + 3*i) = &
-            U(:, halo%send_cells(i))
-        end do
-      end associate
-    end do
-
-    if (2*nh > size(self%halo_reqs)) error stop 'halo_reqs array too small - internal error'
-    nreq = 0
-    tag = HALO_TAG_VECTOR
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        nreq = nreq + 1
-        call MPI_Irecv(self%halo_rbuf_vec(3*self%halo_recv_off_cells(h) + 1), 3*halo%n_recv, MPI_DOUBLE_PRECISION, &
-                       halo%rank, tag, self%comm, self%halo_reqs(nreq))
-      end associate
-    end do
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        nreq = nreq + 1
-        call MPI_Isend(self%halo_sbuf_vec(3*self%halo_send_off_cells(h) + 1), 3*halo%n_send, MPI_DOUBLE_PRECISION, &
-                       halo%rank, tag, self%comm, self%halo_reqs(nreq))
-      end associate
-    end do
-
-    self%halo_exchange_active = .true.
+    class(Mesh), intent(inout), target :: self
+    real(rp),    intent(inout) :: U(:,:)  ! (3, n_cells + n_ghost)
+    call halo_pack_fields(self, U, HALO_TAG_VECTOR, 'mesh_begin_halos_vec')
   end subroutine mesh_begin_halos_vec
 
   subroutine mesh_end_halos_vec(self, U)
-    class(Mesh), intent(inout) :: self
-    real(rp),    intent(inout) :: U(:,:)  ! U(3, n_cells+n_ghost)
-
-    integer(ip) :: h, i, nh, nreq
-
-    if (self%nranks == 1 .or. .not. allocated(self%halos)) return
-    if (.not. self%halo_exchange_active) return
-
-    nh = size(self%halos)
-    if (nh <= 0) then
-      self%halo_exchange_active = .false.
-      return
-    end if
-
-    nreq = 2 * nh
-    if (nreq > 0) call MPI_Waitall(nreq, self%halo_reqs(1:nreq), MPI_STATUSES_IGNORE)
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        do i = 1, halo%n_recv
-          U(:, halo%recv_cells(i)) = self%halo_rbuf_vec(3*self%halo_recv_off_cells(h) + 3*(i-1) + 1: &
-                                 3*self%halo_recv_off_cells(h) + 3*i)
-        end do
-      end associate
-    end do
-
-    ! Ghost cells occupy the contiguous tail [n_cells+1, n_cells+n_ghost] of every field shaped
-    ! like U, so one range update covers whatever this call's halos touched. Host U above is
-    ! always authoritative (BC application and the predictor correction are host-only), so this
-    ! is purely pushing that forward to keep a device-resident U in sync for the numerics kernels
-    ! that read ghost cells next (gradient/advection/viscous). if_present is required for safety
-    ! when U isn't on device yet (e.g. before advance_rk3w's data region opens) -- without it,
-    ! update device on absent data is a hard runtime error, not a no-op.
-    !$acc update device(U(:, self%n_cells+1:self%n_cells+self%n_ghost)) if(self%n_ghost > 0) if_present
-
-    self%halo_exchange_active = .false.
+    class(Mesh), intent(inout), target :: self
+    real(rp),    intent(inout) :: U(:,:)  ! (3, n_cells + n_ghost)
+    call halo_unpack_fields(self, U)
   end subroutine mesh_end_halos_vec
 
   !> MPI halo exchange for multiple scalar fields packed in one communication.
   subroutine mesh_exchange_halos_scalars(self, phi)
-    class(Mesh), intent(inout) :: self
+    class(Mesh), intent(inout), target :: self
     real(rp),    intent(inout) :: phi(:,:)  ! (n_fields, n_cells+n_ghost)
-
-    integer(ip) :: h, i, n_fields, nh
-    integer(ip) :: nreq, tag, send_total, recv_total
-
-    if (self%nranks == 1 .or. .not. allocated(self%halos)) return
-    if (self%halo_exchange_active) error stop 'mesh_exchange_halos_scalars: halo exchange already active'
-    call ensure_halo_layout(self)
-
-    n_fields = size(phi, 1)
-    if (n_fields <= 0) return
-
-    nh = size(self%halos)
-    if (nh <= 0) return
-
-    send_total = n_fields * self%halo_send_cells_total
-    recv_total = n_fields * self%halo_recv_cells_total
-    call ensure_real_buffer_size(self%halo_sbuf_scalars, send_total)
-    call ensure_real_buffer_size(self%halo_rbuf_scalars, recv_total)
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        do i = 1, halo%n_send
-          self%halo_sbuf_scalars(n_fields*self%halo_send_off_cells(h) + n_fields*(i-1) + 1: &
-                                 n_fields*self%halo_send_off_cells(h) + n_fields*i) = phi(:, halo%send_cells(i))
-        end do
-      end associate
-    end do
-
-    if (2*nh > size(self%halo_reqs)) error stop 'halo_reqs array too small - internal error'
-    nreq = 0
-    tag = HALO_TAG_MULTI
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        nreq = nreq + 1
-        call MPI_Irecv(self%halo_rbuf_scalars(n_fields*self%halo_recv_off_cells(h) + 1), &
-                       n_fields*halo%n_recv, MPI_DOUBLE_PRECISION, halo%rank, tag, self%comm, self%halo_reqs(nreq))
-      end associate
-    end do
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        nreq = nreq + 1
-        call MPI_Isend(self%halo_sbuf_scalars(n_fields*self%halo_send_off_cells(h) + 1), &
-                       n_fields*halo%n_send, MPI_DOUBLE_PRECISION, halo%rank, tag, self%comm, self%halo_reqs(nreq))
-      end associate
-    end do
-
-    if (nreq > 0) call MPI_Waitall(nreq, self%halo_reqs(1:nreq), MPI_STATUSES_IGNORE)
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        do i = 1, halo%n_recv
-          phi(:, halo%recv_cells(i)) = self%halo_rbuf_scalars(n_fields*self%halo_recv_off_cells(h) + n_fields*(i-1) + 1: &
-                                  n_fields*self%halo_recv_off_cells(h) + n_fields*i)
-        end do
-      end associate
-    end do
+    call mesh_begin_halos_scalars(self, phi)
+    call mesh_end_halos_scalars(self, phi)
   end subroutine mesh_exchange_halos_scalars
 
   subroutine mesh_begin_halos_scalars(self, phi)
-    class(Mesh), intent(inout) :: self
+    class(Mesh), intent(inout), target :: self
     real(rp),    intent(inout) :: phi(:,:)  ! (n_fields, n_cells+n_ghost)
-
-    integer(ip) :: h, i, n_fields, nh
-    integer(ip) :: nreq, tag, send_total, recv_total
-
-    if (self%nranks == 1 .or. .not. allocated(self%halos)) return
-    if (self%halo_exchange_active) error stop 'mesh_begin_halos_scalars: halo exchange already active'
-
-    call ensure_halo_layout(self)
-
-    n_fields = size(phi, 1)
-    if (n_fields <= 0) return
-
-    nh = size(self%halos)
-    if (nh <= 0) return
-
-    send_total = n_fields * self%halo_send_cells_total
-    recv_total = n_fields * self%halo_recv_cells_total
-    call ensure_real_buffer_size(self%halo_sbuf_scalars, send_total)
-    call ensure_real_buffer_size(self%halo_rbuf_scalars, recv_total)
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        do i = 1, halo%n_send
-          self%halo_sbuf_scalars(n_fields*self%halo_send_off_cells(h) + n_fields*(i-1) + 1: &
-                                 n_fields*self%halo_send_off_cells(h) + n_fields*i) = phi(:, halo%send_cells(i))
-        end do
-      end associate
-    end do
-
-    if (2*nh > size(self%halo_reqs)) error stop 'halo_reqs array too small - internal error'
-    nreq = 0
-    tag = HALO_TAG_MULTI
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        nreq = nreq + 1
-        call MPI_Irecv(self%halo_rbuf_scalars(n_fields*self%halo_recv_off_cells(h) + 1), &
-                       n_fields*halo%n_recv, MPI_DOUBLE_PRECISION, halo%rank, tag, self%comm, self%halo_reqs(nreq))
-      end associate
-    end do
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        nreq = nreq + 1
-        call MPI_Isend(self%halo_sbuf_scalars(n_fields*self%halo_send_off_cells(h) + 1), &
-                       n_fields*halo%n_send, MPI_DOUBLE_PRECISION, halo%rank, tag, self%comm, self%halo_reqs(nreq))
-      end associate
-    end do
-
-    self%halo_exchange_active = .true.
+    call halo_pack_fields(self, phi, HALO_TAG_MULTI, 'mesh_begin_halos_scalars')
   end subroutine mesh_begin_halos_scalars
 
   subroutine mesh_end_halos_scalars(self, phi)
-    class(Mesh), intent(inout) :: self
+    class(Mesh), intent(inout), target :: self
     real(rp),    intent(inout) :: phi(:,:)  ! (n_fields, n_cells+n_ghost)
-
-    integer(ip) :: h, i, n_fields, nh, nreq
-
-    if (self%nranks == 1 .or. .not. allocated(self%halos)) return
-    if (.not. self%halo_exchange_active) return
-
-    n_fields = size(phi, 1)
-    nh = size(self%halos)
-    if (n_fields <= 0 .or. nh <= 0) then
-      self%halo_exchange_active = .false.
-      return
-    end if
-
-    nreq = 2 * nh
-    if (nreq > 0) call MPI_Waitall(nreq, self%halo_reqs(1:nreq), MPI_STATUSES_IGNORE)
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        do i = 1, halo%n_recv
-          phi(:, halo%recv_cells(i)) = self%halo_rbuf_scalars(n_fields*self%halo_recv_off_cells(h) + n_fields*(i-1) + 1: &
-                                  n_fields*self%halo_recv_off_cells(h) + n_fields*i)
-        end do
-      end associate
-    end do
-
-    ! See mesh_end_halos_vec: keeps a device-resident field's ghost tail in sync with the
-    ! host scatter above; if_present is required so this is a no-op when phi isn't on device.
-    !$acc update device(phi(:, self%n_cells+1:self%n_cells+self%n_ghost)) if(self%n_ghost > 0) if_present
-
-    self%halo_exchange_active = .false.
+    call halo_unpack_fields(self, phi)
   end subroutine mesh_end_halos_scalars
+
+  !> Pack an (n_fields, n_cells+n_ghost) field and post the exchange.
+  subroutine halo_pack_fields(self, phi, tag, caller)
+    class(Mesh), intent(inout), target :: self
+    real(rp),    intent(inout) :: phi(:,:)
+    integer(ip), intent(in)    :: tag
+    character(*), intent(in)   :: caller
+
+    integer(ip) :: k, j, ns, nf
+    integer(ip), pointer :: sidx(:)
+    real(rp),    pointer :: sb(:)
+    logical :: dev
+
+    nf = size(phi, 1)
+    if (.not. halo_begin_checks(self, nf, caller)) return
+    ns = self%halo_send_cells_total
+    sidx => self%halo_send_idx
+    sb => self%halo_sbuf
+    dev = self%halo_on_device
+    !$acc parallel loop collapse(2) if(dev) default(present)
+    do k = 1, ns
+      do j = 1, nf
+        sb(nf*(k-1) + j) = phi(j, sidx(k))
+      end do
+    end do
+    call halo_post(self, nf, tag)
+  end subroutine halo_pack_fields
+
+  !> Complete an exchange started by halo_pack_fields and scatter into the ghost cells.
+  subroutine halo_unpack_fields(self, phi)
+    class(Mesh), intent(inout), target :: self
+    real(rp),    intent(inout) :: phi(:,:)
+
+    integer(ip) :: k, j, nr, nf
+    integer(ip), pointer :: ridx(:)
+    real(rp),    pointer :: rb(:)
+    logical :: dev
+
+    nf = size(phi, 1)
+    if (.not. halo_wait(self, nf)) return
+    nr = self%halo_recv_cells_total
+    ridx => self%halo_recv_idx
+    rb => self%halo_rbuf
+    dev = self%halo_on_device
+    !$acc parallel loop collapse(2) if(dev) default(present)
+    do k = 1, nr
+      do j = 1, nf
+        phi(j, ridx(k)) = rb(nf*(k-1) + j)
+      end do
+    end do
+    ! See mesh_end_halos_scalar.
+    if (.not. dev) then
+      !$acc update device(phi(:, self%n_cells+1:self%n_cells+self%n_ghost)) if(self%n_ghost > 0) if_present
+    end if
+  end subroutine halo_unpack_fields
 
   !> Batched halo exchange for solver state: velocity, pressure, temperature,
   !> and optional passive scalars.
   subroutine mesh_exchange_halos_state(self, U, p, T, C)
-    class(Mesh), intent(inout) :: self
+    class(Mesh), intent(inout), target :: self
     real(rp),    intent(inout) :: U(:,:)  ! (3, n_cells+n_ghost)
     real(rp),    intent(inout) :: p(:)  ! (n_cells+n_ghost)
     real(rp),    intent(inout) :: T(:)  ! (n_cells+n_ghost)
@@ -1084,117 +918,177 @@ contains
   end subroutine mesh_exchange_halos_state
 
   subroutine mesh_begin_halos_state(self, U, p, T, C)
-    class(Mesh), intent(inout) :: self
+    class(Mesh), intent(inout), target :: self
     real(rp),    intent(inout) :: U(:,:)  ! (3, n_cells+n_ghost)
     real(rp),    intent(inout) :: p(:)  ! (n_cells+n_ghost)
     real(rp),    intent(inout) :: T(:)  ! (n_cells+n_ghost)
     real(rp),    intent(inout), optional :: C(:,:)  ! (n_scalars, n_cells+n_ghost)
 
-    integer(ip) :: h, i, nh, n_scalars, n_fields, cidx, base
-    integer(ip) :: nreq, tag, send_total, recv_total
-
-    if (self%nranks == 1 .or. .not. allocated(self%halos)) return
-    if (self%halo_exchange_active) error stop 'mesh_begin_halos_state: halo exchange already active'
-    call ensure_halo_layout(self)
-
-    nh = size(self%halos)
-    if (nh <= 0) return
+    integer(ip) :: k, j, ns, nf, n_scalars, cidx, base
+    integer(ip), pointer :: sidx(:)
+    real(rp),    pointer :: sb(:)
+    logical :: dev
 
     n_scalars = 0
     if (present(C)) n_scalars = size(C, 1)
-    n_fields = 5 + n_scalars
-
-    send_total = n_fields * self%halo_send_cells_total
-    recv_total = n_fields * self%halo_recv_cells_total
-    call ensure_real_buffer_size(self%halo_sbuf_scalars, send_total)
-    call ensure_real_buffer_size(self%halo_rbuf_scalars, recv_total)
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        do i = 1, halo%n_send
-          cidx = halo%send_cells(i)
-          base = n_fields*self%halo_send_off_cells(h) + n_fields*(i-1)
-          self%halo_sbuf_scalars(base + 1:base + 3) = U(:, cidx)
-          self%halo_sbuf_scalars(base + 4) = p(cidx)
-          self%halo_sbuf_scalars(base + 5) = T(cidx)
-          if (n_scalars > 0) self%halo_sbuf_scalars(base + 6:base + 5 + n_scalars) = C(:, cidx)
+    nf = 5 + n_scalars
+    if (.not. halo_begin_checks(self, nf, 'mesh_begin_halos_state')) return
+    ns = self%halo_send_cells_total
+    sidx => self%halo_send_idx
+    sb => self%halo_sbuf
+    dev = self%halo_on_device
+    !$acc parallel loop if(dev) default(present) private(cidx, base)
+    do k = 1, ns
+      cidx = sidx(k)
+      base = nf*(k-1)
+      sb(base + 1) = U(1, cidx)
+      sb(base + 2) = U(2, cidx)
+      sb(base + 3) = U(3, cidx)
+      sb(base + 4) = p(cidx)
+      sb(base + 5) = T(cidx)
+    end do
+    ! C is optional: an absent optional can't be named in an !$acc region, hence the split loop.
+    if (n_scalars > 0) then
+      !$acc parallel loop collapse(2) if(dev) default(present)
+      do k = 1, ns
+        do j = 1, n_scalars
+          sb(nf*(k-1) + 5 + j) = C(j, sidx(k))
         end do
-      end associate
-    end do
-
-    if (2*nh > size(self%halo_reqs)) error stop 'halo_reqs array too small - internal error'
-    nreq = 0
-    tag = HALO_TAG_STATE
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        nreq = nreq + 1
-        call MPI_Irecv(self%halo_rbuf_scalars(n_fields*self%halo_recv_off_cells(h) + 1), &
-                       n_fields*halo%n_recv, MPI_DOUBLE_PRECISION, halo%rank, tag, self%comm, self%halo_reqs(nreq))
-      end associate
-    end do
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        nreq = nreq + 1
-        call MPI_Isend(self%halo_sbuf_scalars(n_fields*self%halo_send_off_cells(h) + 1), &
-                       n_fields*halo%n_send, MPI_DOUBLE_PRECISION, halo%rank, tag, self%comm, self%halo_reqs(nreq))
-      end associate
-    end do
-
-    self%halo_exchange_active = .true.
+      end do
+    end if
+    call halo_post(self, nf, HALO_TAG_STATE)
   end subroutine mesh_begin_halos_state
 
   subroutine mesh_end_halos_state(self, U, p, T, C)
-    class(Mesh), intent(inout) :: self
+    class(Mesh), intent(inout), target :: self
     real(rp),    intent(inout) :: U(:,:)  ! (3, n_cells+n_ghost)
     real(rp),    intent(inout) :: p(:)  ! (n_cells+n_ghost)
     real(rp),    intent(inout) :: T(:)  ! (n_cells+n_ghost)
     real(rp),    intent(inout), optional :: C(:,:)  ! (n_scalars, n_cells+n_ghost)
 
-    integer(ip) :: h, i, nh, n_scalars, n_fields, cidx, base, nreq
-
-    if (self%nranks == 1 .or. .not. allocated(self%halos)) return
-    if (.not. self%halo_exchange_active) return
-
-    nh = size(self%halos)
-    if (nh <= 0) then
-      self%halo_exchange_active = .false.
-      return
-    end if
+    integer(ip) :: k, j, nr, nf, n_scalars, cidx, base
+    integer(ip), pointer :: ridx(:)
+    real(rp),    pointer :: rb(:)
+    logical :: dev
 
     n_scalars = 0
     if (present(C)) n_scalars = size(C, 1)
-    n_fields = 5 + n_scalars
-    nreq = 2 * nh
-    if (nreq > 0) call MPI_Waitall(nreq, self%halo_reqs(1:nreq), MPI_STATUSES_IGNORE)
-
-    do h = 1, nh
-      associate(halo => self%halos(h))
-        do i = 1, halo%n_recv
-          cidx = halo%recv_cells(i)
-          base = n_fields*self%halo_recv_off_cells(h) + n_fields*(i-1)
-          U(:, cidx) = self%halo_rbuf_scalars(base + 1:base + 3)
-          p(cidx) = self%halo_rbuf_scalars(base + 4)
-          T(cidx) = self%halo_rbuf_scalars(base + 5)
-          if (n_scalars > 0) C(:, cidx) = self%halo_rbuf_scalars(base + 6:base + 5 + n_scalars)
-        end do
-      end associate
+    nf = 5 + n_scalars
+    if (.not. halo_wait(self, nf)) return
+    nr = self%halo_recv_cells_total
+    ridx => self%halo_recv_idx
+    rb => self%halo_rbuf
+    dev = self%halo_on_device
+    !$acc parallel loop if(dev) default(present) private(cidx, base)
+    do k = 1, nr
+      cidx = ridx(k)
+      base = nf*(k-1)
+      U(1, cidx) = rb(base + 1)
+      U(2, cidx) = rb(base + 2)
+      U(3, cidx) = rb(base + 3)
+      p(cidx)    = rb(base + 4)
+      T(cidx)    = rb(base + 5)
     end do
-
-    ! See mesh_end_halos_vec: keeps device-resident fields' ghost tails in sync with the host
-    ! scatter above; if_present is required so this is a no-op for arrays not on device.
-    !$acc update device(U(:, self%n_cells+1:self%n_cells+self%n_ghost), &
-    !$acc      p(self%n_cells+1:self%n_cells+self%n_ghost), &
-    !$acc      T(self%n_cells+1:self%n_cells+self%n_ghost)) if(self%n_ghost > 0) if_present
-    ! C is optional: referencing it in an !$acc clause when absent is invalid regardless of the
-    ! clause's own runtime if(), since data clauses are resolved statically -- guard with a plain
-    ! Fortran present() check instead (see mod_gradient.f90 for the same constraint on U_bnd).
-    if (present(C)) then
-      !$acc update device(C(:, self%n_cells+1:self%n_cells+self%n_ghost)) if(self%n_ghost > 0 .and. n_scalars > 0) if_present
+    if (n_scalars > 0) then
+      !$acc parallel loop collapse(2) if(dev) default(present)
+      do k = 1, nr
+        do j = 1, n_scalars
+          C(j, ridx(k)) = rb(nf*(k-1) + 5 + j)
+        end do
+      end do
     end if
 
-    self%halo_exchange_active = .false.
+    ! See mesh_end_halos_scalar.
+    if (.not. dev) then
+      !$acc update device(U(:, self%n_cells+1:self%n_cells+self%n_ghost), &
+      !$acc      p(self%n_cells+1:self%n_cells+self%n_ghost), &
+      !$acc      T(self%n_cells+1:self%n_cells+self%n_ghost)) if(self%n_ghost > 0) if_present
+      ! C is optional: referencing it in an !$acc clause when absent is invalid regardless of the
+      ! clause's own runtime if(), since data clauses are resolved statically -- guard with a plain
+      ! Fortran present() check instead (see mod_gradient.f90 for the same constraint on U_bnd).
+      if (present(C)) then
+        !$acc update device(C(:, self%n_cells+1:self%n_cells+self%n_ghost)) if(self%n_ghost > 0 .and. n_scalars > 0) if_present
+      end if
+    end if
   end subroutine mesh_end_halos_state
+
+  !> Common entry checks for a halo exchange of nf values per cell; sizes the pack buffers.
+  !> Returns .false. when there is nothing to exchange on this rank.
+  logical function halo_begin_checks(self, nf, caller) result(go)
+    class(Mesh), intent(inout) :: self
+    integer(ip), intent(in)    :: nf
+    character(*), intent(in)   :: caller
+
+    go = .false.
+    if (self%nranks == 1 .or. .not. allocated(self%halos)) return
+    if (self%halo_exchange_active) then
+      write(*, '(A)') caller//': halo exchange already active'
+      error stop 1
+    end if
+    call ensure_halo_layout(self)
+    if (nf <= 0 .or. size(self%halos) <= 0) return
+    if (2*size(self%halos) > size(self%halo_reqs)) error stop 'halo_reqs array too small - internal error'
+    call ensure_halo_buffers(self, nf * self%halo_send_cells_total, nf * self%halo_recv_cells_total)
+    go = .true.
+  end function halo_begin_checks
+
+  !> Post receives and sends for a packed buffer of nf values per cell.
+  subroutine halo_post(self, nf, tag)
+    class(Mesh), intent(inout), target :: self
+    integer(ip), intent(in)    :: nf, tag
+
+    integer(ip) :: h, nreq, ns_tot
+    real(rp), pointer :: sb(:), rb(:)
+    logical :: dev, aware
+
+    sb => self%halo_sbuf
+    rb => self%halo_rbuf
+    dev = self%halo_on_device
+    aware = self%halo_gpu_aware
+    ns_tot = nf * self%halo_send_cells_total
+    if (dev .and. .not. aware) then
+      !$acc update host(sb(1:ns_tot))
+    end if
+
+    nreq = 0
+    !$acc host_data use_device(sb, rb) if(aware)
+    do h = 1, size(self%halos)
+      nreq = nreq + 1
+      call MPI_Irecv(rb(nf*self%halo_recv_off_cells(h) + 1), nf*self%halos(h)%n_recv, &
+                     MPI_DOUBLE_PRECISION, self%halos(h)%rank, tag, self%comm, self%halo_reqs(nreq))
+    end do
+    do h = 1, size(self%halos)
+      nreq = nreq + 1
+      call MPI_Isend(sb(nf*self%halo_send_off_cells(h) + 1), nf*self%halos(h)%n_send, &
+                     MPI_DOUBLE_PRECISION, self%halos(h)%rank, tag, self%comm, self%halo_reqs(nreq))
+    end do
+    !$acc end host_data
+    self%halo_nreq = nreq
+    self%halo_exchange_active = .true.
+  end subroutine halo_post
+
+  !> Complete the in-flight exchange; returns .false. when none is active.
+  logical function halo_wait(self, nf) result(done)
+    class(Mesh), intent(inout), target :: self
+    integer(ip), intent(in)    :: nf
+
+    integer(ip) :: nr_tot
+    real(rp), pointer :: rb(:)
+
+    done = .false.
+    if (self%nranks == 1 .or. .not. allocated(self%halos)) return
+    if (.not. self%halo_exchange_active) return
+    if (self%halo_nreq > 0) &
+      call MPI_Waitall(self%halo_nreq, self%halo_reqs(1:self%halo_nreq), MPI_STATUSES_IGNORE)
+    self%halo_exchange_active = .false.
+    self%halo_nreq = 0
+    if (self%halo_on_device .and. .not. self%halo_gpu_aware) then
+      rb => self%halo_rbuf
+      nr_tot = nf * self%halo_recv_cells_total
+      !$acc update device(rb(1:nr_tot))
+    end if
+    done = .true.
+  end function halo_wait
 
   subroutine mesh_destroy(self)
     class(Mesh), intent(inout) :: self
@@ -1221,12 +1115,17 @@ contains
     if (allocated(self%halo_send_off_cells)) deallocate(self%halo_send_off_cells)
     if (allocated(self%halo_recv_off_cells)) deallocate(self%halo_recv_off_cells)
     if (allocated(self%halo_reqs))           deallocate(self%halo_reqs)
-    if (allocated(self%halo_sbuf_scalar))    deallocate(self%halo_sbuf_scalar)
-    if (allocated(self%halo_rbuf_scalar))    deallocate(self%halo_rbuf_scalar)
-    if (allocated(self%halo_sbuf_vec))       deallocate(self%halo_sbuf_vec)
-    if (allocated(self%halo_rbuf_vec))       deallocate(self%halo_rbuf_vec)
-    if (allocated(self%halo_sbuf_scalars))   deallocate(self%halo_sbuf_scalars)
-    if (allocated(self%halo_rbuf_scalars))   deallocate(self%halo_rbuf_scalars)
+    if (self%halo_on_device) then
+      if (allocated(self%halo_sbuf)) then
+        !$acc exit data delete(self%halo_sbuf, self%halo_rbuf)
+      end if
+      !$acc exit data delete(self%halo_send_idx, self%halo_recv_idx)
+      self%halo_on_device = .false.
+    end if
+    if (allocated(self%halo_send_idx))       deallocate(self%halo_send_idx)
+    if (allocated(self%halo_recv_idx))       deallocate(self%halo_recv_idx)
+    if (allocated(self%halo_sbuf))           deallocate(self%halo_sbuf)
+    if (allocated(self%halo_rbuf))           deallocate(self%halo_rbuf)
     self%halo_layout_ready = .false.
     self%halo_exchange_active = .false.
     self%halo_send_cells_total = 0
@@ -1256,25 +1155,42 @@ contains
       self%halo_recv_cells_total = self%halo_recv_cells_total + self%halos(h)%n_recv
     end do
 
+    allocate(self%halo_send_idx(max(1_ip, self%halo_send_cells_total)), source=1_ip)
+    allocate(self%halo_recv_idx(max(1_ip, self%halo_recv_cells_total)), source=1_ip)
+    do h = 1, nh
+      if (self%halos(h)%n_send > 0) &
+        self%halo_send_idx(self%halo_send_off_cells(h)+1:self%halo_send_off_cells(h)+self%halos(h)%n_send) = &
+          self%halos(h)%send_cells(1:self%halos(h)%n_send)
+      if (self%halos(h)%n_recv > 0) &
+        self%halo_recv_idx(self%halo_recv_off_cells(h)+1:self%halo_recv_off_cells(h)+self%halos(h)%n_recv) = &
+          self%halos(h)%recv_cells(1:self%halos(h)%n_recv)
+    end do
+
     allocate(self%halo_reqs(max(1_ip, 2*nh)))
     self%halo_layout_ready = .true.
   end subroutine ensure_halo_layout
 
-  subroutine ensure_real_buffer_size(buf, needed)
-    real(rp), allocatable, intent(inout) :: buf(:)
-    integer(ip),           intent(in)    :: needed
-    integer(ip) :: nalloc
+  !> Grow-only pack buffers; keeps the device copies in step once exchanges run on the device.
+  subroutine ensure_halo_buffers(self, n_send, n_recv)
+    class(Mesh), intent(inout) :: self
+    integer(ip), intent(in)    :: n_send, n_recv
 
-    nalloc = max(1_ip, needed)
-    if (.not. allocated(buf)) then
-      allocate(buf(nalloc))
-      return
+    logical :: grow
+
+    grow = .not. allocated(self%halo_sbuf)
+    if (.not. grow) grow = size(self%halo_sbuf) < n_send .or. size(self%halo_rbuf) < n_recv
+    if (.not. grow) return
+    if (allocated(self%halo_sbuf)) then
+      if (self%halo_on_device) then
+        !$acc exit data delete(self%halo_sbuf, self%halo_rbuf)
+      end if
+      deallocate(self%halo_sbuf, self%halo_rbuf)
     end if
-    if (size(buf) < nalloc) then
-      deallocate(buf)
-      allocate(buf(nalloc))
+    allocate(self%halo_sbuf(max(1_ip, n_send)), self%halo_rbuf(max(1_ip, n_recv)))
+    if (self%halo_on_device) then
+      !$acc enter data create(self%halo_sbuf, self%halo_rbuf)
     end if
-  end subroutine ensure_real_buffer_size
+  end subroutine ensure_halo_buffers
 
   ! Helper: invert a symmetric 3x3 matrix via cofactors
   pure subroutine invert3x3(A, Ainv, det)
