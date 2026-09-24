@@ -287,6 +287,15 @@ set(EXT_INSTALL "${DOPAMINE_EXTERNAL_DIR}/install")
 file(MAKE_DIRECTORY "${EXT_INSTALL}/include" "${EXT_INSTALL}/lib")
 list(PREPEND CMAKE_PREFIX_PATH "${EXT_INSTALL}")
 
+# A non-system HDF5 (HDF5_ROOT) has to be forwarded to the NetCDF/CGNS auto-builds explicitly:
+# they are separate CMake projects and don't see this project's cache.
+set(_dopamine_hdf5_args)
+if(HDF5_ROOT)
+  list(APPEND _dopamine_hdf5_args -DHDF5_ROOT=${HDF5_ROOT})
+elseif(DEFINED ENV{HDF5_ROOT})
+  list(APPEND _dopamine_hdf5_args -DHDF5_ROOT=$ENV{HDF5_ROOT})
+endif()
+
 # ============================================================================
 # NetCDF (required for sampling/output): system package first, auto-build fallback
 # ============================================================================
@@ -351,6 +360,7 @@ if(NOT DOPAMINE_HAVE_SYSTEM_NETCDF)
         -DENABLE_DAP=OFF
         -DENABLE_BYTERANGE=OFF
         -DENABLE_NCZARR=OFF
+        ${_dopamine_hdf5_args}
       BUILD_BYPRODUCTS
         "${EXT_INSTALL}/lib/libnetcdf${CMAKE_SHARED_LIBRARY_SUFFIX}"
       LOG_DOWNLOAD ON LOG_CONFIGURE ON LOG_BUILD ON LOG_INSTALL ON
@@ -450,6 +460,7 @@ if(NOT DOPAMINE_HAVE_SYSTEM_CGNS)
         -DCGNS_BUILD_SHARED=ON
         -DCGNS_ENABLE_TESTS=OFF
         -DCGNS_BUILD_CGNSTOOLS=OFF
+        ${_dopamine_hdf5_args}
       BUILD_BYPRODUCTS
         "${EXT_INSTALL}/lib/libcgns${CMAKE_SHARED_LIBRARY_SUFFIX}"
         "${EXT_INSTALL}/include/cgns.mod"
