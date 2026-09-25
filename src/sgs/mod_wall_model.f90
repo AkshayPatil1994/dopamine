@@ -31,6 +31,9 @@ module mod_wall_model
   real(rp),    allocatable, save :: y_w_arr(:)       ! wall-normal distance to the sampling cell
   integer(ip), allocatable, save :: sample_cell(:)   ! cell index sampled by the wall model
   real(rp),    allocatable, save :: u_par_filt(:,:)  ! (3, n_bnd) time-filtered sampled velocity
+  ! The sampling geometry is pushed to the device once when built; the filter state is only ever
+  ! read and updated by the device kernel in apply_wall_model_bc.
+  !$acc declare create(y_w_arr, sample_cell, u_par_filt)
 
   !> False until the time filter has been seeded with its first instantaneous sample.
   logical, save :: filt_ready = .false.
@@ -39,6 +42,7 @@ contains
 
   !> Reichardt (1951) law of the wall: u+ as a function of y+, valid from the wall through the log layer.
   pure subroutine reichardt_uplus(yplus, c_buf, uplus, duplus)
+    !$acc routine seq
     real(rp), intent(in)  :: yplus, c_buf
     real(rp), intent(out) :: uplus, duplus
     real(rp) :: e1, e2
@@ -53,15 +57,19 @@ contains
   end subroutine reichardt_uplus
 
   !> Compute friction velocity and shear stress magnitude from wall-parallel velocity.
-  subroutine compute_wall_stress(u_par, y_w, nu, u_tau, tau_w_mag)
+  !> Newton solve for u_tau (device-callable); capped reports the viscous-sublayer cap.
+  pure subroutine wall_stress_newton(u_par, y_w, nu, u_tau, tau_w_mag, capped)
+    !$acc routine seq
     real(rp), intent(in)  :: u_par, y_w, nu
     real(rp), intent(out) :: u_tau, tau_w_mag
+    logical,  intent(out) :: capped
 
     real(rp) :: u_tau_new, yplus, f, df, uplus, duplus, inv_nu, y_w_inv_nu
     integer(ip) :: iter
     integer(ip), parameter :: MAX_ITER = 50
     real(rp), parameter :: TOL = 1.0e-8_rp
 
+    capped = .false.
     if (u_par <= SMALL .or. y_w <= SMALL) then
       u_tau = 0.0_rp
       tau_w_mag = 0.0_rp
@@ -95,9 +103,18 @@ contains
 
     ! Diagnostic only: counts faces where the matching point falls in the viscous sublayer
     ! (mesh too fine for a wall model there); u_tau itself is not clamped.
-    if (u_tau * y_w_inv_nu < 1.0_rp) utau_cap_count = utau_cap_count + 1_ip
+    capped = (u_tau * y_w_inv_nu < 1.0_rp)
 
     tau_w_mag = u_tau**2
+  end subroutine wall_stress_newton
+
+  subroutine compute_wall_stress(u_par, y_w, nu, u_tau, tau_w_mag)
+    real(rp), intent(in)  :: u_par, y_w, nu
+    real(rp), intent(out) :: u_tau, tau_w_mag
+    logical :: capped
+
+    call wall_stress_newton(u_par, y_w, nu, u_tau, tau_w_mag, capped)
+    if (capped) utau_cap_count = utau_cap_count + 1_ip
   end subroutine compute_wall_stress
 
   !> Walk inward from the wall face to the first cell at least h_wm from the wall.
@@ -154,17 +171,19 @@ contains
   subroutine apply_wall_model_bc(U, nu, msh, tau_w_bnd, h_wm, t_filt, dt)
     real(rp),   intent(in)    :: U(:,:)  ! (3, n_cells + n_ghost)
     real(rp),   intent(in)    :: nu
-    type(Mesh), intent(in)    :: msh
+    type(Mesh), intent(in), target :: msh
     real(rp),   intent(inout) :: tau_w_bnd(:,:)  ! (3, n_bnd_faces) output
     real(rp),   intent(in), optional :: h_wm    ! sampling height; <= 0 uses the wall-adjacent cell
     real(rp),   intent(in), optional :: t_filt  ! filter time constant; <= 0 disables filtering
     real(rp),   intent(in), optional :: dt      ! time increment for this filter update
 
-    integer(ip) :: p, f, f_bnd, f_global, o, c_s
-    real(rp)    :: n_hat(3), u_par_vec(3), u_par_mag
-    real(rp)    :: y_w, u_tau, tau_mag, h_use, t_use, dt_use, w_filt
+    integer(ip) :: p, f, f_bnd, f_global, o, c_s, n_int, n_patches, n_cap, patch_id
+    real(rp)    :: n1, n2, n3, u1, u2, u3, un, u_par_mag
+    real(rp)    :: y_w, u_tau, tau_mag, h_use, t_use, dt_use, w_filt, scale
     integer(ip) :: n_bnd
-    logical     :: needs_rebuild
+    logical     :: needs_rebuild, do_filter, seed, capped
+    integer(ip), pointer :: fown(:), fpid(:), pbc(:)
+    real(rp),    pointer :: fnrm(:,:)
 
     h_use  = 0.0_rp; if (present(h_wm))   h_use  = h_wm
     t_use  = 0.0_rp; if (present(t_filt)) t_use  = t_filt
@@ -193,51 +212,76 @@ contains
             call find_sample_cell(msh, f_global, h_use, sample_cell(f_bnd), y_w_arr(f_bnd))
           end do
         end do
+        !$acc update device(y_w_arr, sample_cell, u_par_filt)
       end if
     end if
 
-    do p = 1, msh%n_patches
-      if (msh%patches(p)%bc_id /= BC_WALL_MODEL) cycle
-
-      do f = 1, msh%patches(p)%n_faces
-        f_bnd    = msh%patches(p)%start_face + f - 1
-        f_global = msh%n_int_faces + f_bnd
-        o        = msh%faces(f_global)%owner
-        n_hat    = msh%faces(f_global)%normal  ! outward unit normal
+    ! One device thread per boundary face; non-wall-model faces are skipped. The sampling
+    ! geometry and filter state live on the device (declare create above).
+    n_int = msh%n_int_faces
+    n_patches = msh%n_patches
+    fown => msh%face_owner_soa
+    fpid => msh%face_patch_id_soa
+    pbc  => msh%patch_bc_id_soa
+    fnrm => msh%face_normal_soa
+    do_filter = (t_use > SMALL .and. allocated(u_par_filt))
+    seed = .not. filt_ready
+    w_filt = 0.0_rp
+    if (do_filter) w_filt = dt_use / (t_use + dt_use)
+    n_cap = 0
+    if (n_bnd > 0 .and. allocated(sample_cell)) then
+      !$acc parallel loop default(present) copyin(U) copy(tau_w_bnd) reduction(+:n_cap) &
+      !$acc      private(f_global, patch_id, o, c_s, y_w, n1, n2, n3, u1, u2, u3, un, u_par_mag, &
+      !$acc              u_tau, tau_mag, capped, scale)
+      do f_bnd = 1, n_bnd
+        f_global = n_int + f_bnd
+        patch_id = fpid(f_global)
+        if (patch_id < 1 .or. patch_id > n_patches) cycle
+        if (pbc(patch_id) /= BC_WALL_MODEL) cycle
+        o  = fown(f_global)
+        n1 = fnrm(1, f_global)  ! outward unit normal
+        n2 = fnrm(2, f_global)
+        n3 = fnrm(3, f_global)
 
         c_s = o
-        y_w = SMALL
-        ! Split into nested ifs: .and. does not short-circuit in Fortran, so size(y_w_arr)/
-        ! sample_cell(f_bnd) must never be evaluated in the same expression as allocated().
-        if (allocated(sample_cell)) then
-          if (f_bnd >= 1 .and. f_bnd <= size(y_w_arr)) then
-            if (sample_cell(f_bnd) >= 1) c_s = sample_cell(f_bnd)
-            y_w = y_w_arr(f_bnd)
-          end if
-        end if
+        if (sample_cell(f_bnd) >= 1) c_s = sample_cell(f_bnd)
+        y_w = y_w_arr(f_bnd)
 
-        u_par_vec = U(:, c_s) - dot_product(U(:, c_s), n_hat) * n_hat
+        un = U(1, c_s)*n1 + U(2, c_s)*n2 + U(3, c_s)*n3
+        u1 = U(1, c_s) - un*n1
+        u2 = U(2, c_s) - un*n2
+        u3 = U(3, c_s) - un*n3
 
         ! Exponential time filter (Yang et al. 2017) damps the instantaneous sampled velocity.
-        if (t_use > SMALL .and. allocated(u_par_filt)) then
-          if (.not. filt_ready) then
-            u_par_filt(:, f_bnd) = u_par_vec  ! seed, else tau_w ramps from zero
+        if (do_filter) then
+          if (seed) then
+            ! seed, else tau_w ramps from zero
+            u_par_filt(1, f_bnd) = u1
+            u_par_filt(2, f_bnd) = u2
+            u_par_filt(3, f_bnd) = u3
           else
-            w_filt = dt_use / (t_use + dt_use)
-            u_par_filt(:, f_bnd) = u_par_filt(:, f_bnd) + w_filt * (u_par_vec - u_par_filt(:, f_bnd))
+            u_par_filt(1, f_bnd) = u_par_filt(1, f_bnd) + w_filt * (u1 - u_par_filt(1, f_bnd))
+            u_par_filt(2, f_bnd) = u_par_filt(2, f_bnd) + w_filt * (u2 - u_par_filt(2, f_bnd))
+            u_par_filt(3, f_bnd) = u_par_filt(3, f_bnd) + w_filt * (u3 - u_par_filt(3, f_bnd))
           end if
-          u_par_vec = u_par_filt(:, f_bnd)
+          u1 = u_par_filt(1, f_bnd)
+          u2 = u_par_filt(2, f_bnd)
+          u3 = u_par_filt(3, f_bnd)
         end if
 
-        u_par_mag = sqrt(sum(u_par_vec**2))
+        u_par_mag = sqrt(u1*u1 + u2*u2 + u3*u3)
 
-        call compute_wall_stress(u_par_mag, y_w, nu, u_tau, tau_mag)
+        call wall_stress_newton(u_par_mag, y_w, nu, u_tau, tau_mag, capped)
+        if (capped) n_cap = n_cap + 1
 
         ! Wall shear stress vector opposes the wall-parallel velocity.
-        tau_w_bnd(:, f_bnd) = (-tau_mag / (u_par_mag + SMALL)) * u_par_vec
-
+        scale = -tau_mag / (u_par_mag + SMALL)
+        tau_w_bnd(1, f_bnd) = scale * u1
+        tau_w_bnd(2, f_bnd) = scale * u2
+        tau_w_bnd(3, f_bnd) = scale * u3
       end do
-    end do
+    end if
+    utau_cap_count = utau_cap_count + n_cap
 
     if (t_use > SMALL) filt_ready = .true.
   end subroutine apply_wall_model_bc

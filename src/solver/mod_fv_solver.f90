@@ -1849,21 +1849,42 @@ contains
   !> Add the wall-model traction to H_U as an acceleration (thin-wall approximation).
   !> In H rather than applied post-predictor so it carries the RK3 alpha/beta weighting.
   subroutine add_wall_stress_to_rhs(self, H_U)
-    class(FVSolver), intent(in)    :: self
+    class(FVSolver), intent(in), target :: self
     real(rp),        intent(inout) :: H_U(:,:)  ! (3, nc)
 
-    integer(ip) :: p, qidx, f, f_bnd, f_global, o
+    integer(ip) :: f_bnd, f_global, o, q, nc, n_int, n_bnd, n_patches
+    real(rp)    :: w
+    integer(ip), pointer :: fown(:), fpid(:), pbc(:)
+    real(rp),    pointer :: farea(:), cvol(:), tau(:,:)
 
-    do qidx = 1, self%n_wallmodel_patches
-      p = self%wallmodel_patches(qidx)
-      do f = 1, self%mesh%patches(p)%n_faces
-        f_bnd    = self%mesh%patches(p)%start_face + f - 1
-        f_global = self%mesh%n_int_faces + f_bnd
-        o        = self%mesh%faces(f_global)%owner
-        if (o < 1 .or. o > self%mesh%n_cells) cycle
-        H_U(:, o) = H_U(:, o) + self%tau_w_bnd(:, f_bnd) * &
-                    self%mesh%faces(f_global)%area / self%mesh%cells(o)%volume
-      end do
+    if (self%n_wallmodel_patches <= 0) return
+    nc = self%mesh%n_cells
+    n_int = self%mesh%n_int_faces
+    n_bnd = self%mesh%n_bnd_faces
+    n_patches = self%mesh%n_patches
+    fown => self%mesh%face_owner_soa
+    fpid => self%mesh%face_patch_id_soa
+    pbc => self%mesh%patch_bc_id_soa
+    farea => self%mesh%face_area_soa
+    cvol => self%mesh%cell_volume_soa
+    tau => self%tau_w_bnd
+
+    ! Wall faces can share an owner cell (edges/corners), hence the atomics.
+    !$acc parallel loop default(present) copyin(tau) copy(H_U) private(f_global, o, q, w)
+    do f_bnd = 1, n_bnd
+      f_global = n_int + f_bnd
+      q = fpid(f_global)
+      if (q < 1 .or. q > n_patches) cycle
+      if (pbc(q) /= BC_WALL_MODEL) cycle
+      o = fown(f_global)
+      if (o < 1 .or. o > nc) cycle
+      w = farea(f_global) / cvol(o)
+      !$acc atomic update
+      H_U(1, o) = H_U(1, o) + tau(1, f_bnd) * w
+      !$acc atomic update
+      H_U(2, o) = H_U(2, o) + tau(2, f_bnd) * w
+      !$acc atomic update
+      H_U(3, o) = H_U(3, o) + tau(3, f_bnd) * w
     end do
   end subroutine add_wall_stress_to_rhs
 
