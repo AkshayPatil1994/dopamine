@@ -20,6 +20,7 @@ contains
   !> Compute the minimum-correction k-vector and auxiliary scalars.
   !> @param sf face area vector (outward from owner) [m^2]
   pure subroutine nonortho_kfactor(sf, d_on, k, s_dot_dhat, d_on_len)
+    !$acc routine seq
     real(rp), intent(in)  :: sf(3)
     real(rp), intent(in)  :: d_on(3)
     real(rp), intent(out) :: k(3)
@@ -49,6 +50,7 @@ contains
 
   !> Over-relaxed k-vector (Jasak 1996 Sect. 3.3.3): k = Sf - (|Sf|^2/(Sf.d_on))*d_on; no cap (spectral radius = sin theta < 1).
   pure subroutine nonortho_kfactor_overrelaxed(sf, d_on, k, s_dot_dhat, d_on_len)
+    !$acc routine seq
     real(rp), intent(in)  :: sf(3)
     real(rp), intent(in)  :: d_on(3)
     real(rp), intent(out) :: k(3)
@@ -82,6 +84,7 @@ contains
 
   !> Rhie-Chow face term; subtracting the cross part makes it vanish for a linear pressure field.
   pure function nonortho_rhie_chow(grad_o, grad_nb, gc, sf, k, coeff, dp) result(rc)
+    !$acc routine seq
     real(rp), intent(in) :: grad_o(3)
     real(rp), intent(in) :: grad_nb(3)
     real(rp), intent(in) :: gc
@@ -100,6 +103,7 @@ contains
 
   !> Scalar cross-diffusion flux: (gc.grad phi_o + (1-gc).grad phi_nb) . k  !> @param grad_o gradient at owner cell [phi/m]
   pure function nonortho_cross_flux(grad_o, grad_nb, gc, k) result(flux)
+    !$acc routine seq
     real(rp), intent(in) :: grad_o(3)
     real(rp), intent(in) :: grad_nb(3)
     real(rp), intent(in) :: gc

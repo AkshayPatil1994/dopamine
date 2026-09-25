@@ -22,6 +22,7 @@ module mod_fv_solver
   use mod_bc
   use mod_warn_log
   use mod_profiling, only: prof_push, prof_pop
+  use iso_c_binding, only: c_int, c_double
   use mpi_f08
   implicit none
   private
@@ -177,6 +178,10 @@ module mod_fv_solver
     integer(ip) :: n_nonperiodic_bfaces = 0
     logical,  allocatable :: w_outlet_cell(:)   ! (nc) precomputed outlet cell mask
     real(rp), allocatable :: w_outlet_pval(:)   ! (nc) reference pressure per outlet cell
+    real(rp), allocatable :: patch_p_val(:)     ! (n_patches) bc_configs(:)%p_val, flat for device kernels
+    !> Static projection operator arrays (psolver indices/coefficients, non-orthogonal caches,
+    !> recon_Tinv, boundary-face lists) have been staged on the device (stage_static_on_device).
+    logical :: static_on_device = .false.
 
     ! -- Pressure solver backend
     type(pressure_solver_handle_t) :: psolver
@@ -451,6 +456,10 @@ contains
     end do
     allocate(self%bc_configs(msh%n_patches))
     self%bc_configs = bc_configs
+    allocate(self%patch_p_val(max(1_ip, msh%n_patches)), source=0.0_rp)
+    do q_out = 1, msh%n_patches
+      self%patch_p_val(q_out) = bc_configs(q_out)%p_val
+    end do
     call build_patch_classification(self)
 
     ! Precompute outlet cell mask once so anchor_pressure_to_outlet avoids per-call allocation.
@@ -523,6 +532,7 @@ contains
       call detect_nonortho_skip(self)
       call build_nonortho_cache(self)
       call build_reconstruct_operator(self)
+      call stage_static_on_device(self)
     end if
 
     ! ABL module initialization
@@ -2229,115 +2239,209 @@ contains
   !> Correct previously assembled face fluxes by pressure jump using the
   !> same coefficients used in the pressure operator.
   subroutine correct_face_fluxes(self, dt)
-    class(FVSolver), intent(inout) :: self
+    class(FVSolver), intent(inout), target :: self
     real(rp),        intent(in)    :: dt
 
-    integer(ip) :: idx, o, nb, f_mesh
+    integer(ip) :: idx, o, nb, f_mesh, nc, ntot, nf, n_int, n_faces, n_patches, n_nper, n_per
     integer(ip) :: ib, f_bnd, f_glob, pair_bnd, pair_face, o_self, o_pair, q
-    real(rp)    :: coeff, d_orth, sn
-    real(rp)    :: k_f(3), gc, cross
+    real(rp)    :: coeff, d_orth, sn, gc, cross, d1, d2, d3
+    logical     :: have_pair
+    integer(c_int), pointer :: skip(:), fown_p(:)
+    integer(ip),    pointer :: fnb_p(:), fmi(:), nper(:), per(:), fown(:), fpid(:), pbc(:), ppair(:)
+    real(c_double), pointer :: fcoef(:)
+    logical,        pointer :: act_int(:), act_bnd(:)
+    integer(lp),    pointer :: gid(:)
+    real(rp),       pointer :: k_int(:,:), k_bnd(:,:), gcs(:), ff(:), p(:), gp(:,:), pval(:)
+    real(rp),       pointer :: fctr(:,:), fnrm(:,:), farea(:), cctr(:,:)
 
     if (.not. allocated(self%face_flux)) return
 
+    nc = self%mesh%n_cells
+    ntot = nc + self%mesh%n_ghost
+    nf = self%psolver%n_faces
+    n_int = self%mesh%n_int_faces
+    n_faces = self%mesh%n_faces
+    n_patches = self%mesh%n_patches
+    n_nper = self%n_nonperiodic_bfaces
+    n_per = self%n_periodic_bfaces
+    skip => self%psolver%skip_face
+    fown_p => self%psolver%face_owner
+    fnb_p => self%psolver%face_neighbor_ext
+    fmi => self%psolver%face_mesh_idx
+    fcoef => self%psolver%face_coeff
+    act_int => self%nonortho_active_int
+    k_int => self%nonortho_k_int
+    act_bnd => self%nonortho_active_bnd
+    k_bnd => self%nonortho_k_bnd
+    nper => self%nonperiodic_bfaces
+    per => self%periodic_bfaces
+    pval => self%patch_p_val
+    gcs => self%mesh%face_gc_soa
+    fown => self%mesh%face_owner_soa
+    fpid => self%mesh%face_patch_id_soa
+    pbc => self%mesh%patch_bc_id_soa
+    fctr => self%mesh%face_centre_soa
+    fnrm => self%mesh%face_normal_soa
+    farea => self%mesh%face_area_soa
+    cctr => self%mesh%cell_centroid_soa
+    ppair => self%mesh%periodic_pair_soa
+    gid => self%mesh%global_id
+    ff => self%face_flux
+    p => self%p
+    gp => self%w_gp
+    have_pair = allocated(self%mesh%periodic_pair)
+
+    !$acc data copyin(p, gp) copy(ff)
     ! idx <-> f_mesh is a bijection over the assembled faces: each idx writes a distinct
     ! face_flux(f_mesh), so unlike the rhs_p scatter-adds this loop is race-free as-is.
-    !$omp parallel do private(idx, o, nb, f_mesh, coeff, k_f, gc, cross) schedule(static)
-    do idx = 1, self%psolver%n_faces
-      if (self%psolver%skip_face(idx) /= 0) cycle
-      o = int(self%psolver%face_owner(idx), ip)
-      nb = self%psolver%face_neighbor_ext(idx)
-      if (o < 1 .or. o > self%mesh%n_cells) cycle
-      if (nb < 1 .or. nb > self%mesh%n_cells + self%mesh%n_ghost) cycle
-      f_mesh = self%psolver%face_mesh_idx(idx)
-      if (f_mesh < 1 .or. f_mesh > self%mesh%n_faces) cycle
-      coeff = real(self%psolver%face_coeff(idx), rp)
-      self%face_flux(f_mesh) = self%face_flux(f_mesh) - dt * coeff * (self%p(nb) - self%p(o))
+#ifdef _OPENACC
+    !$acc parallel loop default(present) private(o, nb, f_mesh, coeff, gc, cross)
+#else
+    !$omp parallel do private(idx, o, nb, f_mesh, coeff, gc, cross) schedule(static)
+#endif
+    do idx = 1, nf
+      if (skip(idx) /= 0) cycle
+      o = int(fown_p(idx), ip)
+      nb = fnb_p(idx)
+      if (o < 1 .or. o > nc) cycle
+      if (nb < 1 .or. nb > ntot) cycle
+      f_mesh = fmi(idx)
+      if (f_mesh < 1 .or. f_mesh > n_faces) cycle
+      coeff = real(fcoef(idx), rp)
+      ff(f_mesh) = ff(f_mesh) - dt * coeff * (p(nb) - p(o))
       ! Jasak (1996) Sect. 6.4.3: cross-diffusion using grad(p^old) from compute_face_fluxes_and_rhs.
       ! Same lagged gradient as in rhs_p -> algebraic cancellation (div = 0).
-      if (self%nonortho_active_int(idx)) then
-        k_f = self%nonortho_k_int(:, idx)
+      if (act_int(idx)) then
         ! Use precomputed projection-based gc (FPS Sect. 7.2) - consistent with
         ! the gradient, advection, and viscous operators.
-        gc = self%mesh%faces(f_mesh)%gc
-        cross = nonortho_cross_flux(self%w_gp(:, o), self%w_gp(:, nb), gc, k_f)
-        self%face_flux(f_mesh) = self%face_flux(f_mesh) - dt * cross
+        gc = gcs(f_mesh)
+        cross = nonortho_cross_flux(gp(:, o), gp(:, nb), gc, k_int(:, idx))
+        ff(f_mesh) = ff(f_mesh) - dt * cross
       end if
     end do
+#ifndef _OPENACC
     !$omp end parallel do
+#endif
 
     ! Project non-periodic boundary face fluxes with the Dirichlet/Neumann p BC.
-    do ib = 1, self%n_nonperiodic_bfaces
-      f_bnd  = self%nonperiodic_bfaces(ib)
-      f_glob = self%mesh%n_int_faces + f_bnd
-      if (f_glob < 1 .or. f_glob > self%mesh%n_faces) cycle
-      o = self%mesh%faces(f_glob)%owner
-      if (o < 1 .or. o > self%mesh%n_cells) cycle
-      q = self%mesh%faces(f_glob)%patch_id
-      if (q < 1 .or. q > self%mesh%n_patches) cycle
-      select case (self%bc_configs(q)%bc_id)
-      case (BC_OUTLET)
-        sn = abs(dot_product(self%mesh%faces(f_glob)%centre - self%mesh%cells(o)%centroid, &
-                             self%mesh%faces(f_glob)%normal))
-        d_orth = max(sn, SMALL)
-        coeff = self%mesh%faces(f_glob)%area / d_orth
-        self%face_flux(f_glob) = self%face_flux(f_glob) &
-                                 - dt * coeff * (self%bc_configs(q)%p_val - self%p(o))
-        ! Cross-diffusion correction for Dirichlet p BC (outlet); owner-side gradient only (no off-cell info).
-        if (self%nonortho_active_bnd(ib)) then
-          k_f = self%nonortho_k_bnd(:, ib)
-          cross = dot_product(self%w_gp(:, o), k_f)
-          self%face_flux(f_glob) = self%face_flux(f_glob) - dt * cross
-        end if
-      end select
+    !$acc parallel loop default(present) private(f_bnd, f_glob, o, q, sn, d_orth, coeff, d1, d2, d3)
+    do ib = 1, n_nper
+      f_bnd  = nper(ib)
+      f_glob = n_int + f_bnd
+      if (f_glob < 1 .or. f_glob > n_faces) cycle
+      o = fown(f_glob)
+      if (o < 1 .or. o > nc) cycle
+      q = fpid(f_glob)
+      if (q < 1 .or. q > n_patches) cycle
+      if (pbc(q) /= BC_OUTLET) cycle
+      d1 = fctr(1, f_glob) - cctr(1, o)
+      d2 = fctr(2, f_glob) - cctr(2, o)
+      d3 = fctr(3, f_glob) - cctr(3, o)
+      sn = abs(d1*fnrm(1, f_glob) + d2*fnrm(2, f_glob) + d3*fnrm(3, f_glob))
+      d_orth = max(sn, SMALL)
+      coeff = farea(f_glob) / d_orth
+      ff(f_glob) = ff(f_glob) - dt * coeff * (pval(q) - p(o))
+      ! Cross-diffusion correction for Dirichlet p BC (outlet); owner-side gradient only (no off-cell info).
+      if (act_bnd(ib)) then
+        ff(f_glob) = ff(f_glob) - dt * (gp(1, o)*k_bnd(1, ib) + gp(2, o)*k_bnd(2, ib) + gp(3, o)*k_bnd(3, ib))
+      end if
     end do
 
-    ! Re-sync non-canonical same-rank periodic faces by anti-symmetry.
-    if (self%n_periodic_bfaces > 0 .and. allocated(self%mesh%periodic_pair)) then
-      do ib = 1, self%n_periodic_bfaces
-        f_bnd = self%periodic_bfaces(ib)
-        if (f_bnd < 1 .or. f_bnd > size(self%mesh%periodic_pair)) cycle
-        pair_bnd = self%mesh%periodic_pair(f_bnd)
+    ! Re-sync non-canonical same-rank periodic faces by anti-symmetry. Only non-canonical faces
+    ! are written and only canonical ones read, so the faces are independent.
+    if (n_per > 0 .and. have_pair) then
+      !$acc parallel loop default(present) private(f_bnd, pair_bnd, f_glob, pair_face, o_self, o_pair)
+      do ib = 1, n_per
+        f_bnd = per(ib)
+        if (f_bnd < 1 .or. f_bnd > size(ppair)) cycle
+        pair_bnd = ppair(f_bnd)
         if (pair_bnd <= 0) cycle  ! cross-rank pair: handled by remote rank
-        f_glob    = self%mesh%n_int_faces + f_bnd
-        pair_face = self%mesh%n_int_faces + pair_bnd
-        if (f_glob    < 1 .or. f_glob    > self%mesh%n_faces) cycle
-        if (pair_face < 1 .or. pair_face > self%mesh%n_faces) cycle
-        o_self = self%mesh%faces(f_glob   )%owner
-        o_pair = self%mesh%faces(pair_face)%owner
-        if (o_self < 1 .or. o_self > self%mesh%n_cells) cycle
-        if (o_pair < 1 .or. o_pair > self%mesh%n_cells) cycle
+        f_glob    = n_int + f_bnd
+        pair_face = n_int + pair_bnd
+        if (f_glob    < 1 .or. f_glob    > n_faces) cycle
+        if (pair_face < 1 .or. pair_face > n_faces) cycle
+        o_self = fown(f_glob)
+        o_pair = fown(pair_face)
+        if (o_self < 1 .or. o_self > nc) cycle
+        if (o_pair < 1 .or. o_pair > nc) cycle
         if (o_self == o_pair) cycle
         ! Canonical face is the one whose owner has the smaller global_id;
         ! mirror the non-canonical face flux from it.
-        if (self%mesh%global_id(o_self) > self%mesh%global_id(o_pair)) then
-          self%face_flux(f_glob) = -self%face_flux(pair_face)
-        end if
+        if (gid(o_self) > gid(o_pair)) ff(f_glob) = -ff(pair_face)
       end do
     end if
+    !$acc end data
   end subroutine correct_face_fluxes
 
   !> Correct cell velocities: u = u - dt * T^-1 . sum_f n_f g_f, g_f the jump the flux correction removes.
   ! with_cross = .false. for the pre-correction: Rhie-Chow replaces only the orthogonal part at the face.
   subroutine correct_velocity_psolver_dual(self, dt, with_cross)
-    class(FVSolver), intent(inout) :: self
+    class(FVSolver), intent(inout), target :: self
     real(rp),        intent(in)    :: dt
     logical,         intent(in)    :: with_cross
 
-    integer(ip) :: nc, c, idx, o, nb, f_mesh
+    integer(ip) :: nc, ntot, c, idx, o, nb, f_mesh, nf, n_int, n_faces, n_patches, n_nper
     integer(ip) :: ib, f_bnd, f_glob, q
-    real(rp)    :: coeff, g_f, gc, sn, d_orth
-    real(rp)    :: k_f(3)
+    real(rp)    :: coeff, g_f, gc, sn, d_orth, n1, n2, n3, g1, g2, g3, d1, d2, d3
     logical     :: do_cross
     integer(ip) :: col, idx2, n_loops, lo, hi
     logical     :: use_color
+    integer(c_int), pointer :: skip(:), fown_p(:)
+    integer(ip),    pointer :: fnb_p(:), fmi(:), perm(:), nper(:), fown(:), fpid(:), pbc(:)
+    real(c_double), pointer :: fcoef(:)
+    logical,        pointer :: act_int(:), act_bnd(:)
+    real(rp),       pointer :: k_int(:,:), k_bnd(:,:), gcs(:), p(:), gp(:,:), gpc(:,:), U(:,:), Tinv(:,:,:)
+    real(rp),       pointer :: pval(:), fctr(:,:), fnrm(:,:), farea(:), cctr(:,:)
 
     do_cross = with_cross .and. (.not. self%skip_nonortho)
     nc = self%mesh%n_cells
-    self%w_gp_cell(:, 1:nc) = 0.0_rp
+    ntot = nc + self%mesh%n_ghost
+    nf = self%psolver%n_faces
+    n_int = self%mesh%n_int_faces
+    n_faces = self%mesh%n_faces
+    n_patches = self%mesh%n_patches
+    n_nper = self%n_nonperiodic_bfaces
+    skip => self%psolver%skip_face
+    fown_p => self%psolver%face_owner
+    fnb_p => self%psolver%face_neighbor_ext
+    fmi => self%psolver%face_mesh_idx
+    fcoef => self%psolver%face_coeff
+    act_int => self%nonortho_active_int
+    k_int => self%nonortho_k_int
+    act_bnd => self%nonortho_active_bnd
+    k_bnd => self%nonortho_k_bnd
+    nper => self%nonperiodic_bfaces
+    pval => self%patch_p_val
+    Tinv => self%recon_Tinv
+    gcs => self%mesh%face_gc_soa
+    fown => self%mesh%face_owner_soa
+    fpid => self%mesh%face_patch_id_soa
+    pbc => self%mesh%patch_bc_id_soa
+    fctr => self%mesh%face_centre_soa
+    fnrm => self%mesh%face_normal_soa
+    farea => self%mesh%face_area_soa
+    cctr => self%mesh%cell_centroid_soa
+    p => self%p
+    gp => self%w_gp
+    gpc => self%w_gp_cell
+    U => self%U
 
     use_color = (self%psolver%n_colors > 0 .and. allocated(self%psolver%idx_color_perm) &
                  .and. allocated(self%psolver%color_offsets))
     n_loops = merge(self%psolver%n_colors, 1_ip, use_color)
+    if (use_color) then
+      perm => self%psolver%idx_color_perm
+    else
+      perm => fmi  ! placeholder, unused when not colored (idx is taken directly)
+    end if
+
+    !$acc data copyin(p, gp) copy(gpc, U)
+    !$acc parallel loop default(present)
+    do c = 1, nc
+      gpc(1, c) = 0.0_rp
+      gpc(2, c) = 0.0_rp
+      gpc(3, c) = 0.0_rp
+    end do
 
     ! g_f is identical to the pressure jump correct_face_fluxes removes from the
     ! mass flux, so the cell and face projections share one discrete operator.
@@ -2347,71 +2451,145 @@ contains
         hi = self%psolver%color_offsets(col+1) - 1_ip
       else
         lo = 1_ip
-        hi = self%psolver%n_faces
+        hi = nf
       end if
+#ifdef _OPENACC
+      !$acc parallel loop if(use_color) default(present) private(idx, o, nb, f_mesh, coeff, g_f, gc, n1, n2, n3)
+#else
       !$omp parallel do if(use_color) default(shared) &
-      !$omp& private(idx, idx2, o, nb, f_mesh, coeff, g_f, gc, k_f)
+      !$omp& private(idx, idx2, o, nb, f_mesh, coeff, g_f, gc, n1, n2, n3)
+#endif
       do idx2 = lo, hi
         if (use_color) then
-          idx = self%psolver%idx_color_perm(idx2)
+          idx = perm(idx2)
         else
           idx = idx2
         end if
-        if (self%psolver%skip_face(idx) /= 0) cycle
-        o      = int(self%psolver%face_owner(idx), ip)
-        nb     = self%psolver%face_neighbor_ext(idx)
-        f_mesh = self%psolver%face_mesh_idx(idx)
+        if (skip(idx) /= 0) cycle
+        o      = int(fown_p(idx), ip)
+        nb     = fnb_p(idx)
+        f_mesh = fmi(idx)
         if (o      < 1 .or. o      > nc) cycle
-        if (nb     < 1 .or. nb     > nc + self%mesh%n_ghost) cycle
-        if (f_mesh < 1 .or. f_mesh > self%mesh%n_faces) cycle
+        if (nb     < 1 .or. nb     > ntot) cycle
+        if (f_mesh < 1 .or. f_mesh > n_faces) cycle
 
-        coeff = real(self%psolver%face_coeff(idx), rp)
-        g_f   = coeff * (self%p(nb) - self%p(o))
-        if (do_cross .and. self%nonortho_active_int(idx)) then
-          k_f = self%nonortho_k_int(:, idx)
-          gc  = self%mesh%faces(f_mesh)%gc
-          g_f = g_f + nonortho_cross_flux(self%w_gp(:, o), self%w_gp(:, nb), gc, k_f)
+        coeff = real(fcoef(idx), rp)
+        g_f   = coeff * (p(nb) - p(o))
+        if (do_cross) then
+          if (act_int(idx)) then
+            gc  = gcs(f_mesh)
+            g_f = g_f + nonortho_cross_flux(gp(:, o), gp(:, nb), gc, k_int(:, idx))
+          end if
         end if
 
-      ! Sf points out of the owner, so the neighbour sees (-n_f)*(-g_f): same sign.
-        self%w_gp_cell(:, o) = self%w_gp_cell(:, o) + g_f * self%mesh%faces(f_mesh)%normal
-        if (nb <= nc) &
-          self%w_gp_cell(:, nb) = self%w_gp_cell(:, nb) + g_f * self%mesh%faces(f_mesh)%normal
+        ! Sf points out of the owner, so the neighbour sees (-n_f)*(-g_f): same sign.
+        n1 = fnrm(1, f_mesh)
+        n2 = fnrm(2, f_mesh)
+        n3 = fnrm(3, f_mesh)
+        gpc(1, o) = gpc(1, o) + g_f * n1
+        gpc(2, o) = gpc(2, o) + g_f * n2
+        gpc(3, o) = gpc(3, o) + g_f * n3
+        if (nb <= nc) then
+          gpc(1, nb) = gpc(1, nb) + g_f * n1
+          gpc(2, nb) = gpc(2, nb) + g_f * n2
+          gpc(3, nb) = gpc(3, nb) + g_f * n3
+        end if
       end do
+#ifndef _OPENACC
       !$omp end parallel do
+#endif
     end do
 
     ! Fixed-flux patches (walls, symmetry, inlets) get no flux correction, so their
-    ! normal pressure gradient is zero; only Dirichlet-p outlets contribute.
-    do ib = 1, self%n_nonperiodic_bfaces
-      f_bnd  = self%nonperiodic_bfaces(ib)
-      f_glob = self%mesh%n_int_faces + f_bnd
-      if (f_glob < 1 .or. f_glob > self%mesh%n_faces) cycle
-      o = self%mesh%faces(f_glob)%owner
+    ! normal pressure gradient is zero; only Dirichlet-p outlets contribute. Outlet faces
+    ! can share an owner cell, hence the atomics.
+    !$acc parallel loop default(present) private(f_bnd, f_glob, o, q, sn, d_orth, coeff, g_f, d1, d2, d3, g1, g2, g3)
+    do ib = 1, n_nper
+      f_bnd  = nper(ib)
+      f_glob = n_int + f_bnd
+      if (f_glob < 1 .or. f_glob > n_faces) cycle
+      o = fown(f_glob)
       if (o < 1 .or. o > nc) cycle
-      q = self%mesh%faces(f_glob)%patch_id
-      if (q < 1 .or. q > self%mesh%n_patches) cycle
-      if (self%bc_configs(q)%bc_id /= BC_OUTLET) cycle
+      q = fpid(f_glob)
+      if (q < 1 .or. q > n_patches) cycle
+      if (pbc(q) /= BC_OUTLET) cycle
 
-      sn     = abs(dot_product(self%mesh%faces(f_glob)%centre - self%mesh%cells(o)%centroid, &
-                               self%mesh%faces(f_glob)%normal))
+      d1 = fctr(1, f_glob) - cctr(1, o)
+      d2 = fctr(2, f_glob) - cctr(2, o)
+      d3 = fctr(3, f_glob) - cctr(3, o)
+      sn     = abs(d1*fnrm(1, f_glob) + d2*fnrm(2, f_glob) + d3*fnrm(3, f_glob))
       d_orth = max(sn, SMALL)
-      coeff  = self%mesh%faces(f_glob)%area / d_orth
-      g_f    = coeff * (self%bc_configs(q)%p_val - self%p(o))
-      if (do_cross .and. self%nonortho_active_bnd(ib)) then
-        k_f = self%nonortho_k_bnd(:, ib)
-        g_f = g_f + dot_product(self%w_gp(:, o), k_f)
+      coeff  = farea(f_glob) / d_orth
+      g_f    = coeff * (pval(q) - p(o))
+      if (do_cross) then
+        if (act_bnd(ib)) g_f = g_f + gp(1, o)*k_bnd(1, ib) + gp(2, o)*k_bnd(2, ib) + gp(3, o)*k_bnd(3, ib)
       end if
-      self%w_gp_cell(:, o) = self%w_gp_cell(:, o) + g_f * self%mesh%faces(f_glob)%normal
+      g1 = g_f * fnrm(1, f_glob)
+      g2 = g_f * fnrm(2, f_glob)
+      g3 = g_f * fnrm(3, f_glob)
+      !$acc atomic update
+      gpc(1, o) = gpc(1, o) + g1
+      !$acc atomic update
+      gpc(2, o) = gpc(2, o) + g2
+      !$acc atomic update
+      gpc(3, o) = gpc(3, o) + g3
     end do
 
-    !$omp parallel do schedule(static)
+#ifdef _OPENACC
+    !$acc parallel loop default(present) private(g1, g2, g3)
+#else
+    !$omp parallel do schedule(static) private(g1, g2, g3)
+#endif
     do c = 1, nc
-      self%w_gp_cell(:, c) = matmul(self%recon_Tinv(:, :, c), self%w_gp_cell(:, c))
-      self%U(:, c) = self%U(:, c) - dt * self%w_gp_cell(:, c)
+      g1 = Tinv(1, 1, c)*gpc(1, c) + Tinv(1, 2, c)*gpc(2, c) + Tinv(1, 3, c)*gpc(3, c)
+      g2 = Tinv(2, 1, c)*gpc(1, c) + Tinv(2, 2, c)*gpc(2, c) + Tinv(2, 3, c)*gpc(3, c)
+      g3 = Tinv(3, 1, c)*gpc(1, c) + Tinv(3, 2, c)*gpc(2, c) + Tinv(3, 3, c)*gpc(3, c)
+      gpc(1, c) = g1
+      gpc(2, c) = g2
+      gpc(3, c) = g3
+      U(1, c) = U(1, c) - dt * g1
+      U(2, c) = U(2, c) - dt * g2
+      U(3, c) = U(3, c) - dt * g3
     end do
+#ifndef _OPENACC
     !$omp end parallel do
+#endif
+    !$acc end data
   end subroutine correct_velocity_psolver_dual
+
+  !> Stage the static projection-operator arrays on the device once (built in solver_init, never
+  !> modified afterwards), so the projection kernels find them present.
+  subroutine stage_static_on_device(self)
+    class(FVSolver), intent(inout) :: self
+#ifdef _OPENACC
+    if (self%static_on_device) return
+    !$acc enter data copyin(self%psolver%skip_face, self%psolver%face_owner, self%psolver%face_neighbor_ext, &
+    !$acc      self%psolver%face_mesh_idx, self%psolver%face_coeff, &
+    !$acc      self%nonortho_k_int, self%nonortho_active_int, self%nonortho_k_bnd, self%nonortho_active_bnd, &
+    !$acc      self%recon_Tinv, self%nonperiodic_bfaces, self%periodic_bfaces, self%patch_p_val, &
+    !$acc      self%mesh%global_id)
+    if (allocated(self%psolver%idx_color_perm)) then
+      !$acc enter data copyin(self%psolver%idx_color_perm, self%psolver%color_offsets)
+    end if
+    self%static_on_device = .true.
+#endif
+  end subroutine stage_static_on_device
+
+  subroutine release_static_on_device(self)
+    class(FVSolver), intent(inout) :: self
+#ifdef _OPENACC
+    if (.not. self%static_on_device) return
+    !$acc exit data delete(self%psolver%skip_face, self%psolver%face_owner, self%psolver%face_neighbor_ext, &
+    !$acc      self%psolver%face_mesh_idx, self%psolver%face_coeff, &
+    !$acc      self%nonortho_k_int, self%nonortho_active_int, self%nonortho_k_bnd, self%nonortho_active_bnd, &
+    !$acc      self%recon_Tinv, self%nonperiodic_bfaces, self%periodic_bfaces, self%patch_p_val, &
+    !$acc      self%mesh%global_id)
+    if (allocated(self%psolver%idx_color_perm)) then
+      !$acc exit data delete(self%psolver%idx_color_perm, self%psolver%color_offsets)
+    end if
+    self%static_on_device = .false.
+#endif
+  end subroutine release_static_on_device
 
   !> Build T^-1, T = sum_f |Sf| n_f (x) n_f: recovers a cell vector from its face-normal components.
   subroutine build_reconstruct_operator(self)
@@ -3303,6 +3481,12 @@ contains
   subroutine solver_destroy(self)
     class(FVSolver), intent(inout) :: self
     call maybe_report_perf(self, .true.)
+    call release_static_on_device(self)
+#ifdef _OPENACC
+    if (allocated(self%inv_vol)) then
+      !$acc exit data delete(self%inv_vol, self%U_face)
+    end if
+#endif
     call pressure_solver_free(self%psolver)
     if (allocated(self%U))          deallocate(self%U)
     if (allocated(self%p))          deallocate(self%p)
@@ -3350,6 +3534,7 @@ contains
     if (allocated(self%w_gp_prev))  deallocate(self%w_gp_prev)
     if (allocated(self%w_outlet_cell)) deallocate(self%w_outlet_cell)
     if (allocated(self%w_outlet_pval)) deallocate(self%w_outlet_pval)
+    if (allocated(self%patch_p_val))   deallocate(self%patch_p_val)
     if (allocated(self%w_pack_grad)) deallocate(self%w_pack_grad)
     if (allocated(self%w_g_prev_U))  deallocate(self%w_g_prev_U)
     if (allocated(self%w_g_prev_T))  deallocate(self%w_g_prev_T)
