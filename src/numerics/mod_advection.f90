@@ -712,6 +712,13 @@ contains
       return
     end if
 
+    ! GPU/SoA fast path: CDS with the grad_U eps-correction and a projected face_flux.
+    if (scheme == SCHEME_CDS .and. msh%soa_ready .and. .not. ke_budget_on .and. present(U_bnd) &
+        .and. present(face_flux) .and. present(inv_vol) .and. present(grad_U)) then
+      call advection_rhs_vector_cds_soa(U, msh, rhs, U_bnd, face_flux, inv_vol, grad_U)
+      return
+    end if
+
     ! GPU/SoA fast path: QUICK/VANLEER_TVD/KOREN_TVD, mirrors the scalar recon SoA path.
     if ((scheme == SCHEME_QUICK .or. scheme == SCHEME_VANLEER_TVD .or. scheme == SCHEME_KOREN_TVD) &
         .and. present(U_bnd) .and. present(face_flux) .and. present(inv_vol) .and. present(grad_U) &
@@ -1198,6 +1205,198 @@ contains
 
     nullify(fo_soa, fn_soa, fcp, sf_soa, gc_soa, pgc_soa, cvol_soa, fpatch_soa, pbc_soa, pneigh_soa, ppair_soa)
   end subroutine advection_rhs_vector_kep_soa
+
+  !> GPU/SoA fast path for velocity CDS: per component the face value is the scalar CDS
+  !> reconstruction (face_interpolate_scalar with the grad_U eps-correction, faded toward
+  !> refinement interfaces), and the face flux follows the vector path's rule: projected flux on
+  !> interior, periodic and outlet faces, zero on walls, U_bnd.Sf on the other open boundaries.
+  subroutine advection_rhs_vector_cds_soa(U, msh, rhs, U_bnd, face_flux, inv_vol, grad_U)
+    real(rp),    intent(in)    :: U(:,:)  ! (3, n_cells + n_ghost)
+    type(Mesh),  intent(in), target :: msh
+    real(rp),    intent(inout) :: rhs(:,:)  ! (3, n_cells)
+    real(rp),    intent(in)    :: U_bnd(:,:)  ! (3, n_bnd_faces)
+    real(rp),    intent(in)    :: face_flux(:)  ! (n_faces), projected flux
+    real(rp),    intent(in)    :: inv_vol(:)  ! (n_cells) cached 1/volume
+    real(rp),    intent(in)    :: grad_U(:,:,:)  ! (3, 3, n_cells + n_ghost), grad_U(:,k,c) = grad U_k
+
+    integer(ip) :: f, o, nb, k, f_bnd, patch_id, bc_id, pair_face, nb_per, pair_bnd, nb_simple
+    real(rp)    :: Fn, phi_f, phi_f_plain, gc, epsilon(3), grad_mean(3), d_on(3), w_blend
+    integer(ip) :: col, idx, n_loops, lo, hi, nc, nf, n_int, nbnd, n_patches, nu
+    logical     :: use_color, has_reconstruction
+    integer(ip), pointer :: fo_soa(:), fn_soa(:), fcp(:), fpatch_soa(:), pbc_soa(:)
+    integer(ip), pointer :: pneigh_soa(:), ppair_soa(:)
+    real(rp),    pointer :: gc_soa(:), fcentre_soa(:,:), ccent_soa(:,:), sf_soa(:,:)
+    real(rp),    pointer :: eps_soa(:,:), skew_soa(:), pgc_soa(:)
+
+    nc = msh%n_cells
+    nf = msh%n_faces
+    n_int = msh%n_int_faces
+    nbnd = msh%n_bnd_faces
+    n_patches = msh%n_patches
+    nu = size(U, 2)
+
+    fo_soa      => msh%face_owner_soa
+    fn_soa      => msh%face_neighbour_soa
+    gc_soa      => msh%face_gc_soa
+    pgc_soa     => msh%periodic_gc_soa
+    fpatch_soa  => msh%face_patch_id_soa
+    pbc_soa     => msh%patch_bc_id_soa
+    pneigh_soa  => msh%periodic_neighbor_soa
+    ppair_soa   => msh%periodic_pair_soa
+    fcentre_soa => msh%face_centre_soa
+    ccent_soa   => msh%cell_centroid_soa
+    sf_soa      => msh%face_sf_soa
+    eps_soa     => msh%face_eps_soa
+    skew_soa    => msh%face_skew_soa
+
+    use_color = (msh%n_colors > 0 .and. allocated(msh%face_color_perm) &
+                 .and. allocated(msh%color_offsets) .and. msh%soa_ready)
+    n_loops = merge(msh%n_colors, 1_ip, use_color)
+
+    if (use_color) then
+      fcp => msh%face_color_perm
+    else
+      call ensure_fcp_identity(fcp_identity_buf, nf)
+      fcp => fcp_identity_buf(1:nf)
+    end if
+
+#ifdef _OPENACC
+    !$acc data copyin(U(:,1:nu), U_bnd(:,:), face_flux(1:nf), inv_vol(1:nc), grad_U(:,:,1:nu), fcp(1:nf)) &
+    !$acc      copyout(rhs(:,1:nc)) if(use_color)
+#endif
+    ! rhs is zeroed inside the data region (see advection_rhs_scalar_cds_soa).
+    !$acc parallel loop if(use_color) default(present)
+    do idx = 1, nc
+      rhs(1, idx) = 0.0_rp
+      rhs(2, idx) = 0.0_rp
+      rhs(3, idx) = 0.0_rp
+    end do
+    do col = 1, n_loops
+      if (use_color) then
+        lo = msh%color_offsets(col)
+        hi = msh%color_offsets(col+1) - 1_ip
+      else
+        lo = 1_ip
+        hi = nf
+      end if
+#ifdef _OPENACC
+      !$acc parallel loop if(use_color) default(present) private(f, o, nb, k, f_bnd, patch_id, bc_id, &
+      !$acc      pair_face, nb_per, pair_bnd, nb_simple, Fn, phi_f, phi_f_plain, gc, epsilon, &
+      !$acc      grad_mean, d_on, w_blend, has_reconstruction)
+#else
+      !$omp parallel do if(use_color) default(shared) &
+      !$omp& private(f, idx, o, nb, k, f_bnd, patch_id, bc_id, pair_face, nb_per, pair_bnd, &
+      !$omp&         nb_simple, Fn, phi_f, phi_f_plain, gc, epsilon, grad_mean, d_on, w_blend, &
+      !$omp&         has_reconstruction)
+#endif
+      do idx = lo, hi
+        if (use_color) then
+          f = fcp(idx)
+        else
+          f = idx
+        end if
+        o  = fo_soa(f)
+        nb = fn_soa(f)
+        f_bnd = 0
+        patch_id = 0
+        bc_id = -1
+        nb_per = -1
+
+        if (nb >= 1) then
+          Fn = face_flux(f)
+        else
+          f_bnd = f - n_int
+          patch_id = fpatch_soa(f)
+          if (patch_id >= 1 .and. patch_id <= n_patches) bc_id = pbc_soa(patch_id)
+          select case (bc_id)
+          case (BC_PERIODIC, BC_OUTLET)
+            ! Reuse projected flux on periodic/outlet faces (single conservative mass flux).
+            Fn = face_flux(f)
+          case (BC_WALL_NOSLIP, BC_WALL_MODEL, BC_WALL_VELOCITY, BC_SLIP, BC_SYMMETRY)
+            Fn = 0.0_rp
+          case default
+            ! Open boundaries: advective mass flux from boundary velocity
+            Fn = U_bnd(1, f_bnd)*sf_soa(1, f) + U_bnd(2, f_bnd)*sf_soa(2, f) + U_bnd(3, f_bnd)*sf_soa(3, f)
+          end select
+        end if
+
+        ! Periodic partner resolution, as in advection_rhs_scalar_cds_soa.
+        has_reconstruction = (nb >= 1)
+        if (.not. has_reconstruction .and. bc_id == BC_PERIODIC) then
+          pair_face = -1
+          if (f_bnd >= 1 .and. f_bnd <= nbnd) then
+            nb_per = pneigh_soa(f_bnd)
+            pair_bnd = ppair_soa(f_bnd)
+            if (pair_bnd > 0) then
+              pair_face = n_int + pair_bnd
+              if (pair_face >= 1 .and. pair_face <= nf) then
+                if (nb_per <= 0) nb_per = fo_soa(pair_face)
+              else
+                pair_face = -1
+              end if
+            end if
+            if (nb_per <= 0 .and. n_int + f_bnd <= nf) nb_per = fn_soa(n_int + f_bnd)
+            if (nb_per == o) nb_per = -1
+          end if
+          has_reconstruction = (nb_per >= 1)
+        end if
+
+        nb_simple = -1
+        if (has_reconstruction) then
+          if (nb >= 1) then
+            nb_simple = nb
+          else if (f_bnd >= 1 .and. f_bnd <= nbnd) then
+            nb_simple = pneigh_soa(f_bnd)
+          end if
+        end if
+
+        do k = 1, 3
+          if (has_reconstruction) then
+            if (nb_simple >= 1 .and. nb_simple <= nu) then
+              if (f > n_int) then
+                gc = pgc_soa(f_bnd)
+              else
+                gc = gc_soa(f)
+              end if
+              phi_f_plain = gc * U(k, o) + (1.0_rp - gc) * U(k, nb_simple)
+              if (f <= n_int) then
+                epsilon = eps_soa(:, f)
+              else
+                d_on = ccent_soa(:, nb_simple) - ccent_soa(:, o)
+                epsilon = fcentre_soa(:, f) - (ccent_soa(:, o) + (1.0_rp - gc) * d_on)
+              end if
+              grad_mean = gc * grad_U(:, k, o) + (1.0_rp - gc) * grad_U(:, k, nb_simple)
+              phi_f = phi_f_plain + dot_product(grad_mean, epsilon)
+              ! Fade the eps-correction out toward refinement interfaces; see refine_blend_weight.
+              if (f <= n_int) then
+                w_blend = refine_blend_weight(skew_soa(f))
+                if (w_blend < 1.0_rp) phi_f = phi_f_plain + w_blend * (phi_f - phi_f_plain)
+              end if
+            else
+              phi_f = U(k, o)
+            end if
+          else
+            phi_f = U_bnd(k, max(f_bnd, 1_ip))
+          end if
+
+          if (.not. soa_is_finite(phi_f)) phi_f = 0.0_rp
+          if (o  >= 1 .and. o  <= nc) rhs(k, o)  = rhs(k, o)  - Fn * phi_f * inv_vol(o)
+          if (nb >= 1 .and. nb <= nc) rhs(k, nb) = rhs(k, nb) + Fn * phi_f * inv_vol(nb)
+        end do
+      end do
+#ifdef _OPENACC
+      !$acc end parallel loop
+#else
+      !$omp end parallel do
+#endif
+    end do
+#ifdef _OPENACC
+    !$acc end data
+#endif
+
+    nullify(fo_soa, fn_soa, fcp, gc_soa, pgc_soa, fpatch_soa, pbc_soa, pneigh_soa, ppair_soa, &
+            fcentre_soa, ccent_soa, sf_soa, eps_soa, skew_soa)
+  end subroutine advection_rhs_vector_cds_soa
 
   !> GPU/SoA fast path for velocity QUICK/VANLEER_TVD/KOREN_TVD: reuses the scalar SoA
   !> reconstruction device routines per component (see advection_rhs_scalar_recon_soa).
