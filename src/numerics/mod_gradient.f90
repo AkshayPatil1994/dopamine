@@ -355,7 +355,7 @@ contains
       grad_phi(2, c) = 0.0_rp
       grad_phi(3, c) = 0.0_rp
     end do
-    !$acc parallel loop gang private(gx, gy, gz)
+    !$acc parallel loop gang vector_length(32) private(gx, gy, gz)
     do c = 1, nc
       gx = 0.0_rp
       gy = 0.0_rp
@@ -478,7 +478,7 @@ contains
         grad_U(3, j, c) = 0.0_rp
       end do
     end do
-    !$acc parallel loop gang private(g11,g21,g31,g12,g22,g32,g13,g23,g33)
+    !$acc parallel loop gang vector_length(32) private(g11,g21,g31,g12,g22,g32,g13,g23,g33)
     do c = 1, nc
       g11 = 0.0_rp; g21 = 0.0_rp; g31 = 0.0_rp
       g12 = 0.0_rp; g22 = 0.0_rp; g32 = 0.0_rp
