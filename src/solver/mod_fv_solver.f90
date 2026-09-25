@@ -182,6 +182,12 @@ module mod_fv_solver
     !> Static projection operator arrays (psolver indices/coefficients, non-orthogonal caches,
     !> recon_Tinv, boundary-face lists) have been staged on the device (stage_static_on_device).
     logical :: static_on_device = .false.
+    !> Every field and work array used by the time step lives on the device (to_device): the device
+    !> copy is authoritative and the host copy is only refreshed by sync_host.
+    logical :: on_device = .false.
+    !> Contiguous single-scalar scratch: C(s,:)/C_bnd(s,:) are strided rows, which would force a
+    !> host temporary when handed to a device kernel.
+    real(rp), allocatable :: w_Cs(:), w_Cs_bnd(:)
 
     ! -- Pressure solver backend
     type(pressure_solver_handle_t) :: psolver
@@ -251,10 +257,13 @@ module mod_fv_solver
     procedure :: destroy      => solver_destroy
     procedure :: compute_dt   => solver_compute_dt
     procedure :: compute_cfl_rate => solver_compute_cfl_rate
+    procedure :: to_device    => solver_to_device
+    procedure :: sync_host    => solver_sync_host
   end type FVSolver
 
   real(rp), allocatable, save :: dt_flux_sum_buf(:)  ! solver_compute_dt scratch, grown once
   real(rp), allocatable, save :: dt_diff_sum_buf(:)  ! solver_compute_dt scratch, grown once
+  !$acc declare create(dt_flux_sum_buf, dt_diff_sum_buf)
 
 contains
 
@@ -429,7 +438,7 @@ contains
     allocate(self%w_conv_U(3, nc), self%w_visc_U(3, nc), self%w_conv_T(nc), self%w_visc_T(nc), source=0.0_rp)
     allocate(self%w_H_C(max(1_ip, params%n_scalars), nc), source=0.0_rp)
     if (params%n_scalars > 0) &
-      allocate(self%w_conv_C(nc), self%w_visc_C(nc), source=0.0_rp)
+      allocate(self%w_conv_C(nc), self%w_visc_C(nc), self%w_Cs(nc+ng), self%w_Cs_bnd(nbnd), source=0.0_rp)
     allocate(self%w_flux_built(msh%n_faces))
     self%w_flux_built = .false.
     allocate(self%w_gp(3, nc+ng), source=0.0_rp)
@@ -880,7 +889,7 @@ contains
       end block
     end if
 
-    call anchor_pressure_to_outlet(self%p(1:nc), self%mesh, self%w_outlet_cell, self%w_outlet_pval)
+    call anchor_pressure_to_outlet(self%p(1:nc), self%mesh, self%w_outlet_cell, self%w_outlet_pval, self%on_device)
     call self%mesh%exchange_halos_scalar(self%p)
     call correct_face_fluxes(self, dt_use)  ! uses phi -> divergence-free
     self%U_face(:) = self%face_flux(:)  ! persist divergence-free flux for advection
@@ -958,17 +967,24 @@ contains
   !> domain (grad of a periodic potential has zero mean), so f = (U_target - <U>) / dt drives the
   !> bulk velocity to target over successive steps.
   subroutine update_mass_flux_forcing(self, dt)
-    class(FVSolver), intent(inout) :: self
+    class(FVSolver), intent(inout), target :: self
     real(rp), intent(in) :: dt
 
     integer(ip) :: nc, c, ierr
-    real(rp) :: mom_local(3), mom_global(3), U_bulk(3)
+    real(rp)    :: mom_local(3), mom_global(3), U_bulk(3), m1, m2, m3
+    real(rp), pointer :: U(:,:), cvol(:)
 
     nc = self%mesh%n_cells
-    mom_local = 0.0_rp
+    U => self%U
+    cvol => self%mesh%cell_volume_soa
+    m1 = 0.0_rp;  m2 = 0.0_rp;  m3 = 0.0_rp
+    !$acc parallel loop if(self%on_device) default(present) reduction(+:m1, m2, m3)
     do c = 1, nc
-      mom_local = mom_local + self%U(:, c) * self%mesh%cells(c)%volume
+      m1 = m1 + U(1, c) * cvol(c)
+      m2 = m2 + U(2, c) * cvol(c)
+      m3 = m3 + U(3, c) * cvol(c)
     end do
+    mom_local = [m1, m2, m3]
     call MPI_Allreduce(mom_local, mom_global, 3, MPI_DOUBLE_PRECISION, MPI_SUM, self%mesh%comm, ierr)
 
     U_bulk = mom_global / max(self%V_total_global, SMALL)
@@ -994,58 +1010,110 @@ contains
 
   !> Compute and halo-exchange velocity, temperature, and scalar cell gradients for explicit RHS.
   subroutine compute_all_gradients(self)
-    class(FVSolver), intent(inout) :: self
-    integer(ip) :: s
+    class(FVSolver), intent(inout), target :: self
+    integer(ip) :: s, iter, c, i, j, nc, ntot
+    logical     :: gg
+    real(rp), pointer :: gU(:,:,:), gT(:,:), gC(:,:,:), gpU(:,:,:), gpT(:,:)
 
-    select case (trim(self%params%gradient_scheme))
-    case ('GREEN_GAUSS')
+    nc = self%mesh%n_cells
+    ntot = nc + self%mesh%n_ghost
+    gg = (trim(self%params%gradient_scheme) == 'GREEN_GAUSS')
+    gU => self%grad_U
+    gT => self%grad_T
+
+    if (gg) then
       call green_gauss_gradient_vector(self%U, self%mesh, self%grad_U, self%U_bnd)
       if (self%solve_temperature) &
         call green_gauss_gradient_scalar(self%T, self%mesh, self%grad_T, self%T_bnd)
-      do s = 1, self%params%n_scalars
-        call green_gauss_gradient_scalar(self%C(s, :), self%mesh, self%grad_C(:, :, s), self%C_bnd(s, :))
-      end do
-      if (self%params%gg_iterations > 1) then
-        block
-          integer(ip) :: iter, si
-          do iter = 2, self%params%gg_iterations
-            ! Exchange halos so ghost-cell gradients from the previous sweep are
-            ! valid before building the skewness correction for this sweep.
-            call exchange_grad_halos(self)
-            ! F3: reuse persistent buffers (allocated in solver_init).
-            self%w_g_prev_U = self%grad_U
-            call green_gauss_gradient_vector(self%U, self%mesh, self%grad_U, self%U_bnd, self%w_g_prev_U)
-            if (self%solve_temperature) then
-              self%w_g_prev_T = self%grad_T
-              call green_gauss_gradient_scalar(self%T, self%mesh, self%grad_T, self%T_bnd, self%w_g_prev_T)
-            end if
-            do si = 1, self%params%n_scalars
-              ! Reload prev-gradient scratch for each scalar field.
-              self%w_g_prev_T = self%grad_C(:, :, si)
-              call green_gauss_gradient_scalar(self%C(si,:), self%mesh, self%grad_C(:,:,si), &
-                                               self%C_bnd(si,:), self%w_g_prev_T)
-            end do
-          end do
-        end block
-      end if
-    case default
+    else
       call ls_gradient_vector(self%U, self%mesh, self%grad_U, self%U_bnd)
       if (self%solve_temperature) &
         call ls_gradient_scalar(self%T, self%mesh, self%grad_T, self%T_bnd)
-      do s = 1, self%params%n_scalars
-        call ls_gradient_scalar(self%C(s, :), self%mesh, self%grad_C(:, :, s), self%C_bnd(s, :))
+    end if
+    do s = 1, self%params%n_scalars
+      call load_scalar_row(self, s)
+      if (gg) then
+        call green_gauss_gradient_scalar(self%w_Cs, self%mesh, self%grad_C(:, :, s), self%w_Cs_bnd)
+      else
+        call ls_gradient_scalar(self%w_Cs, self%mesh, self%grad_C(:, :, s), self%w_Cs_bnd)
+      end if
+    end do
+
+    if (gg .and. self%params%gg_iterations > 1) then
+      gpU => self%w_g_prev_U
+      gpT => self%w_g_prev_T
+      do iter = 2, self%params%gg_iterations
+        ! Exchange halos so ghost-cell gradients from the previous sweep are
+        ! valid before building the skewness correction for this sweep.
+        call exchange_grad_halos(self)
+        ! F3: reuse persistent buffers (allocated in solver_init).
+        !$acc parallel loop collapse(3) default(present)
+        do c = 1, ntot
+          do j = 1, 3
+            do i = 1, 3
+              gpU(i, j, c) = gU(i, j, c)
+            end do
+          end do
+        end do
+        call green_gauss_gradient_vector(self%U, self%mesh, self%grad_U, self%U_bnd, self%w_g_prev_U)
+        if (self%solve_temperature) then
+          !$acc parallel loop collapse(2) default(present)
+          do c = 1, ntot
+            do i = 1, 3
+              gpT(i, c) = gT(i, c)
+            end do
+          end do
+          call green_gauss_gradient_scalar(self%T, self%mesh, self%grad_T, self%T_bnd, self%w_g_prev_T)
+        end if
+        do s = 1, self%params%n_scalars
+          ! Reload prev-gradient scratch for each scalar field.
+          gC => self%grad_C
+          !$acc parallel loop collapse(2) default(present)
+          do c = 1, ntot
+            do i = 1, 3
+              gpT(i, c) = gC(i, c, s)
+            end do
+          end do
+          call load_scalar_row(self, s)
+          call green_gauss_gradient_scalar(self%w_Cs, self%mesh, self%grad_C(:,:,s), &
+                                           self%w_Cs_bnd, self%w_g_prev_T)
+        end do
       end do
-    end select
+    end if
 
     ! Halo-exchange gradients so ghost cells carry valid values for viscous/advection stencils.
     call exchange_grad_halos(self)
   end subroutine compute_all_gradients
 
-  !> Pack, halo-exchange, and unpack grad_U/grad_T/grad_C across MPI ranks.
-  subroutine exchange_grad_halos(self)
-    class(FVSolver), intent(inout) :: self
+  !> Copy row s of C/C_bnd into the contiguous w_Cs/w_Cs_bnd scratch (on the device when the
+  !> fields are resident, on the host otherwise).
+  subroutine load_scalar_row(self, s)
+    class(FVSolver), intent(inout), target :: self
+    integer(ip),     intent(in)    :: s
+    integer(ip) :: c, ntot, nbnd
+    real(rp), pointer :: Cf(:,:), Cb(:,:), Cs(:), Csb(:)
 
-    integer(ip) :: nc, ng, ntot, n_scal, n_fields, c, s, k
+    ntot = self%mesh%n_cells + self%mesh%n_ghost
+    nbnd = self%mesh%n_bnd_faces
+    Cf => self%C;  Cb => self%C_bnd;  Cs => self%w_Cs;  Csb => self%w_Cs_bnd
+    !$acc parallel loop if(self%on_device) default(present)
+    do c = 1, ntot
+      Cs(c) = Cf(s, c)
+    end do
+    !$acc parallel loop if(self%on_device) default(present)
+    do c = 1, nbnd
+      Csb(c) = Cb(s, c)
+    end do
+  end subroutine load_scalar_row
+
+  !> Pack, halo-exchange, and unpack grad_U/grad_T/grad_C across MPI ranks (on the device when
+  !> the fields are resident).
+  subroutine exchange_grad_halos(self)
+    class(FVSolver), intent(inout), target :: self
+
+    integer(ip) :: nc, ng, ntot, n_scal, n_fields, c, s, k, i, j
+    real(rp), pointer :: pk(:,:), gU(:,:,:), gT(:,:), gC(:,:,:)
+    logical :: dev
 
     if (self%mesh%nranks <= 1) return
 
@@ -1059,52 +1127,52 @@ contains
     if (.not. allocated(self%w_pack_grad)) then
       allocate(self%w_pack_grad(n_fields, ntot))
     end if
+    pk => self%w_pack_grad
+    gU => self%grad_U
+    gT => self%grad_T
+    dev = self%on_device
 
-    associate(pack => self%w_pack_grad)
     ! Pack owned cells; ghost slots will be filled by the exchange.
-    if (n_scal == 0) then
-      ! F8: lighter U+T-only path (no scalar transport configured).
-      do c = 1, nc
-        pack(1:9, c)   = reshape(self%grad_U(:, :, c), [9])
-        pack(10:12, c) = self%grad_T(:, c)
+    !$acc parallel loop if(dev) default(present)
+    do c = 1, nc
+      do j = 1, 3
+        do i = 1, 3
+          pk(3*(j-1) + i, c) = gU(i, j, c)
+        end do
       end do
-    else
+      pk(10, c) = gT(1, c);  pk(11, c) = gT(2, c);  pk(12, c) = gT(3, c)
+    end do
+    if (n_scal > 0) then
+      gC => self%grad_C
+      !$acc parallel loop collapse(2) if(dev) default(present) private(k)
       do c = 1, nc
-        pack(1:9, c)   = reshape(self%grad_U(:, :, c), [9])
-        pack(10:12, c) = self%grad_T(:, c)
         do s = 1, n_scal
           k = 12 + 3*(s-1)
-          pack(k+1:k+3, c) = self%grad_C(:, c, s)
+          pk(k+1, c) = gC(1, c, s);  pk(k+2, c) = gC(2, c, s);  pk(k+3, c) = gC(3, c, s)
         end do
       end do
     end if
 
-    call self%mesh%exchange_halos_scalars(pack)
+    call self%mesh%exchange_halos_scalars(self%w_pack_grad)
 
     ! Unpack ghost cells (no need to overwrite owned cells).
-    if (n_scal == 0) then
-      do c = nc+1, ntot
-        self%grad_U(:, :, c) = reshape(pack(1:9, c), [3, 3])
-        self%grad_T(:, c)    = pack(10:12, c)
-      end do
-    else
-      do c = nc+1, ntot
-        self%grad_U(:, :, c) = reshape(pack(1:9, c), [3, 3])
-        self%grad_T(:, c)    = pack(10:12, c)
-        do s = 1, n_scal
-          k = 12 + 3*(s-1)
-          self%grad_C(:, c, s) = pack(k+1:k+3, c)
+    !$acc parallel loop if(dev) default(present)
+    do c = nc+1, ntot
+      do j = 1, 3
+        do i = 1, 3
+          gU(i, j, c) = pk(3*(j-1) + i, c)
         end do
       end do
-    end if
-    end associate
-
-    ! pack's ghost range is already device-synced by exchange_halos_scalars, but the unpack above
-    ! into grad_U/grad_T/grad_C is a separate host step, so their device ghost cells need their own
-    ! push. A no-op if these aren't currently device-resident.
-    !$acc update device(self%grad_U(:,:,nc+1:ntot), self%grad_T(:,nc+1:ntot)) if(ng > 0) if_present
+      gT(1, c) = pk(10, c);  gT(2, c) = pk(11, c);  gT(3, c) = pk(12, c)
+    end do
     if (n_scal > 0) then
-      !$acc update device(self%grad_C(:,nc+1:ntot,:)) if(ng > 0) if_present
+      !$acc parallel loop collapse(2) if(dev) default(present) private(k)
+      do c = nc+1, ntot
+        do s = 1, n_scal
+          k = 12 + 3*(s-1)
+          gC(1, c, s) = pk(k+1, c);  gC(2, c, s) = pk(k+2, c);  gC(3, c, s) = pk(k+3, c)
+        end do
+      end do
     end if
   end subroutine exchange_grad_halos
 
@@ -1120,27 +1188,54 @@ contains
   ! Wray RK3 (Williamson 1980), incremental projection each stage; alpha={8/15,5/12,3/4}, beta={0,-17/60,-5/12}, gamma={8/15,2/15,1/3}.
   ! Stage k: u*=u^k+dt*(alpha_k*H^k+beta_k*H_prev)-gamma_k*dt*grad(p^{k-1/2}); phi=solve(div(u*)); u+=...; p+=phi. w_U0/w_T0/w_C0=H_prev.
   subroutine advance_rk3w(self, dt)
-    class(FVSolver), intent(inout) :: self
+    class(FVSolver), intent(inout), target :: self
     real(rp),        intent(in)    :: dt
 
-    integer(ip) :: nc, c, k, jno, p_iter
-    real(rp)    :: gk_dt, time_n
+    integer(ip) :: nc, ntot, nbnd, nfaces, ns, nsc, c, k, s, jno, p_iter
+    real(rp)    :: gk_dt, time_n, a_k, b_k, nu_mol
     real(rp)    :: t_perf, t_sub, p_resid
+    ! Plain-array aliases for the device loops below (the polymorphic self can't be mapped).
+    real(rp), pointer :: U(:,:), T(:), Cf(:,:), p(:), p_old(:), nu_sgs(:), gp_rc(:,:), gp_cell(:,:)
+    real(rp), pointer :: phi_prev(:), phi_prev_bnd(:), p_bnd(:), U_face(:), face_flux(:), inv_vol(:)
+    real(rp), pointer :: cvol(:), tau(:,:), hU(:,:), hT(:), hC(:,:), hU0(:,:), hT0(:), hC0(:,:), rhsp(:)
 
     nc = self%mesh%n_cells
+    ntot = nc + self%mesh%n_ghost
+    nbnd = self%mesh%n_bnd_faces
+    nfaces = self%mesh%n_faces
+    ns = self%params%n_scalars
+    nsc = max(1_ip, ns)
+    nu_mol = self%params%nu
+    U => self%U;  T => self%T;  p => self%p;  p_old => self%p_old;  nu_sgs => self%nu_sgs
+    gp_rc => self%w_gp_rc;  gp_cell => self%w_gp_cell;  phi_prev => self%phi_prev
+    phi_prev_bnd => self%phi_prev_bnd;  p_bnd => self%p_bnd;  U_face => self%U_face
+    face_flux => self%face_flux;  inv_vol => self%inv_vol;  cvol => self%mesh%cell_volume_soa
+    tau => self%tau_w_bnd
+    hU => self%w_H_U;  hT => self%w_H_T;  hC => self%w_H_C;  rhsp => self%w_rhs_p
+    hU0 => self%w_U0;  hT0 => self%w_T0;  hC0 => self%w_C0
+    Cf => self%w_H_C  ! placeholder when no scalars (never touched)
+    if (ns > 0) Cf => self%C
+
     associate(H_U => self%w_H_U(:, 1:nc), H_T => self%w_H_T(1:nc), &
           rhs_p => self%w_rhs_p(1:nc), &
-          H_C => self%w_H_C(1:max(1_ip,self%params%n_scalars), 1:nc), &
-          H_U_prev => self%w_U0(:, 1:nc), H_T_prev => self%w_T0(1:nc), &
-          H_C_prev => self%w_C0(1:max(1_ip,self%params%n_scalars), 1:nc))
+          H_C => self%w_H_C(1:nsc, 1:nc))
 
-    H_U = 0.0_rp
-    H_T = 0.0_rp
-    rhs_p = 0.0_rp
-    H_C = 0.0_rp
-    H_U_prev = 0.0_rp  ! beta(1)=0 so this is never read, but zero for safety
-    H_T_prev = 0.0_rp
-    H_C_prev = 0.0_rp
+    !$acc parallel loop default(present)
+    do c = 1, nc
+      hU(1, c) = 0.0_rp;  hU(2, c) = 0.0_rp;  hU(3, c) = 0.0_rp
+      hT(c) = 0.0_rp
+      rhsp(c) = 0.0_rp
+      ! H_prev: beta(1)=0 so this is never read, but zero for safety
+      hU0(1, c) = 0.0_rp;  hU0(2, c) = 0.0_rp;  hU0(3, c) = 0.0_rp
+      hT0(c) = 0.0_rp
+    end do
+    !$acc parallel loop collapse(2) default(present)
+    do c = 1, nc
+      do s = 1, nsc
+        hC(s, c) = 0.0_rp
+        hC0(s, c) = 0.0_rp
+      end do
+    end do
 
     time_n = self%time
 
@@ -1182,16 +1277,25 @@ contains
                                     grad_U_ext=self%grad_U, dt_stab=gk_dt)
         end select
       else
-        self%nu_sgs(1:nc) = 0.0_rp
+        !$acc parallel loop default(present)
+        do c = 1, nc
+          nu_sgs(c) = 0.0_rp
+        end do
       end if
 
       call exchange_nu_sgs_halo(self)
       select case (self%abl_config%wall_model_id)
       case (WM_MOST)
+        ! MOST runs on the host: refresh its inputs there and push its outputs back.
+        !$acc update host(self%U, self%T, self%tau_w_bnd, self%q_w_bnd, self%L_bnd) if(self%on_device)
         call abl_wall_model(self%U, self%T, self%mesh, self%abl_config, self%bc_configs, &
                             self%tau_w_bnd, self%q_w_bnd, self%L_bnd, update_L=(k == 1))
+        !$acc update device(self%tau_w_bnd, self%q_w_bnd, self%L_bnd) if(self%on_device)
       case (WM_NONE)
-        self%tau_w_bnd = 0.0_rp
+        !$acc parallel loop default(present)
+        do c = 1, nbnd
+          tau(1, c) = 0.0_rp;  tau(2, c) = 0.0_rp;  tau(3, c) = 0.0_rp
+        end do
       case default
         ! Filter advances once per step, so stages 2 and 3 pass dt = 0.
         call apply_wall_model_bc(self%U, self%params%nu, self%mesh, self%tau_w_bnd, &
@@ -1212,18 +1316,36 @@ contains
       t_perf = wall_time_now()
       call prof_push('predictor')
       t_sub = wall_time_now()
+      a_k = RK3W_ALPHA(k)
+      b_k = RK3W_BETA(k)
+#ifdef _OPENACC
+      !$acc parallel loop default(present)
+#else
       !$omp parallel do schedule(static)
+#endif
       do c = 1, nc
-        self%U(:, c) = self%U(:, c) + dt * (RK3W_ALPHA(k) * H_U(:, c) + RK3W_BETA(k) * H_U_prev(:, c))
-        self%T(c)    = self%T(c)    + dt * (RK3W_ALPHA(k) * H_T(c)     + RK3W_BETA(k) * H_T_prev(c))
+        U(1, c) = U(1, c) + dt * (a_k * hU(1, c) + b_k * hU0(1, c))
+        U(2, c) = U(2, c) + dt * (a_k * hU(2, c) + b_k * hU0(2, c))
+        U(3, c) = U(3, c) + dt * (a_k * hU(3, c) + b_k * hU0(3, c))
+        T(c)    = T(c)    + dt * (a_k * hT(c)    + b_k * hT0(c))
       end do
+#ifndef _OPENACC
       !$omp end parallel do
-      if (self%params%n_scalars > 0) then
-        !$omp parallel do schedule(static)
+#endif
+      if (ns > 0) then
+#ifdef _OPENACC
+        !$acc parallel loop collapse(2) default(present)
+#else
+        !$omp parallel do schedule(static) private(s)
+#endif
         do c = 1, nc
-          self%C(:, c) = self%C(:, c) + dt * (RK3W_ALPHA(k) * H_C(:, c) + RK3W_BETA(k) * H_C_prev(:, c))
+          do s = 1, ns
+            Cf(s, c) = Cf(s, c) + dt * (a_k * hC(s, c) + b_k * hC0(s, c))
+          end do
         end do
+#ifndef _OPENACC
         !$omp end parallel do
+#endif
       end if
 
       call self%mesh%begin_halos_vec(self%U)
@@ -1235,10 +1357,16 @@ contains
 
       ! -- Pre-correction: u_hat = u* - gk_dt*grad(p^{k-1/2}); net gives p^{k+1/2}=p^{k-1/2}+phi.
       t_sub = wall_time_now()
-      self%p_old(1:nc) = self%p(1:nc)
+      !$acc parallel loop default(present)
+      do c = 1, nc
+        p_old(c) = p(c)
+      end do
       call correct_velocity_psolver_dual(self, gk_dt, with_cross=.false.)
       ! Rhie-Chow must add back exactly the gradient just removed, so record it here.
-      self%w_gp_rc(:, 1:nc) = self%w_gp_cell(:, 1:nc)
+      !$acc parallel loop default(present)
+      do c = 1, nc
+        gp_rc(1, c) = gp_cell(1, c);  gp_rc(2, c) = gp_cell(2, c);  gp_rc(3, c) = gp_cell(3, c)
+      end do
       if (self%mesh%nranks > 1 .and. self%mesh%n_ghost > 0) &
         call self%mesh%exchange_halos_vec(self%w_gp_rc)
       self%perf_t_predictor_precorrect = self%perf_t_predictor_precorrect + (wall_time_now() - t_sub)
@@ -1260,8 +1388,14 @@ contains
 
       ! -- Save p^{k-1/2} into phi_prev for the Rhie-Chow correction.
       ! phi_prev is frozen across jno iterations; RC always sees the same pressure.
-      self%phi_prev(1:nc+self%mesh%n_ghost) = self%p(1:nc+self%mesh%n_ghost)
-      self%phi_prev_bnd(:) = self%p_bnd(:)
+      !$acc parallel loop default(present)
+      do c = 1, ntot
+        phi_prev(c) = p(c)
+      end do
+      !$acc parallel loop default(present)
+      do c = 1, nbnd
+        phi_prev_bnd(c) = p_bnd(c)
+      end do
 
       ! -- Pressure Poisson with effective sub-step gk_dt
       t_perf = wall_time_now()
@@ -1270,12 +1404,18 @@ contains
         real(rp) :: u_bulk_local(2), u_bulk_global(2), u_scale, atol_dynamic
         integer :: ierr_tol
         integer(ip) :: n_nonortho_max
-        real(rp) :: divU_norm_prev, divU_norm_curr, divU_local, stagnate_tol
+        real(rp) :: divU_norm_prev, divU_norm_curr, divU_local, stagnate_tol, ub1, ub2
         ! Volume-weighted mean speed, not the domain max: max(|U|) is a single-cell
         ! quantity and loosens atol precisely when one cell is diverging.
-        u_bulk_local(1) = sum(sqrt(self%U(1,1:nc)**2 + self%U(2,1:nc)**2 + self%U(3,1:nc)**2) * &
-                               self%mesh%cells(1:nc)%volume)
-        u_bulk_local(2) = sum(self%mesh%cells(1:nc)%volume)
+        ub1 = 0.0_rp
+        ub2 = 0.0_rp
+        !$acc parallel loop default(present) reduction(+:ub1, ub2)
+        do c = 1, nc
+          ub1 = ub1 + sqrt(U(1, c)**2 + U(2, c)**2 + U(3, c)**2) * cvol(c)
+          ub2 = ub2 + cvol(c)
+        end do
+        u_bulk_local(1) = ub1
+        u_bulk_local(2) = ub2
         call MPI_Allreduce(u_bulk_local, u_bulk_global, 2, MPI_DOUBLE_PRECISION, &
                            MPI_SUM, self%mesh%comm, ierr_tol)
         u_scale = u_bulk_global(1) / max(u_bulk_global(2), SMALL)
@@ -1294,7 +1434,11 @@ contains
           call compute_face_fluxes_and_rhs(self, gk_dt, rhs_p, p_is_increment=(jno > 1))
           ! Global reduction: the exit test below must fire on every rank at the
           ! same jno or the ranks desynchronise on the collective solve.
-          divU_local = maxval(abs(rhs_p(1:nc)))
+          divU_local = 0.0_rp
+          !$acc parallel loop default(present) reduction(max:divU_local)
+          do c = 1, nc
+            divU_local = max(divU_local, abs(rhsp(c)))
+          end do
           call MPI_Allreduce(divU_local, divU_norm_curr, 1, MPI_DOUBLE_PRECISION, &
                              MPI_MAX, self%mesh%comm, ierr_tol)
           if (self%diag_interface) self%diag_nonortho_iters = jno
@@ -1302,11 +1446,20 @@ contains
           ! above for the jno==1 gradient), but the KSP solves for the increment phi. Seeding
           ! its nonzero initial guess with O(1) p^{k-1/2} instead of the O(dt*div u*) increment
           ! wastes iterations and loosens the effective (relative) convergence tolerance.
-          if (jno == 1) self%p(1:nc) = 0.0_rp
+          if (jno == 1) then
+            !$acc parallel loop default(present)
+            do c = 1, nc
+              p(c) = 0.0_rp
+            end do
+          end if
           call prof_push('ksp_solve')
+          ! The PETSc interface still takes host arrays: stage the RHS and initial guess out and
+          ! the solution back in.
+          !$acc update host(rhsp(1:nc), p(1:nc)) if(self%on_device)
           call pressure_solver_solve(self%psolver, rhs_p, self%p(1:nc), tol=self%params%p_tol, &
                          max_iter=self%params%p_max_iter, n_iter=p_iter, residual=p_resid, &
                          atol_in=atol_dynamic)
+          !$acc update device(p(1:nc)) if(self%on_device)
           call prof_pop()
           call self%mesh%begin_halos_scalar(self%p)
           if (self%skip_grad_p) then
@@ -1340,12 +1493,16 @@ contains
       call prof_push('projection')
 
       call correct_face_fluxes(self, gk_dt)            ! phi -> divergence-free
-      self%U_face(:) = self%face_flux(:)               ! persist divergence-free flux
+      ! Persist the divergence-free flux (U_face is resident for the whole run).
+      !$acc parallel loop default(present)
+      do c = 1, nfaces
+        U_face(c) = face_flux(c)
+      end do
       self%u_face_ready = .true.
-#ifdef _OPENACC
-      !$acc update device(self%U_face)
-#endif
-      if (self%diag_interface) call record_divergence_split(self, jno)
+      if (self%diag_interface) then
+        call solver_sync_host(self)
+        call record_divergence_split(self, jno)
+      end if
       call correct_velocity_psolver_dual(self, gk_dt, with_cross=.true.)  ! u^{k+1} = u* - gk_dt*grad(phi)
       call self%mesh%begin_halos_vec(self%U)
       call apply_velocity_bc(self%U, self%U_bnd, self%bc_configs, self%mesh, &
@@ -1357,11 +1514,17 @@ contains
 
       ! -- Rotational correction to phi: phi = phi - (nu+nu_sgs)*div(u*) (Brown, Cortez & Minion 2001)
       if (self%params%use_rotational_projection) then
+#ifdef _OPENACC
+        !$acc parallel loop default(present)
+#else
         !$omp parallel do schedule(static)
+#endif
         do c = 1, nc
-          self%p(c) = self%p(c) + (self%params%nu + self%nu_sgs(c)) * rhs_p(c) * gk_dt * self%inv_vol(c)
+          p(c) = p(c) + (nu_mol + nu_sgs(c)) * rhsp(c) * gk_dt * inv_vol(c)
         end do
+#ifndef _OPENACC
         !$omp end parallel do
+#endif
         call self%mesh%begin_halos_scalar(self%p)
         call apply_pressure_bc_o2(self)
         call self%mesh%end_halos_scalar(self%p)
@@ -1369,8 +1532,11 @@ contains
       end if
 
       ! -- Accumulate: p^{k+1/2} = p^{k-1/2} + phi (CaNS Eq. 2d).
-      self%p(1:nc) = self%p(1:nc) + self%p_old(1:nc)
-      call anchor_pressure_to_outlet(self%p(1:nc), self%mesh, self%w_outlet_cell, self%w_outlet_pval)
+      !$acc parallel loop default(present)
+      do c = 1, nc
+        p(c) = p(c) + p_old(c)
+      end do
+      call anchor_pressure_to_outlet(self%p(1:nc), self%mesh, self%w_outlet_cell, self%w_outlet_pval, self%on_device)
       call self%mesh%begin_halos_scalar(self%p)
       call apply_pressure_bc_o2(self)
       call self%mesh%end_halos_scalar(self%p)
@@ -1381,9 +1547,19 @@ contains
       call compute_pressure_gradient(self)
 
       ! -- Save current H as H_prev for next stage
-      H_U_prev = H_U
-      H_T_prev = H_T
-      if (self%params%n_scalars > 0) H_C_prev = H_C(1:self%params%n_scalars, :)
+      !$acc parallel loop default(present)
+      do c = 1, nc
+        hU0(1, c) = hU(1, c);  hU0(2, c) = hU(2, c);  hU0(3, c) = hU(3, c)
+        hT0(c) = hT(c)
+      end do
+      if (ns > 0) then
+        !$acc parallel loop collapse(2) default(present)
+        do c = 1, nc
+          do s = 1, ns
+            hC0(s, c) = hC(s, c)
+          end do
+        end do
+      end if
 
     end do  ! k = 1, 3
 
@@ -1396,6 +1572,10 @@ contains
     if (self%abl_config%use_sem) then
       call sem_advance(self%sem_state, dt)
       call update_sem_inflow(self)
+      !$acc update device(self%sem_fluc_bnd) if(self%on_device)
+      if (allocated(self%abl_mean_bnd)) then
+        !$acc update device(self%abl_mean_bnd) if(self%on_device)
+      end if
     end if
 
     end associate
@@ -1404,23 +1584,27 @@ contains
 
   ! Explicit RHS: H = -conv + visc + buoy
   subroutine compute_explicit_rhs(self, H_U, H_T, H_C, time_eval)
-    class(FVSolver), intent(inout) :: self
+    class(FVSolver), intent(inout), target :: self
     real(rp),        intent(inout) :: H_U(:,:)  ! (3, nc)
     real(rp),        intent(inout) :: H_T(:)  ! (nc)
     real(rp),        intent(inout) :: H_C(:,:)  ! (n_scalars, nc)
     real(rp),        intent(in)    :: time_eval
 
-    integer(ip) :: nc, c, s
-    real(rp)    :: force_bg(3), dir_n, hscale, hdir(3)
+    integer(ip) :: nc, c, s, ntot, nbnd
+    real(rp)    :: force_bg(3), dir_n, hscale, hdir(3), om(3), gvec(3), beta_b, T_ref
     real(rp)    :: t_sub
+    logical     :: rot, bous
+    real(rp), pointer :: cU(:,:), vU(:,:), cT(:), vT(:), cC(:), vC(:), U(:,:), T(:), Cf(:,:), Cb(:,:)
+    real(rp), pointer :: Cs(:), Csb(:)
 
     t_sub = wall_time_now()
     nc = self%mesh%n_cells
-    self%w_conv_U(:, 1:nc) = 0.0_rp
-    self%w_visc_U(:, 1:nc) = 0.0_rp
-    self%w_conv_T(1:nc) = 0.0_rp
-    self%w_visc_T(1:nc) = 0.0_rp
+    ntot = nc + self%mesh%n_ghost
+    nbnd = self%mesh%n_bnd_faces
+    cU => self%w_conv_U;  vU => self%w_visc_U;  cT => self%w_conv_T;  vT => self%w_visc_T
+    U => self%U;  T => self%T
 
+    ! The advection/viscous kernels zero their own output on the device.
     ! Advection uses U_face (divergence-free flux from last projection) for discrete mass conservation.
     call advection_rhs_vector(self%U, self%mesh, self%params%scheme, self%w_conv_U(:, 1:nc), &
             U_bnd=self%U_bnd, face_flux=self%U_face, inv_vol=self%inv_vol, grad_U=self%grad_U)
@@ -1434,6 +1618,12 @@ contains
       call viscous_rhs_scalar(self%T, self%params%alpha_T, self%nu_sgs, &
              self%params%Pr_t, self%grad_T, self%mesh, self%w_visc_T(1:nc), &
                    phi_bnd=self%T_bnd, inv_vol=self%inv_vol)
+    else
+      !$acc parallel loop default(present)
+      do c = 1, nc
+        cT(c) = 0.0_rp
+        vT(c) = 0.0_rp
+      end do
     end if
 
     ! Precompute cell-independent body force: constant + time-varying harmonic.
@@ -1453,50 +1643,88 @@ contains
       hscale   = self%params%forcing_amp * cos(self%params%forcing_omega * time_eval + self%params%forcing_phase)
       force_bg = force_bg + hscale * hdir
     end if
+    rot = self%params%use_rotation
+    bous = self%params%boussinesq
+    om = self%params%omega_rot
+    gvec = self%params%g
+    beta_b = self%params%beta
+    T_ref = self%params%T_ref
 
+    ! H = -conv + visc + Coriolis + buoyancy + forcing (grad p applied in projection)
+#ifdef _OPENACC
+    !$acc parallel loop default(present) copyin(force_bg, om, gvec)
+#else
     !$omp parallel do schedule(static)
+#endif
     do c = 1, nc
-      ! H = -conv + visc + Coriolis + buoyancy + forcing (grad p applied in projection)
-      H_U(:, c) = self%w_conv_U(:, c) + self%w_visc_U(:, c) + force_bg
-      if (self%params%use_rotation) &
-        H_U(:, c) = H_U(:, c) - 2.0_rp * cross3(self%params%omega_rot, self%U(:, c))
-      if (self%params%boussinesq) &
-        H_U(:, c) = H_U(:, c) - self%params%beta * (self%T(c) - self%params%T_ref) * self%params%g
-      H_T(c) = self%w_conv_T(c) + self%w_visc_T(c)
+      H_U(1, c) = cU(1, c) + vU(1, c) + force_bg(1)
+      H_U(2, c) = cU(2, c) + vU(2, c) + force_bg(2)
+      H_U(3, c) = cU(3, c) + vU(3, c) + force_bg(3)
+      if (rot) then
+        H_U(1, c) = H_U(1, c) - 2.0_rp * (om(2) * U(3, c) - om(3) * U(2, c))
+        H_U(2, c) = H_U(2, c) - 2.0_rp * (om(3) * U(1, c) - om(1) * U(3, c))
+        H_U(3, c) = H_U(3, c) - 2.0_rp * (om(1) * U(2, c) - om(2) * U(1, c))
+      end if
+      if (bous) then
+        H_U(1, c) = H_U(1, c) - beta_b * (T(c) - T_ref) * gvec(1)
+        H_U(2, c) = H_U(2, c) - beta_b * (T(c) - T_ref) * gvec(2)
+        H_U(3, c) = H_U(3, c) - beta_b * (T(c) - T_ref) * gvec(3)
+      end if
+      H_T(c) = cT(c) + vT(c)
     end do
+#ifndef _OPENACC
     !$omp end parallel do
+#endif
 
     ! Wall-model traction/heat flux enter H so RK3 weights them like every other term.
     call add_wall_stress_to_rhs(self, H_U)
     if (self%abl_config%wall_model_id == WM_MOST) call add_wall_heat_flux_to_rhs(self, H_T)
 
     if (self%params%n_scalars > 0) then
-      self%w_conv_C(1:nc) = 0.0_rp
-      self%w_visc_C(1:nc) = 0.0_rp
+      cC => self%w_conv_C;  vC => self%w_visc_C;  Cf => self%C;  Cb => self%C_bnd
+      Cs => self%w_Cs;  Csb => self%w_Cs_bnd
       do s = 1, self%params%n_scalars
-        call advection_rhs_scalar(self%C(s, :), self%U, self%mesh, self%params%scalar_scheme, self%w_conv_C(1:nc), &
-                      phi_bnd=self%C_bnd(s, :), U_bnd=self%U_bnd, face_flux=self%U_face, inv_vol=self%inv_vol, &
+        ! Rows of C/C_bnd are strided; hand the kernels contiguous copies.
+        !$acc parallel loop default(present)
+        do c = 1, ntot
+          Cs(c) = Cf(s, c)
+        end do
+        !$acc parallel loop default(present)
+        do c = 1, nbnd
+          Csb(c) = Cb(s, c)
+        end do
+        call advection_rhs_scalar(self%w_Cs, self%U, self%mesh, self%params%scalar_scheme, self%w_conv_C(1:nc), &
+                      phi_bnd=self%w_Cs_bnd, U_bnd=self%U_bnd, face_flux=self%U_face, inv_vol=self%inv_vol, &
                       grad_phi=self%grad_C(:, :, s))
-        call viscous_rhs_scalar(self%C(s, :), self%params%scalar_diffusivity(s), self%nu_sgs, &
+        call viscous_rhs_scalar(self%w_Cs, self%params%scalar_diffusivity(s), self%nu_sgs, &
                      self%params%scalar_pr_t(s), self%grad_C(:, :, s), self%mesh, self%w_visc_C(1:nc), &
-                     phi_bnd=self%C_bnd(s, :), inv_vol=self%inv_vol)
-        H_C(s, :) = self%w_conv_C(1:nc) + self%w_visc_C(1:nc)
+                     phi_bnd=self%w_Cs_bnd, inv_vol=self%inv_vol)
+        !$acc parallel loop default(present)
+        do c = 1, nc
+          H_C(s, c) = cC(c) + vC(c)
+        end do
       end do
     end if
     self%perf_t_rhs_transport = self%perf_t_rhs_transport + (wall_time_now() - t_sub)
 
-    ! Scalar-source and large-scale nudging work: not transport
+    ! Scalar-source and large-scale nudging work: not transport. Both run on the host.
     t_sub = wall_time_now()
-    if (self%params%n_scalars > 0) call add_scalar_source_terms(self, H_C, time_eval)
+    if (self%params%n_scalars > 0 .and. self%params%n_scalar_sources > 0) then
+      !$acc update host(H_C) if(self%on_device)
+      call add_scalar_source_terms(self, H_C, time_eval)
+      !$acc update device(H_C) if(self%on_device)
+    end if
 
     ! Apply Davies nudging relaxation to large-scale profiles
     if (self%abl_config%use_nudging) then
+      !$acc update host(self%U, self%T, H_U, H_T) if(self%on_device)
       call nudging_apply_rhs(self%nudging_data, self%U, self%T, self%cell_z, &
                              nc, time_eval, self%abl_config%nudging_tau, &
                              self%abl_config%nudging_z_start, H_U, H_T, &
                              z_full=self%abl_config%nudging_z_full, &
                              horizontal_only=self%abl_config%nudging_horizontal_only, &
                              dt=self%params%dt)
+      !$acc update device(H_U, H_T) if(self%on_device)
     end if
     self%perf_t_rhs_sources = self%perf_t_rhs_sources + (wall_time_now() - t_sub)
   end subroutine compute_explicit_rhs
@@ -1890,24 +2118,38 @@ contains
 
   !> Add the wall heat flux to H_T as a rate (mirrors add_wall_stress_to_rhs).
   subroutine add_wall_heat_flux_to_rhs(self, H_T)
-    class(FVSolver), intent(in)    :: self
+    class(FVSolver), intent(in), target :: self
     real(rp),        intent(inout) :: H_T(:)  ! (nc)
 
-    integer(ip) :: p, qidx, f, f_bnd, f_global, o
+    integer(ip) :: f_bnd, f_global, o, q, nc, n_int, n_bnd, n_patches
+    integer(ip), pointer :: fown(:), fpid(:), pbc(:)
+    real(rp),    pointer :: farea(:), cvol(:), qw(:)
 
     if (.not. allocated(self%q_w_bnd)) return
+    if (self%n_wallmodel_patches <= 0) return
+    nc = self%mesh%n_cells
+    n_int = self%mesh%n_int_faces
+    n_bnd = self%mesh%n_bnd_faces
+    n_patches = self%mesh%n_patches
+    fown => self%mesh%face_owner_soa
+    fpid => self%mesh%face_patch_id_soa
+    pbc => self%mesh%patch_bc_id_soa
+    farea => self%mesh%face_area_soa
+    cvol => self%mesh%cell_volume_soa
+    qw => self%q_w_bnd
 
-    do qidx = 1, self%n_wallmodel_patches
-      p = self%wallmodel_patches(qidx)
-      do f = 1, self%mesh%patches(p)%n_faces
-        f_bnd    = self%mesh%patches(p)%start_face + f - 1
-        f_global = self%mesh%n_int_faces + f_bnd
-        o        = self%mesh%faces(f_global)%owner
-        if (o < 1 .or. o > self%mesh%n_cells) cycle
-        ! q_w_bnd is kinematic heat flux [K m/s]; area/volume converts to a rate.
-        H_T(o) = H_T(o) + self%q_w_bnd(f_bnd) * &
-                 self%mesh%faces(f_global)%area / self%mesh%cells(o)%volume
-      end do
+    ! q_w_bnd is kinematic heat flux [K m/s]; area/volume converts to a rate. Atomics: wall
+    ! faces can share an owner cell.
+    !$acc parallel loop default(present) copyin(qw) copy(H_T) private(f_global, o, q)
+    do f_bnd = 1, n_bnd
+      f_global = n_int + f_bnd
+      q = fpid(f_global)
+      if (q < 1 .or. q > n_patches) cycle
+      if (pbc(q) /= BC_WALL_MODEL) cycle
+      o = fown(f_global)
+      if (o < 1 .or. o > nc) cycle
+      !$acc atomic update
+      H_T(o) = H_T(o) + qw(f_bnd) * farea(f_global) / cvol(o)
     end do
   end subroutine add_wall_heat_flux_to_rhs
 
@@ -1933,12 +2175,13 @@ contains
 
   !> Gradient of an arbitrary cell scalar with its boundary values, halo-exchanged.
   subroutine gradient_of_scalar(self, fld, fld_bnd, grad)
-    class(FVSolver), intent(inout) :: self
+    class(FVSolver), intent(inout), target :: self
     real(rp),        intent(in)    :: fld(:)
     real(rp),        intent(in)    :: fld_bnd(:)
     real(rp),        intent(inout) :: grad(:,:)
 
-    integer(ip) :: iter
+    integer(ip) :: iter, c
+    real(rp), pointer :: gprev(:,:)
 
     select case (trim(self%params%gradient_scheme))
     case ('GREEN_GAUSS')
@@ -1946,7 +2189,11 @@ contains
       do iter = 2, self%params%gg_iterations
         if (self%mesh%nranks > 1 .and. self%mesh%n_ghost > 0) &
           call self%mesh%exchange_halos_vec(grad)
-        self%w_gp_prev = grad
+        gprev => self%w_gp_prev
+        !$acc parallel loop if(self%on_device) default(present)
+        do c = 1, size(grad, 2)
+          gprev(1, c) = grad(1, c);  gprev(2, c) = grad(2, c);  gprev(3, c) = grad(3, c)
+        end do
         call green_gauss_gradient_scalar(fld, self%mesh, grad, fld_bnd, self%w_gp_prev)
       end do
     case default
@@ -1956,6 +2203,24 @@ contains
     if (self%mesh%nranks > 1 .and. self%mesh%n_ghost > 0) &
       call self%mesh%exchange_halos_vec(grad)
   end subroutine gradient_of_scalar
+
+  !> w_p_tot = phi_prev + p (and on the boundary): p^{k-1/2} plus the current increment.
+  subroutine build_total_pressure(self)
+    class(FVSolver), intent(inout), target :: self
+    integer(ip) :: c
+    real(rp), pointer :: pt(:), ptb(:), pp(:), ppb(:), p(:), pb(:)
+
+    pt => self%w_p_tot;  ptb => self%w_p_tot_bnd;  pp => self%phi_prev;  ppb => self%phi_prev_bnd
+    p => self%p;  pb => self%p_bnd
+    !$acc parallel loop if(self%on_device) default(present)
+    do c = 1, size(pt)
+      pt(c) = pp(c) + p(c)
+    end do
+    !$acc parallel loop if(self%on_device) default(present)
+    do c = 1, size(ptb)
+      ptb(c) = ppb(c) + pb(c)
+    end do
+  end subroutine build_total_pressure
 
   !> Assemble predictor face fluxes and Poisson RHS: rhs(c) = -(1/dt)*sum_f q*_f.
   subroutine compute_face_fluxes_and_rhs(self, dt, rhs_p, p_is_increment)
@@ -1996,8 +2261,7 @@ contains
     if (present(p_is_increment)) incr = p_is_increment
     if (.not. self%skip_grad_p) then
       if (incr) then
-        self%w_p_tot     = self%phi_prev     + self%p
-        self%w_p_tot_bnd = self%phi_prev_bnd + self%p_bnd
+        call build_total_pressure(self)
         call gradient_of_scalar(self, self%w_p_tot, self%w_p_tot_bnd, self%w_gp)
       else
         call gradient_of_scalar(self, self%p, self%p_bnd, self%w_gp)
@@ -2616,6 +2880,93 @@ contains
     !$acc end data
   end subroutine correct_velocity_psolver_dual
 
+  !> Move every field and work array of the time step to the device (OpenACC builds; a no-op
+  !> otherwise). Call once, after initial/restart conditions are set and before the time loop:
+  !> from here on the device copy is authoritative and the host copy is refreshed only by
+  !> sync_host (output, statistics, sampling, checkpoints).
+  subroutine solver_to_device(self, gpu_aware_mpi)
+    class(FVSolver), intent(inout) :: self
+    logical,         intent(in)    :: gpu_aware_mpi
+#ifdef _OPENACC
+    if (self%on_device) return
+    if (self%mesh%n_colors <= 0 .or. self%psolver%n_colors <= 0) &
+      error stop 'solver_to_device: face colouring is missing; the device kernels need it'
+    call stage_static_on_device(self)
+    !$acc enter data copyin(self%U, self%p, self%p_old, self%T, self%nu_sgs, self%U_bnd, self%p_bnd, &
+    !$acc      self%phi_prev, self%phi_prev_bnd, self%T_bnd, self%tau_w_bnd, self%sem_fluc_bnd, &
+    !$acc      self%grad_U, self%grad_T, self%face_flux, self%w_H_U, self%w_H_T, self%w_H_C, &
+    !$acc      self%w_rhs_p, self%w_U0, self%w_T0, self%w_C0, self%w_conv_U, self%w_visc_U, &
+    !$acc      self%w_conv_T, self%w_visc_T, self%w_flux_built, self%w_gp, self%w_gp_rc, &
+    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval)
+    !$acc update device(self%U_face, self%inv_vol)
+    if (self%params%n_scalars > 0) then
+      !$acc enter data copyin(self%C, self%C_bnd, self%grad_C, self%w_conv_C, self%w_visc_C, &
+      !$acc      self%w_Cs, self%w_Cs_bnd)
+    end if
+    if (allocated(self%w_pack_grad)) then
+      !$acc enter data copyin(self%w_pack_grad)
+    end if
+    if (allocated(self%w_g_prev_U)) then
+      !$acc enter data copyin(self%w_g_prev_U, self%w_g_prev_T, self%w_gp_prev)
+    end if
+    if (allocated(self%abl_mean_bnd)) then
+      !$acc enter data copyin(self%abl_mean_bnd)
+    end if
+    if (allocated(self%q_w_bnd)) then
+      !$acc enter data copyin(self%q_w_bnd, self%L_bnd)
+    end if
+    call self%mesh%set_halo_device(.true., gpu_aware_mpi)
+    self%on_device = .true.
+#endif
+  end subroutine solver_to_device
+
+  !> Refresh the host copy of everything output, statistics, sampling and checkpoints read.
+  subroutine solver_sync_host(self)
+    class(FVSolver), intent(inout) :: self
+#ifdef _OPENACC
+    if (.not. self%on_device) return
+    !$acc update host(self%U, self%p, self%T, self%nu_sgs, self%U_bnd, self%p_bnd, self%T_bnd, &
+    !$acc      self%tau_w_bnd, self%grad_U, self%grad_T, self%face_flux, self%U_face, self%w_gp)
+    if (self%params%n_scalars > 0) then
+      !$acc update host(self%C, self%C_bnd, self%grad_C)
+    end if
+    if (allocated(self%q_w_bnd)) then
+      !$acc update host(self%q_w_bnd, self%L_bnd)
+    end if
+#endif
+  end subroutine solver_sync_host
+
+  !> Release what solver_to_device staged.
+  subroutine solver_leave_device(self)
+    class(FVSolver), intent(inout) :: self
+#ifdef _OPENACC
+    if (.not. self%on_device) return
+    !$acc exit data delete(self%U, self%p, self%p_old, self%T, self%nu_sgs, self%U_bnd, self%p_bnd, &
+    !$acc      self%phi_prev, self%phi_prev_bnd, self%T_bnd, self%tau_w_bnd, self%sem_fluc_bnd, &
+    !$acc      self%grad_U, self%grad_T, self%face_flux, self%w_H_U, self%w_H_T, self%w_H_C, &
+    !$acc      self%w_rhs_p, self%w_U0, self%w_T0, self%w_C0, self%w_conv_U, self%w_visc_U, &
+    !$acc      self%w_conv_T, self%w_visc_T, self%w_flux_built, self%w_gp, self%w_gp_rc, &
+    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval)
+    if (self%params%n_scalars > 0) then
+      !$acc exit data delete(self%C, self%C_bnd, self%grad_C, self%w_conv_C, self%w_visc_C, &
+      !$acc      self%w_Cs, self%w_Cs_bnd)
+    end if
+    if (allocated(self%w_pack_grad)) then
+      !$acc exit data delete(self%w_pack_grad)
+    end if
+    if (allocated(self%w_g_prev_U)) then
+      !$acc exit data delete(self%w_g_prev_U, self%w_g_prev_T, self%w_gp_prev)
+    end if
+    if (allocated(self%abl_mean_bnd)) then
+      !$acc exit data delete(self%abl_mean_bnd)
+    end if
+    if (allocated(self%q_w_bnd)) then
+      !$acc exit data delete(self%q_w_bnd, self%L_bnd)
+    end if
+    self%on_device = .false.
+#endif
+  end subroutine solver_leave_device
+
   !> Stage the static projection-operator arrays on the device once (built in solver_init, never
   !> modified afterwards), so the projection kernels find them present.
   subroutine stage_static_on_device(self)
@@ -2851,28 +3202,32 @@ contains
   end subroutine cell_velocity_divergence
 
   !> Shift pressure so the mean at outlet cells equals p_ref (MPI-consistent).
-  subroutine anchor_pressure_to_outlet(p, msh, outlet_cell, outlet_pval)
+  subroutine anchor_pressure_to_outlet(p, msh, outlet_cell, outlet_pval, dev)
     real(rp),    intent(inout) :: p(:)  ! pressure array (n_cells)
-    type(Mesh),  intent(in)    :: msh
+    type(Mesh),  intent(in), target :: msh
     logical,     intent(in)    :: outlet_cell(:)  ! (n_cells) precomputed outlet mask
     real(rp),    intent(in)    :: outlet_pval(:)  ! (n_cells) reference pressure per outlet cell
+    logical,     intent(in)    :: dev  ! p/outlet arrays are device-resident
 
-    integer(ip) :: ocell
+    integer(ip) :: ocell, nc
     real(rp)    :: p_sum, p_ref_sum, p_ref, p_shift
     integer(ip) :: n_out, n_ref
     integer(ip) :: ierr
     real(rp)    :: buf(2)
+    real(rp), pointer :: cvol(:)
 
+    nc = msh%n_cells
+    cvol => msh%cell_volume_soa
     p_sum = 0.0_rp;  n_out = 0
-    p_ref_sum = 0.0_rp; n_ref = 0
+    p_ref_sum = 0.0_rp
     p_ref = 0.0_rp
 
-    do ocell = 1, msh%n_cells
+    !$acc parallel loop if(dev) default(present) reduction(+:p_sum, p_ref_sum, n_out)
+    do ocell = 1, nc
       if (outlet_cell(ocell)) then
         p_sum     = p_sum     + p(ocell)
         p_ref_sum = p_ref_sum + outlet_pval(ocell)
         n_out     = n_out     + 1
-        n_ref     = n_ref     + 1
       end if
     end do
 
@@ -2890,18 +3245,18 @@ contains
     if (n_out > 0 .and. n_ref > 0) then
       p_ref = p_ref_sum / real(n_ref, rp)
       p_shift = p_sum / real(n_out, rp) - p_ref
-      p(:) = p(:) - p_shift
     else
       ! pure-Neumann case (no outlet anywhere) - pressure is determined
-      ! only up to a constant. Anchor by subtracting the global volume-
+      ! only up to a constant. Anchor by subtracting the global volume-weighted mean.
       block
         real(rp) :: vol_local, vol_global, pmean_local, pmean_global, gbuf(2)
         integer(ip) :: c
         vol_local   = 0.0_rp
         pmean_local = 0.0_rp
-        do c = 1, msh%n_cells
-          vol_local   = vol_local   + msh%cells(c)%volume
-          pmean_local = pmean_local + p(c) * msh%cells(c)%volume
+        !$acc parallel loop if(dev) default(present) reduction(+:vol_local, pmean_local)
+        do c = 1, nc
+          vol_local   = vol_local   + cvol(c)
+          pmean_local = pmean_local + p(c) * cvol(c)
         end do
         gbuf(1) = vol_local
         gbuf(2) = pmean_local
@@ -2909,12 +3264,14 @@ contains
                            MPI_SUM, msh%comm, ierr)
         vol_global   = gbuf(1)
         pmean_global = gbuf(2)
-        if (vol_global > 0.0_rp) then
-          p_shift = pmean_global / vol_global
-          p(:) = p(:) - p_shift
-        end if
+        p_shift = 0.0_rp
+        if (vol_global > 0.0_rp) p_shift = pmean_global / vol_global
       end block
     end if
+    !$acc parallel loop if(dev) default(present)
+    do ocell = 1, size(p)
+      p(ocell) = p(ocell) - p_shift
+    end do
   end subroutine anchor_pressure_to_outlet
 
 
@@ -2994,16 +3351,23 @@ contains
 
   !> CFL-based adaptive time step: per-cell sums of all face fluxes/diffusion, not per-face max.
   real(rp) function solver_compute_dt(self) result(dt)
-    class(FVSolver), intent(in) :: self
-    integer(ip) :: f, o, nb, ierr, nc, patch_id, bc_id
+    class(FVSolver), intent(in), target :: self
+    integer(ip) :: f, o, nb, ierr, nc, ntot, nf, n_patches, patch_id, bc_id
     real(rp)    :: cfl_max_local, cfl_max_global
-    real(rp)    :: diff_max_local, diff_max_global, nu_eff, area
+    real(rp)    :: diff_max_local, diff_max_global, nu_eff, area, w, gc
     real(rp)    :: dt_min, safety_factor, dt_conv, dt_diff
-    real(rp)    :: u_face_use, sf(3)
-    logical     :: have_uface
+    real(rp)    :: u_face_use, sf1, sf2, sf3, nu_mol
+    logical     :: have_uface, dev
     real(rp), parameter :: diff_cfl_limit = 1.0_rp
+    integer(ip), pointer :: fown(:), fnb(:), fpid(:), pbc(:)
+    real(rp),    pointer :: fsf(:,:), gcs(:), dcf(:), cvol(:), U(:,:), Uf(:), nus(:)
 
     nc = self%mesh%n_cells
+    ntot = nc + self%mesh%n_ghost
+    nf = self%mesh%n_faces
+    n_patches = self%mesh%n_patches
+    nu_mol = self%params%nu
+    dev = self%on_device
     if (.not. allocated(dt_flux_sum_buf)) then
       allocate(dt_flux_sum_buf(nc))
       allocate(dt_diff_sum_buf(nc))
@@ -3012,8 +3376,23 @@ contains
       allocate(dt_flux_sum_buf(nc))
       allocate(dt_diff_sum_buf(nc))
     end if
-    dt_flux_sum_buf(1:nc) = 0.0_rp
-    dt_diff_sum_buf(1:nc) = 0.0_rp
+    fown => self%mesh%face_owner_soa
+    fnb  => self%mesh%face_neighbour_soa
+    fpid => self%mesh%face_patch_id_soa
+    pbc  => self%mesh%patch_bc_id_soa
+    fsf  => self%mesh%face_sf_soa
+    gcs  => self%mesh%face_gc_soa
+    dcf  => self%mesh%face_dcf_soa
+    cvol => self%mesh%cell_volume_soa
+    U => self%U
+    Uf => self%U_face
+    nus => self%nu_sgs
+
+    !$acc parallel loop if(dev) default(present)
+    do o = 1, nc
+      dt_flux_sum_buf(o) = 0.0_rp
+      dt_diff_sum_buf(o) = 0.0_rp
+    end do
 
     ! detect step-1 case where U_face has not been built yet. Fall back
     ! to a centred owner-side dot(U,sf) so the convective CFL reflects the
@@ -3023,70 +3402,93 @@ contains
     ! (mod_advection/mod_viscous accumulate over the full face loop), not any single
     ! face alone: a per-face max undercounts polyhedral buffer cells at deep
     ! snappyHexMesh refinement interfaces, which can carry far more than 6 faces.
-    !$omp parallel do default(shared) private(f, o, nb, sf, area, u_face_use, nu_eff, patch_id, bc_id)
-    do f = 1, self%mesh%n_faces
-      o  = self%mesh%faces(f)%owner
-      nb = self%mesh%faces(f)%neighbour
-      sf = self%mesh%faces(f)%sf
-      area = sqrt(sf(1)**2 + sf(2)**2 + sf(3)**2)
+#ifdef _OPENACC
+    !$acc parallel loop if(dev) default(present) &
+    !$acc      private(o, nb, sf1, sf2, sf3, area, u_face_use, nu_eff, patch_id, bc_id, w, gc)
+#else
+    !$omp parallel do default(shared) &
+    !$omp& private(f, o, nb, sf1, sf2, sf3, area, u_face_use, nu_eff, patch_id, bc_id, w, gc)
+#endif
+    do f = 1, nf
+      o  = fown(f)
+      nb = fnb(f)
+      sf1 = fsf(1, f);  sf2 = fsf(2, f);  sf3 = fsf(3, f)
+      area = sqrt(sf1**2 + sf2**2 + sf3**2)
 
       if (have_uface) then
-        u_face_use = self%U_face(f)
+        u_face_use = Uf(f)
       else
-        u_face_use = dot_product(self%U(:, o), sf)
+        u_face_use = U(1, o)*sf1 + U(2, o)*sf2 + U(3, o)*sf3
       end if
       if (o  >= 1 .and. o  <= nc) then
+#ifdef _OPENACC
+        !$acc atomic update
+#else
         !$omp atomic
+#endif
         dt_flux_sum_buf(o)  = dt_flux_sum_buf(o)  + abs(u_face_use)
       end if
       if (nb >= 1 .and. nb <= nc) then
+#ifdef _OPENACC
+        !$acc atomic update
+#else
         !$omp atomic
+#endif
         dt_flux_sum_buf(nb) = dt_flux_sum_buf(nb) + abs(u_face_use)
       end if
 
       ! Diffusive limit: gc-weighted nu_eff (mirrors mod_viscous face assembly).
-      if (nb >= 1 .and. nb <= self%mesh%n_cells + self%mesh%n_ghost) then
+      w = area / max(dcf(f), SMALL)
+      if (nb >= 1 .and. nb <= ntot) then
         if (nb <= nc) then
-          if (allocated(self%nu_sgs)) then
-            nu_eff = self%params%nu &
-                   + self%mesh%faces(f)%gc       * max(0.0_rp, self%nu_sgs(o))  &
-                   + (1.0_rp - self%mesh%faces(f)%gc) * max(0.0_rp, self%nu_sgs(nb))
-          else
-            nu_eff = self%params%nu
-          end if
+          gc = gcs(f)
+          nu_eff = nu_mol + gc * max(0.0_rp, nus(o)) + (1.0_rp - gc) * max(0.0_rp, nus(nb))
         else
-          nu_eff = self%params%nu
-          if (allocated(self%nu_sgs)) nu_eff = nu_eff + max(0.0_rp, self%nu_sgs(o))
+          nu_eff = nu_mol + max(0.0_rp, nus(o))
         end if
+#ifdef _OPENACC
+        !$acc atomic update
+#else
         !$omp atomic
-        dt_diff_sum_buf(o) = dt_diff_sum_buf(o) + nu_eff * area / max(self%mesh%faces(f)%d_cf, SMALL)
+#endif
+        dt_diff_sum_buf(o) = dt_diff_sum_buf(o) + nu_eff * w
         if (nb >= 1 .and. nb <= nc) then
+#ifdef _OPENACC
+          !$acc atomic update
+#else
           !$omp atomic
-          dt_diff_sum_buf(nb) = dt_diff_sum_buf(nb) + nu_eff * area / max(self%mesh%faces(f)%d_cf, SMALL)
+#endif
+          dt_diff_sum_buf(nb) = dt_diff_sum_buf(nb) + nu_eff * w
         end if
       else if (nb < 1 .and. o >= 1 .and. o <= nc) then
         ! No-slip/Dirichlet boundary faces apply a real explicit viscous stress at the
         ! owner-face distance (mod_viscous.f90); excluding them let near-wall cells with a
         ! thin wall-normal spacing (thinner than volume^(1/3)) run at an unstable dt.
         ! Wall-model faces are excluded: their stress is applied via a separate limiter.
-        patch_id = self%mesh%faces(f)%patch_id
+        patch_id = fpid(f)
         bc_id = -1
-        if (patch_id >= 1 .and. patch_id <= self%mesh%n_patches) bc_id = self%mesh%patches(patch_id)%bc_id
+        if (patch_id >= 1 .and. patch_id <= n_patches) bc_id = pbc(patch_id)
         if (bc_id /= BC_WALL_MODEL) then
-          nu_eff = self%params%nu
-          if (allocated(self%nu_sgs)) nu_eff = nu_eff + max(0.0_rp, self%nu_sgs(o))
+          nu_eff = nu_mol + max(0.0_rp, nus(o))
+#ifdef _OPENACC
+          !$acc atomic update
+#else
           !$omp atomic
-          dt_diff_sum_buf(o) = dt_diff_sum_buf(o) + nu_eff * area / max(self%mesh%faces(f)%d_cf, SMALL)
+#endif
+          dt_diff_sum_buf(o) = dt_diff_sum_buf(o) + nu_eff * w
         end if
       end if
     end do
+#ifndef _OPENACC
     !$omp end parallel do
+#endif
 
     cfl_max_local  = 0.0_rp
     diff_max_local = 0.0_rp
+    !$acc parallel loop if(dev) default(present) reduction(max:cfl_max_local, diff_max_local)
     do o = 1, nc
-      cfl_max_local  = max(cfl_max_local,  dt_flux_sum_buf(o) / (self%mesh%cells(o)%volume + SMALL))
-      diff_max_local = max(diff_max_local, dt_diff_sum_buf(o) / (self%mesh%cells(o)%volume + SMALL))
+      cfl_max_local  = max(cfl_max_local,  dt_flux_sum_buf(o) / (cvol(o) + SMALL))
+      diff_max_local = max(diff_max_local, dt_diff_sum_buf(o) / (cvol(o) + SMALL))
     end do
 
     block
@@ -3540,6 +3942,7 @@ contains
   subroutine solver_destroy(self)
     class(FVSolver), intent(inout) :: self
     call maybe_report_perf(self, .true.)
+    call solver_leave_device(self)
     call release_static_on_device(self)
 #ifdef _OPENACC
     if (allocated(self%inv_vol)) then
@@ -3594,6 +3997,8 @@ contains
     if (allocated(self%w_outlet_cell)) deallocate(self%w_outlet_cell)
     if (allocated(self%w_outlet_pval)) deallocate(self%w_outlet_pval)
     if (allocated(self%patch_p_val))   deallocate(self%patch_p_val)
+    if (allocated(self%w_Cs))          deallocate(self%w_Cs)
+    if (allocated(self%w_Cs_bnd))      deallocate(self%w_Cs_bnd)
     if (allocated(self%w_pack_grad)) deallocate(self%w_pack_grad)
     if (allocated(self%w_g_prev_U))  deallocate(self%w_g_prev_U)
     if (allocated(self%w_g_prev_T))  deallocate(self%w_g_prev_T)

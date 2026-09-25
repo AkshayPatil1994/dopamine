@@ -48,6 +48,7 @@ module mod_sampling
 
   public :: sampling_init
   public :: sampling_maybe_sample
+  public :: sampling_is_due
   public :: sampling_finalize
 
 contains
@@ -136,6 +137,24 @@ contains
     end if
   end subroutine sampling_init
 
+  !> Whether any active sampling object writes at this step.
+  logical function sampling_is_due(sampler, step) result(due)
+    type(SamplingCollector), intent(in) :: sampler
+    integer(ip),             intent(in) :: step
+    integer(ip) :: i
+
+    due = .false.
+    if (.not. sampler%active) return
+    do i = 1, sampler%n_objects
+      if (.not. sampler%objects(i)%active) cycle
+      if (sampler%objects(i)%write_frequency <= 0) cycle
+      if (mod(step, sampler%objects(i)%write_frequency) == 0) then
+        due = .true.
+        return
+      end if
+    end do
+  end function sampling_is_due
+
   subroutine sampling_maybe_sample(sampler, solver, time, step)
     type(SamplingCollector), intent(inout) :: sampler
     type(FVSolver),          intent(in)    :: solver
@@ -147,17 +166,7 @@ contains
     real(rp), allocatable :: grad_u(:,:,:), grad_p(:,:), grad_t(:,:), grad_nu(:,:), nu_ext(:)
     real(rp), allocatable :: payload_local(:,:), payload_global(:,:)
 
-    if (.not. sampler%active) return
-
-    has_due = .false.
-    do i = 1, sampler%n_objects
-      if (.not. sampler%objects(i)%active) cycle
-      if (sampler%objects(i)%write_frequency <= 0) cycle
-      if (mod(step, sampler%objects(i)%write_frequency) == 0) then
-        has_due = .true.
-        exit
-      end if
-    end do
+    has_due = sampling_is_due(sampler, step)
     if (.not. has_due) return
 
     nc = solver%mesh%n_cells

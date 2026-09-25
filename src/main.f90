@@ -46,6 +46,7 @@ program dopamine_main
   real(rp)       :: dt
   logical        :: do_write
   logical        :: do_stats
+  logical        :: do_checkpoint
   logical        :: write_time_hit
   logical        :: use_write_time
   integer(ip)    :: restart_step
@@ -337,6 +338,10 @@ program dopamine_main
   ! Time loop
   call warn_log_set_step_start(restart_step + 1_ip)
 
+  ! From here on the solver fields live on the device (OpenACC builds); the host copy is
+  ! refreshed with sync_host only when output, statistics, sampling or checkpoints need it.
+  call solver%to_device(gpu_aware_mpi=.false.)
+
   if (rank == 0) write(*, '(A)') ' Starting time loop...'
   call MPI_Barrier(MPI_COMM_WORLD, ierr)  ! Synchronize all ranks before time loop
 
@@ -366,21 +371,25 @@ program dopamine_main
     ! Advance one step
     call solver%advance(dt)
 
+    do_stats = .false.
+    if (config%stats_global_frequency > 0) &
+      do_stats = (mod(step, config%stats_global_frequency) == 0)
+    do_checkpoint = .false.
+    if (config%checkpoint_interval > 0) &
+      do_checkpoint = (mod(step, config%checkpoint_interval) == 0)
+
     ! Output
     if (use_write_time) then
       do_write = write_time_hit
     else
       do_write = (mod(step, config%params%write_interval) == 0)
     end if
+    if (do_write .or. do_stats .or. do_checkpoint .or. sampling_is_due(sampler, step)) &
+      call solver%sync_host()
     if (do_write) then
       call output_writer_write(writer, solver, solver%time, step)
     end if
 
-    ! Two separate ifs: .and. does not short-circuit in Fortran, so mod(...) must
-    ! never be evaluated in the same expression as the > 0 guard.
-    do_stats = .false.
-    if (config%stats_global_frequency > 0) &
-      do_stats = (mod(step, config%stats_global_frequency) == 0)
     if (do_stats) then
       call stats_sample(stats, solver, solver%time, step, rank, dt=dt, output_written=do_write)
     end if
@@ -390,8 +399,7 @@ program dopamine_main
     call warn_log_flush(step, solver%time)
 
     ! Checkpoint
-    if (config%checkpoint_interval > 0 .and. &
-        mod(step, config%checkpoint_interval) == 0) then
+    if (do_checkpoint) then
       call write_checkpoint(solver, mesh_local, trim(config%output_prefix), step, rank)
       if (rank == 0) write(*, '(A,I0)') ' Checkpoint written at step ', step
     end if
