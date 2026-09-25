@@ -5,6 +5,9 @@ module mod_mesh
   use mod_kinds
   use mod_parameters
   use mpi_f08
+#ifdef _OPENACC
+  use openacc, only: acc_is_present
+#endif
   implicit none
   private
   public :: mesh_assign_compact_ids
@@ -145,6 +148,9 @@ module mod_mesh
     !> buffers alone are staged through the host.
     logical                    :: halo_on_device = .false.
     logical                    :: halo_gpu_aware = .false.
+    !> Device path chosen for the exchange in flight: halo_on_device and the field actually
+    !> present (callers also exchange host-only scratch, e.g. filter set-up and sampling).
+    logical                    :: halo_xfer_dev = .false.
 
     ! -- F9: face coloring for thread-safe parallel face accumulation.
     ! face_color_perm(:) is a permutation of 1..n_faces grouped by color so
@@ -756,6 +762,19 @@ contains
     self%halo_gpu_aware = gpu_aware .and. self%halo_on_device
   end subroutine mesh_set_halo_device
 
+  !> Whether an exchange of this field runs on the device: device mode is on and the field is
+  !> actually resident.
+  logical function halo_field_on_device(self, phi) result(dev)
+    class(Mesh), intent(in) :: self
+    real(rp),    intent(in) :: phi(..)
+    dev = self%halo_on_device
+#ifdef _OPENACC
+    if (dev) dev = acc_is_present(phi)
+#else
+    dev = .false.  ! no device without OpenACC
+#endif
+  end function halo_field_on_device
+
   !> MPI halo exchange for a scalar field (n_cells + n_ghost).
   subroutine mesh_exchange_halos_scalar(self, phi)
     class(Mesh), intent(inout), target :: self
@@ -777,7 +796,8 @@ contains
     ns = self%halo_send_cells_total
     sidx => self%halo_send_idx
     sb => self%halo_sbuf
-    dev = self%halo_on_device
+    dev = halo_field_on_device(self, phi)
+    self%halo_xfer_dev = dev
     !$acc parallel loop if(dev) default(present)
     do k = 1, ns
       sb(k) = phi(sidx(k))
@@ -794,11 +814,11 @@ contains
     real(rp),    pointer :: rb(:)
     logical :: dev
 
+    dev = self%halo_xfer_dev
     if (.not. halo_wait(self, 1_ip)) return
     nr = self%halo_recv_cells_total
     ridx => self%halo_recv_idx
     rb => self%halo_rbuf
-    dev = self%halo_on_device
     !$acc parallel loop if(dev) default(present)
     do k = 1, nr
       phi(ridx(k)) = rb(k)
@@ -867,7 +887,8 @@ contains
     ns = self%halo_send_cells_total
     sidx => self%halo_send_idx
     sb => self%halo_sbuf
-    dev = self%halo_on_device
+    dev = halo_field_on_device(self, phi)
+    self%halo_xfer_dev = dev
     !$acc parallel loop collapse(2) if(dev) default(present)
     do k = 1, ns
       do j = 1, nf
@@ -888,11 +909,11 @@ contains
     logical :: dev
 
     nf = size(phi, 1)
+    dev = self%halo_xfer_dev
     if (.not. halo_wait(self, nf)) return
     nr = self%halo_recv_cells_total
     ridx => self%halo_recv_idx
     rb => self%halo_rbuf
-    dev = self%halo_on_device
     !$acc parallel loop collapse(2) if(dev) default(present)
     do k = 1, nr
       do j = 1, nf
@@ -936,7 +957,8 @@ contains
     ns = self%halo_send_cells_total
     sidx => self%halo_send_idx
     sb => self%halo_sbuf
-    dev = self%halo_on_device
+    dev = halo_field_on_device(self, U)
+    self%halo_xfer_dev = dev
     !$acc parallel loop if(dev) default(present) private(cidx, base)
     do k = 1, ns
       cidx = sidx(k)
@@ -974,11 +996,11 @@ contains
     n_scalars = 0
     if (present(C)) n_scalars = size(C, 1)
     nf = 5 + n_scalars
+    dev = self%halo_xfer_dev
     if (.not. halo_wait(self, nf)) return
     nr = self%halo_recv_cells_total
     ridx => self%halo_recv_idx
     rb => self%halo_rbuf
-    dev = self%halo_on_device
     !$acc parallel loop if(dev) default(present) private(cidx, base)
     do k = 1, nr
       cidx = ridx(k)
@@ -1043,8 +1065,8 @@ contains
 
     sb => self%halo_sbuf
     rb => self%halo_rbuf
-    dev = self%halo_on_device
-    aware = self%halo_gpu_aware
+    dev = self%halo_xfer_dev
+    aware = self%halo_gpu_aware .and. dev
     ns_tot = nf * self%halo_send_cells_total
     if (dev .and. .not. aware) then
       !$acc update host(sb(1:ns_tot))
@@ -1082,7 +1104,7 @@ contains
       call MPI_Waitall(self%halo_nreq, self%halo_reqs(1:self%halo_nreq), MPI_STATUSES_IGNORE)
     self%halo_exchange_active = .false.
     self%halo_nreq = 0
-    if (self%halo_on_device .and. .not. self%halo_gpu_aware) then
+    if (self%halo_xfer_dev .and. .not. self%halo_gpu_aware) then
       rb => self%halo_rbuf
       nr_tot = nf * self%halo_recv_cells_total
       !$acc update device(rb(1:nr_tot))

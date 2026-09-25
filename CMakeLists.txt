@@ -808,6 +808,7 @@ set_source_files_properties(
   src/numerics/mod_viscous.f90
   src/numerics/mod_advection.f90
   src/solver/mod_fv_solver.f90
+  src/mesh/mod_mesh.f90
   src/mod_device.f90
   src/io/mod_profiling.f90
   src/main.f90
