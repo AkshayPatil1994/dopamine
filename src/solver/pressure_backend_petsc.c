@@ -61,6 +61,17 @@ static fvm_petsc_pressure_ctx_t g_pressure_ctx = {
   NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
 };
 
+#ifdef FVM_HAVE_PETSC
+/* Set a default only when the user has not already given the option (through
+ * &dopamine_PetscParams or PETSC_OPTIONS), so backend defaults never override a user choice. */
+static PetscErrorCode fvm_petsc_set_default_option(const char *name, const char *value) {
+  PetscBool is_set = PETSC_FALSE;
+  PetscCall(PetscOptionsHasName(NULL, NULL, name, &is_set));
+  if (!is_set) PetscCall(PetscOptionsSetValue(NULL, name, value));
+  return PETSC_SUCCESS;
+}
+#endif
+
 static int fvm_petsc_gpu_backend_enabled(void) {
 #if defined(PETSC_HAVE_CUDA)
   const char *env = getenv("DOPAMINE_PETSC_USE_GPU");
@@ -91,15 +102,15 @@ static PetscErrorCode fvm_petsc_apply_gpu_defaults(void) {
    * fvm_petsc_backend_initialize -- see the comment there. */
 
   if (strncmp(g_pc_solver_type, "boomeramg", 9) == 0) {
-    PetscCall(PetscOptionsSetValue(NULL, "-pc_hypre_boomeramg_strong_threshold", "0.25"));
+    PetscCall(fvm_petsc_set_default_option("-pc_hypre_boomeramg_strong_threshold", "0.25"));
     /* hypre's default coarsening/interpolation selection can pick host-only algorithms
      * (e.g. FF1 interpolation) even when the matrix is device-resident, segfaulting in
      * host code (hypre_BoomerAMGBuildFF1Interp) because the CSR arrays it walks live on
      * the GPU. Pin to the coarsening/interpolation/relaxation choices hypre's CUDA path
      * actually supports. */
-    PetscCall(PetscOptionsSetValue(NULL, "-pc_hypre_boomeramg_coarsen_type", "PMIS"));
-    PetscCall(PetscOptionsSetValue(NULL, "-pc_hypre_boomeramg_interp_type", "ext+i"));
-    PetscCall(PetscOptionsSetValue(NULL, "-pc_hypre_boomeramg_relax_type_all", "l1scaled-Jacobi"));
+    PetscCall(fvm_petsc_set_default_option("-pc_hypre_boomeramg_coarsen_type", "PMIS"));
+    PetscCall(fvm_petsc_set_default_option("-pc_hypre_boomeramg_interp_type", "ext+i"));
+    PetscCall(fvm_petsc_set_default_option("-pc_hypre_boomeramg_relax_type_all", "l1scaled-Jacobi"));
   }
 #endif
   return PETSC_SUCCESS;
@@ -367,17 +378,17 @@ static int fvm_petsc_pressure_ctx_build(fvm_petsc_pressure_ctx_t *ctx,
        * fvm_petsc_apply_gpu_defaults() already set GPU-safe equivalents above; don't
        * clobber them here. */
       if (!fvm_petsc_gpu_backend_enabled()) {
-        PetscOptionsSetValue(NULL, "-pc_hypre_boomeramg_coarsen_type",     "HMIS");
-        PetscOptionsSetValue(NULL, "-pc_hypre_boomeramg_interp_type",      "FF1");
+        fvm_petsc_set_default_option("-pc_hypre_boomeramg_coarsen_type",     "HMIS");
+        fvm_petsc_set_default_option("-pc_hypre_boomeramg_interp_type",      "FF1");
         /* Standard strong-threshold default for 3-D pressure solves. */
-        PetscOptionsSetValue(NULL, "-pc_hypre_boomeramg_strong_threshold", "0.5");
+        fvm_petsc_set_default_option("-pc_hypre_boomeramg_strong_threshold", "0.5");
         /* Symmetric smoother across levels for the SPD pressure operator. */
-        PetscOptionsSetValue(NULL, "-pc_hypre_boomeramg_relax_type_all",   "symmetric-sor/jacobi");
+        fvm_petsc_set_default_option("-pc_hypre_boomeramg_relax_type_all",   "symmetric-sor/jacobi");
       }
       /* Keep aggressive coarsening off by default. */
-      PetscOptionsSetValue(NULL, "-pc_hypre_boomeramg_agg_nl",           "0");
+      fvm_petsc_set_default_option("-pc_hypre_boomeramg_agg_nl",           "0");
       /* Cap interpolation stencil width to control memory growth. */
-      PetscOptionsSetValue(NULL, "-pc_hypre_boomeramg_P_max",            "4");
+      fvm_petsc_set_default_option("-pc_hypre_boomeramg_P_max",            "4");
     } else {
       /* PETSc GAMG path for smaller cases or non-hypre builds. */
       PetscReal gamg_threshold[1] = {0.02};
