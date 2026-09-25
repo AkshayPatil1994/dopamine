@@ -49,7 +49,7 @@ contains
   !> @param U velocity field (3, n_cells + n_ghost)
   subroutine vreman_sgs_viscosity(U, msh, nu_sgs, U_bnd, grad_U_ext, dt_stab)
     real(rp),   intent(in)    :: U(:,:)  ! (3, n_cells+n_ghost)
-    type(Mesh), intent(inout) :: msh  ! inout: the filter-tensor build halo-exchanges G
+    type(Mesh), intent(inout), target :: msh  ! inout: the filter-tensor build halo-exchanges G
     real(rp),   intent(inout) :: nu_sgs(:)  ! (n_cells)
     real(rp),   intent(in), optional :: U_bnd(:,:)  ! (3, n_bnd_faces)
     ! Optionally reuse a pre-computed gradient (e.g. the solver's own grad_U) instead of rebuilding it.
@@ -65,7 +65,7 @@ contains
     real(rp)    :: alpha(3,3), beta(3,3)
     real(rp)    :: alpha_sq, B_beta, nu_cap, dt_stab_local
     logical     :: has_dt_stab
-    real(rp), allocatable :: cvol_local(:)
+    real(rp), pointer :: cvol_local(:)
 
     if (present(grad_U_ext)) then
       ! Point directly at the caller's gradient; no copy needed.
@@ -94,16 +94,9 @@ contains
     has_dt_stab = present(dt_stab)
     dt_stab_local = 1.0_rp
     if (has_dt_stab) dt_stab_local = dt_stab
-    ! Always-present local volume array (host loop, cheap): avoids referencing an absent
-    ! optional or an unbuilt SoA mirror inside the offloaded region below.
-    allocate(cvol_local(nc))
-    if (has_dt_stab) then
-      do c = 1, nc
-        cvol_local(c) = msh%cells(c)%volume
-      end do
-    else
-      cvol_local = 0.0_rp
-    end if
+    ! The SoA volume array is always present on the device (staged once with the mesh); the
+    ! stability cap only reads it when has_dt_stab.
+    cvol_local => msh%cell_volume_soa
 #ifdef _OPENACC
     !$acc data copyin(grad_U(:,:,1:nc), g_filt_arr(:,:,1:nc), cvol_local(1:nc)) &
     !$acc      copyout(nu_sgs(1:nc))
@@ -158,7 +151,7 @@ contains
     !$omp end parallel do
 #endif
 
-    deallocate(cvol_local)
+    nullify(cvol_local)
     if (allocated(grad_U_local)) deallocate(grad_U_local)
     nullify(grad_U)
   end subroutine vreman_sgs_viscosity

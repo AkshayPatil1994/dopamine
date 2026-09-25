@@ -28,6 +28,10 @@ module mod_dynamic_smagorinsky
   real(rp), allocatable, save :: lm_mm_hat(:,:)    ! (2, n_cells)
   real(rp), allocatable, save :: delta_buf(:)      ! (n_cells)
   real(rp), allocatable, save :: grad_uhat(:,:,:)   ! (3, 3, n_cells)
+  logical,  save :: delta_ready = .false.  ! delta_buf holds the (static) filter width, on host and device
+  ! The scratch buffers live on the device (allocate/deallocate mirror automatically), so the
+  ! whole procedure -- packing, test filtering, the halo exchanges -- runs there.
+  !$acc declare create(field_buf, field_hat, uhat_buf, lm_mm, lm_mm_hat, delta_buf, grad_uhat)
 
 contains
 
@@ -52,12 +56,17 @@ contains
     dt_stab_local = 1.0_rp
     if (has_dt_stab) dt_stab_local = dt_stab
 
-    call vreman_grid_delta(msh, delta_buf)
+    ! Filter width is static mesh geometry: computed on the host once, pushed once.
+    if (.not. delta_ready) then
+      call vreman_grid_delta(msh, delta_buf)
+      !$acc update device(delta_buf(1:nc))
+      delta_ready = .true.
+    end if
 
     ! Pack U, the six unique UiUj, and the six unique (|S| S_ij) at owned cells.
 #ifdef _OPENACC
-    !$acc data copyin(U(:,1:nc), grad_U(:,:,1:nc)) copyout(field_buf(:,1:nc))
-    !$acc parallel loop private(S, S_norm)
+    !$acc data copyin(U(:,1:nc), grad_U(:,:,1:nc))
+    !$acc parallel loop present(field_buf) private(S, S_norm)
 #else
     !$omp parallel do schedule(static) private(c, S, S_norm)
 #endif
@@ -94,7 +103,12 @@ contains
     call test_filter(msh, field_buf, field_hat, 15_ip)
 
     ! Grad of the test-filtered velocity needs U_hat at ghost cells too: halo-exchange it.
-    uhat_buf(:, 1:nc) = field_hat(1:3, 1:nc)
+    !$acc parallel loop present(uhat_buf, field_hat)
+    do c = 1, nc
+      uhat_buf(1, c) = field_hat(1, c)
+      uhat_buf(2, c) = field_hat(2, c)
+      uhat_buf(3, c) = field_hat(3, c)
+    end do
     call msh%exchange_halos_vec(uhat_buf(:, 1:ntot))
     if (present(U_bnd)) then
       call green_gauss_gradient_vector(uhat_buf(:, 1:ntot), msh, grad_uhat, U_bnd)
@@ -103,8 +117,7 @@ contains
     end if
 
 #ifdef _OPENACC
-    !$acc data copyin(field_hat(:,1:nc), grad_uhat(:,:,1:nc), delta_buf(1:nc)) copyout(lm_mm(:,1:nc))
-    !$acc parallel loop
+    !$acc parallel loop present(field_hat, grad_uhat, delta_buf, lm_mm)
 #else
     !$omp parallel do schedule(static) private(c)
 #endif
@@ -114,7 +127,6 @@ contains
     end do
 #ifdef _OPENACC
     !$acc end parallel loop
-    !$acc end data
 #else
     !$omp end parallel do
 #endif
@@ -124,7 +136,7 @@ contains
     call test_filter(msh, lm_mm, lm_mm_hat, 2_ip)
 
 #ifdef _OPENACC
-    !$acc data copyin(lm_mm_hat(:,1:nc), delta_buf(1:nc), grad_U(:,:,1:nc)) copyout(nu_sgs(1:nc))
+    !$acc data present(lm_mm_hat, delta_buf) copyin(grad_U(:,:,1:nc)) copyout(nu_sgs(1:nc))
     !$acc parallel loop private(nu_cap)
 #else
     !$omp parallel do schedule(static) private(c, nu_cap)
@@ -206,48 +218,70 @@ contains
   !> Compact top-hat test filter: volume-weighted average of a cell and its immediate
   !> face-neighbours (periodic partners included), applied to n_comp packed fields at once.
   subroutine test_filter(msh, field, field_out, n_comp)
-    type(Mesh),  intent(in)  :: msh
+    type(Mesh),  intent(in), target :: msh
     real(rp),    intent(in)  :: field(:,:)      ! (n_comp, n_cells+n_ghost)
     real(rp),    intent(out) :: field_out(:,:)  ! (n_comp, n_cells)
     integer(ip), intent(in)  :: n_comp
 
-    integer(ip) :: c, fi, fj, o, nb, f_bnd, ntot
+    integer(ip) :: c, k, fi, fj, o, nb, f_bnd, ntot, nc, n_int, nbnd
     real(rp)    :: wsum, w
+    integer(ip), pointer :: cfo(:), cfaces(:), fo(:), fn(:), pnb(:)
+    real(rp),    pointer :: cvol(:)
 
-    ntot = msh%n_cells + msh%n_ghost
+    nc = msh%n_cells
+    ntot = nc + msh%n_ghost
+    n_int = msh%n_int_faces
+    nbnd = msh%n_bnd_faces
+    cfo => msh%cell_face_offset_soa
+    cfaces => msh%cell_faces
+    fo => msh%face_owner_soa
+    fn => msh%face_neighbour_soa
+    pnb => msh%periodic_neighbor_soa
+    cvol => msh%cell_volume_soa
 
-    !$omp parallel do schedule(static) private(c, fi, fj, o, nb, f_bnd, wsum, w)
-    do c = 1, msh%n_cells
-      wsum = msh%cells(c)%volume
-      field_out(1:n_comp, c) = wsum * field(1:n_comp, c)
+    ! field/field_out are the module scratch buffers (device-resident); the mesh SoA arrays are
+    ! staged once with the mesh.
+#ifdef _OPENACC
+    !$acc parallel loop present(field, field_out) private(fi, fj, o, nb, f_bnd, wsum, w, k)
+#else
+    !$omp parallel do schedule(static) private(c, k, fi, fj, o, nb, f_bnd, wsum, w)
+#endif
+    do c = 1, nc
+      wsum = cvol(c)
+      do k = 1, n_comp
+        field_out(k, c) = wsum * field(k, c)
+      end do
 
-      if (.not. allocated(msh%cell_faces)) cycle
-      do fi = msh%cells(c)%face_offset, msh%cells(c)%face_offset + msh%cells(c)%n_faces - 1
-        fj = msh%cell_faces(fi)
-        if (fj < 1 .or. fj > size(msh%faces)) cycle
+      do fi = cfo(c), cfo(c+1) - 1
+        fj = cfaces(fi)
+        if (fj < 1) cycle
 
-        o  = msh%faces(fj)%owner
-        nb = msh%faces(fj)%neighbour
+        o  = fo(fj)
+        nb = fn(fj)
         nb = merge(o, nb, nb == c)  ! the "other side" of the face relative to c
 
-        if (nb < 1 .and. fj > msh%n_int_faces) then
-          f_bnd = fj - msh%n_int_faces
-          if (allocated(msh%periodic_neighbor)) then
-            if (f_bnd >= 1 .and. f_bnd <= size(msh%periodic_neighbor)) then
-              if (msh%periodic_neighbor(f_bnd) >= 1) nb = msh%periodic_neighbor(f_bnd)
-            end if
+        if (nb < 1 .and. fj > n_int) then
+          f_bnd = fj - n_int
+          if (f_bnd >= 1 .and. f_bnd <= nbnd) then
+            if (pnb(f_bnd) >= 1) nb = pnb(f_bnd)
           end if
         end if
 
         if (nb < 1 .or. nb > ntot .or. nb == c) cycle
-        w = msh%cells(nb)%volume
+        w = cvol(nb)
         wsum = wsum + w
-        field_out(1:n_comp, c) = field_out(1:n_comp, c) + w * field(1:n_comp, nb)
+        do k = 1, n_comp
+          field_out(k, c) = field_out(k, c) + w * field(k, nb)
+        end do
       end do
 
-      field_out(1:n_comp, c) = field_out(1:n_comp, c) / max(wsum, SMALL)
+      do k = 1, n_comp
+        field_out(k, c) = field_out(k, c) / max(wsum, SMALL)
+      end do
     end do
+#ifndef _OPENACC
     !$omp end parallel do
+#endif
   end subroutine test_filter
 
   subroutine ensure_buffers(nc, ntot)
@@ -257,6 +291,7 @@ contains
       if (size(field_buf, 2) == ntot) return
       deallocate(field_buf, field_hat, uhat_buf, lm_mm, lm_mm_hat, delta_buf, grad_uhat)
     end if
+    delta_ready = .false.
     allocate(field_buf(15, ntot), field_hat(15, nc), uhat_buf(3, ntot), &
              lm_mm(2, ntot), lm_mm_hat(2, nc), delta_buf(nc), grad_uhat(3, 3, nc))
   end subroutine ensure_buffers
@@ -270,6 +305,7 @@ contains
     if (allocated(lm_mm_hat))  deallocate(lm_mm_hat)
     if (allocated(delta_buf))  deallocate(delta_buf)
     if (allocated(grad_uhat))  deallocate(grad_uhat)
+    delta_ready = .false.
   end subroutine dynamic_smagorinsky_free
 
 end module mod_dynamic_smagorinsky
