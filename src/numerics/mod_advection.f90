@@ -42,8 +42,10 @@ module mod_advection
 
   ! Persistent scratch buffers grown once instead of allocate/deallocate every RK substage, same rationale as mod_gradient.f90/mod_viscous.f90; calls into this module must stay serial, never concurrent, since these buffers are shared mutable state.
   integer(ip), allocatable, target, save :: fcp_identity_buf(:)
-  real(rp),    allocatable, save :: cds_phi_bnd_buf(:)        ! advection_rhs_scalar_cds_soa
-  real(rp),    allocatable, save :: recon_s_phi_bnd_buf(:)    ! advection_rhs_scalar_recon_soa
+  ! Stand-in bound to an absent phi_bnd in the scalar SoA paths: an absent optional can't be named
+  ! inside an !$acc region. Read only behind has_bnd.
+  real(rp), target, save :: adv_dummy_s(1) = 0.0_rp
+  !$acc declare create(adv_dummy_s)
   real(rp),    allocatable, save :: recon_v_Ut_buf(:,:)       ! advection_rhs_vector_recon_soa, (n, 3)
   real(rp),    allocatable, save :: recon_v_gradt_buf(:,:,:)  ! advection_rhs_vector_recon_soa, (3, nc, 3)
 
@@ -270,7 +272,7 @@ contains
     real(rp),    intent(in)    :: phi(:)  ! (n_cells + n_ghost)
     type(Mesh),  intent(in), target :: msh
     real(rp),    intent(inout) :: rhs(:)  ! (n_cells)
-    real(rp),    intent(in), optional :: phi_bnd(:)  ! (n_bnd_faces)
+    real(rp),    intent(in), optional, target :: phi_bnd(:)  ! (n_bnd_faces)
     real(rp),    intent(in)    :: face_flux(:)  ! (n_faces), projected flux
     real(rp),    intent(in)    :: inv_vol(:)  ! (n_cells) cached 1/volume
     real(rp),    intent(in)    :: grad_phi(:,:)  ! (3, n_cells) for O(h^2) eps-correction
@@ -278,14 +280,12 @@ contains
     integer(ip) :: f, o, nb, f_bnd, patch_id, bc_id, pair_face, nb_per, pair_bnd, nb_simple
     real(rp)    :: Fn, phi_f, phi_f_plain, gc, epsilon(3), grad_mean(3), d_on(3), w_blend
     integer(ip) :: col, idx, n_loops, lo, hi, nc, nf, n_int, nbnd, n_patches
-    integer(ip) :: n_bnd_buf
     logical     :: use_color, has_bnd, has_reconstruction
     integer(ip), pointer :: fo_soa(:), fn_soa(:), fcp(:), fpatch_soa(:), pbc_soa(:)
     integer(ip), pointer :: pneigh_soa(:), ppair_soa(:)
     real(rp),    pointer :: gc_soa(:), cvol_soa(:), fcentre_soa(:,:), ccent_soa(:,:)
-    real(rp),    pointer :: eps_soa(:,:), skew_soa(:), pgc_soa(:)
+    real(rp),    pointer :: eps_soa(:,:), skew_soa(:), pgc_soa(:), pbnd(:)
 
-    rhs = 0.0_rp
     nc = msh%n_cells
     nf = msh%n_faces
     n_int = msh%n_int_faces
@@ -307,13 +307,8 @@ contains
     skew_soa    => msh%face_skew_soa
 
     has_bnd = present(phi_bnd)
-    n_bnd_buf = max(merge(size(phi_bnd), nbnd, has_bnd), 1_ip)
-    call ensure_buf_1d(cds_phi_bnd_buf, n_bnd_buf)
-    if (has_bnd) then
-      cds_phi_bnd_buf(1:n_bnd_buf) = phi_bnd
-    else
-      cds_phi_bnd_buf(1:n_bnd_buf) = 0.0_rp
-    end if
+    pbnd => adv_dummy_s
+    if (has_bnd) pbnd => phi_bnd
 
     use_color = (msh%n_colors > 0 .and. allocated(msh%face_color_perm) &
                  .and. allocated(msh%color_offsets) .and. msh%soa_ready)
@@ -327,15 +322,21 @@ contains
     end if
 
 #ifdef _OPENACC
-    !$acc data copyin(phi(:), face_flux(1:nf), cds_phi_bnd_buf(1:n_bnd_buf), inv_vol(1:nc), &
+    !$acc data copyin(phi(:), face_flux(1:nf), pbnd, inv_vol(1:nc), &
     !$acc      fo_soa(1:nf), fn_soa(1:nf), gc_soa(1:nf), pgc_soa(1:max(nbnd,1_ip)), cvol_soa(1:nc), &
     !$acc      fpatch_soa(1:nf), pbc_soa(1:max(n_patches,1_ip)), &
     !$acc      pneigh_soa(1:max(nbnd,1_ip)), ppair_soa(1:max(nbnd,1_ip)), &
     !$acc      fcentre_soa(:,1:nf), ccent_soa(:,1:nc+msh%n_ghost), eps_soa(:,1:nf), &
     !$acc      grad_phi(:,1:nc+msh%n_ghost), &
     !$acc      skew_soa(1:nf), fcp(1:nf)) &
-    !$acc      copy(rhs(1:nc)) if(use_color)
+    !$acc      copyout(rhs(1:nc)) if(use_color)
 #endif
+    ! rhs is zeroed inside the data region so the routine works whether the fields are
+    ! device-resident or copied in and out.
+    !$acc parallel loop if(use_color) default(present)
+    do idx = 1, nc
+      rhs(idx) = 0.0_rp
+    end do
     do col = 1, n_loops
       if (use_color) then
         lo = msh%color_offsets(col)
@@ -460,7 +461,7 @@ contains
           end if
         else
           if (has_bnd) then
-            phi_f = cds_phi_bnd_buf(max(f_bnd, 1_ip))
+            phi_f = pbnd(max(f_bnd, 1_ip))
           else
             phi_f = phi(o)
           end if
@@ -495,7 +496,7 @@ contains
     type(Mesh),  intent(in), target :: msh
     integer(ip), intent(in)    :: scheme
     real(rp),    intent(inout) :: rhs(:)  ! (n_cells)
-    real(rp),    intent(in), optional :: phi_bnd(:)  ! (n_bnd_faces)
+    real(rp),    intent(in), optional, target :: phi_bnd(:)  ! (n_bnd_faces)
     real(rp),    intent(in)    :: face_flux(:)  ! (n_faces), projected flux
     real(rp),    intent(in)    :: inv_vol(:)  ! (n_cells) cached 1/volume
     real(rp),    intent(in)    :: grad_phi(:,:)  ! (3, n_cells), only used by QUICK
@@ -503,17 +504,15 @@ contains
     integer(ip) :: f, o, nb, f_bnd, patch_id, bc_id, up, down, far_up
     real(rp)    :: Fn, phi_f, x_up(3), x_down(3), x_face(3), up_shift(3), dir_hat(3), s_face, s_down
     integer(ip) :: col, idx, n_loops, lo, hi, nc, nf, n_int, nbnd, n_patches
-    integer(ip) :: n_bnd_buf
     logical     :: use_color, has_bnd, ok
     integer(ip), pointer :: fo_soa(:), fn_soa(:), fcp(:), fpatch_soa(:), pbc_soa(:)
     integer(ip), pointer :: pneigh_soa(:), ppair_soa(:), cfo_soa(:), cell_faces_p(:)
     real(rp),    pointer :: cvol_soa(:), fcentre_soa(:,:), ccent_soa(:,:)
-    real(rp),    pointer :: ppair_dcf_soa(:), fdcf_soa(:), fnorm_soa(:,:)
+    real(rp),    pointer :: ppair_dcf_soa(:), fdcf_soa(:), fnorm_soa(:,:), pbnd(:)
 
     if (.not. msh%soa_ready .and. msh%n_faces > 0) &
       error stop 'advection_rhs_scalar_recon_soa: msh%soa_ready is false; call mesh%build_soa_mirror first'
 
-    rhs = 0.0_rp
     nc = msh%n_cells
     nf = msh%n_faces
     n_int = msh%n_int_faces
@@ -536,13 +535,8 @@ contains
     cell_faces_p  => msh%cell_faces
 
     has_bnd = present(phi_bnd)
-    n_bnd_buf = max(merge(size(phi_bnd), nbnd, has_bnd), 1_ip)
-    call ensure_buf_1d(recon_s_phi_bnd_buf, n_bnd_buf)
-    if (has_bnd) then
-      recon_s_phi_bnd_buf(1:n_bnd_buf) = phi_bnd
-    else
-      recon_s_phi_bnd_buf(1:n_bnd_buf) = 0.0_rp
-    end if
+    pbnd => adv_dummy_s
+    if (has_bnd) pbnd => phi_bnd
 
     use_color = (msh%n_colors > 0 .and. allocated(msh%face_color_perm) &
                  .and. allocated(msh%color_offsets) .and. msh%soa_ready)
@@ -556,15 +550,21 @@ contains
     end if
 
 #ifdef _OPENACC
-    !$acc data copyin(phi(:), face_flux(1:nf), recon_s_phi_bnd_buf(1:n_bnd_buf), inv_vol(1:nc), &
+    !$acc data copyin(phi(:), face_flux(1:nf), pbnd, inv_vol(1:nc), &
     !$acc      grad_phi(:,1:nc+msh%n_ghost), &
     !$acc      fo_soa(1:nf), fn_soa(1:nf), cvol_soa(1:nc), fpatch_soa(1:nf), &
     !$acc      pbc_soa(1:max(n_patches,1_ip)), pneigh_soa(1:max(nbnd,1_ip)), ppair_soa(1:max(nbnd,1_ip)), &
     !$acc      ppair_dcf_soa(1:max(nbnd,1_ip)), fdcf_soa(1:nf), fnorm_soa(:,1:nf), fcentre_soa(:,1:nf), &
     !$acc      ccent_soa(:,1:nc+msh%n_ghost), cfo_soa(1:nc+1), cell_faces_p(1:size(cell_faces_p)), &
     !$acc      fcp(1:nf)) &
-    !$acc      copy(rhs(1:nc)) if(use_color)
+    !$acc      copyout(rhs(1:nc)) if(use_color)
 #endif
+    ! rhs is zeroed inside the data region so the routine works whether the fields are
+    ! device-resident or copied in and out.
+    !$acc parallel loop if(use_color) default(present)
+    do idx = 1, nc
+      rhs(idx) = 0.0_rp
+    end do
     do col = 1, n_loops
       if (use_color) then
         lo = msh%color_offsets(col)
@@ -654,7 +654,7 @@ contains
           end if
         else
           if (has_bnd) then
-            phi_f = recon_s_phi_bnd_buf(max(f_bnd, 1_ip))
+            phi_f = pbnd(max(f_bnd, 1_ip))
           else
             phi_f = phi(o)
           end if
@@ -1027,7 +1027,6 @@ contains
     integer(ip), pointer :: pneigh_soa(:), ppair_soa(:)
     real(rp),    pointer :: sf_soa(:,:), gc_soa(:), cvol_soa(:), pgc_soa(:)
 
-    rhs = 0.0_rp
     nc = msh%n_cells
     ng = msh%n_ghost
     nf = msh%n_faces
@@ -1051,7 +1050,6 @@ contains
       if (size(div_work) < nc) deallocate(div_work)
     end if
     if (.not. allocated(div_work)) allocate(div_work(nc))
-    div_work(1:nc) = 0.0_rp
 
     use_color = (msh%n_colors > 0 .and. allocated(msh%face_color_perm) &
                  .and. allocated(msh%color_offsets) .and. msh%soa_ready)
@@ -1070,8 +1068,18 @@ contains
     !$acc      cvol_soa(1:nc), fpatch_soa(1:nf), pbc_soa(1:max(n_patches,1_ip)), &
     !$acc      pneigh_soa(1:max(nbnd,1_ip)), ppair_soa(1:max(nbnd,1_ip)), &
     !$acc      fcp(1:nf)) &
-    !$acc      copy(rhs(:,1:nc), div_work(1:nc)) if(use_color)
+    !$acc      copyout(rhs(:,1:nc)) create(div_work(1:nc)) if(use_color)
 #endif
+    ! rhs and the face-flux divergence accumulator are zeroed, and the split-form term added,
+    ! inside the data region, so the routine works whether the fields are device-resident or
+    ! copied in and out; div_work never leaves the device.
+    !$acc parallel loop if(use_color) default(present)
+    do idx = 1, nc
+      rhs(1, idx) = 0.0_rp
+      rhs(2, idx) = 0.0_rp
+      rhs(3, idx) = 0.0_rp
+      div_work(idx) = 0.0_rp
+    end do
     do col = 1, n_loops
       if (use_color) then
         lo = msh%color_offsets(col)
@@ -1175,17 +1183,18 @@ contains
       !$omp end parallel do
 #endif
     end do
-#ifdef _OPENACC
-    !$acc end data
-#endif
 
     ! Advective half of the split form (see advection_rhs_vector for the rationale).
+    !$acc parallel loop if(use_color) default(present) private(inv_v)
     do idx = 1, nc
       inv_v = inv_vol(idx)
       do k = 1, 3
         rhs(k, idx) = rhs(k, idx) + 0.5_rp * U(k, idx) * div_work(idx) * inv_v
       end do
     end do
+#ifdef _OPENACC
+    !$acc end data
+#endif
 
     nullify(fo_soa, fn_soa, fcp, sf_soa, gc_soa, pgc_soa, cvol_soa, fpatch_soa, pbc_soa, pneigh_soa, ppair_soa)
   end subroutine advection_rhs_vector_kep_soa
@@ -1205,7 +1214,7 @@ contains
     integer(ip) :: f, o, nb, k, f_bnd, patch_id, bc_id, up, down, far_up
     real(rp)    :: Fn, phi_f, x_up(3), x_down(3), x_face(3), up_shift(3), dir_hat(3), s_face, s_down
     integer(ip) :: col, idx, n_loops, lo, hi, nc, nf, n_int, nbnd, n_patches, nu
-    logical     :: use_color, ok
+    logical     :: use_color, ok, host_fill
     integer(ip), pointer :: fo_soa(:), fn_soa(:), fcp(:), fpatch_soa(:), pbc_soa(:)
     integer(ip), pointer :: pneigh_soa(:), ppair_soa(:), cfo_soa(:), cell_faces_p(:)
     real(rp),    pointer :: cvol_soa(:), fcentre_soa(:,:), ccent_soa(:,:)
@@ -1215,7 +1224,6 @@ contains
     if (.not. msh%soa_ready .and. msh%n_faces > 0) &
       error stop 'advection_rhs_vector_recon_soa: msh%soa_ready is false; call mesh%build_soa_mirror first'
 
-    rhs = 0.0_rp
     nc = msh%n_cells
     nf = msh%n_faces
     n_int = msh%n_int_faces
@@ -1253,20 +1261,25 @@ contains
     ! !$acc routine seq dummy they force a per-thread copy scaling with mesh size, which is what
     ! was overflowing device local memory above ~11k cells. Transpose once here instead so the
     ! per-component slices handed to the device routines below are contiguous.
-    ! This host fill is the correctness fallback for the use_color=.false. path below (where the
-    ! compute loop's "if(use_color)" makes it run on host); when use_color=.true. it is redundant
-    ! with the device-side fill further down but cheap enough (O(nc) scalar copies) not to bother
-    ! skipping.
+    ! OpenACC builds fill the buffers on the device inside the data region below; the host fill
+    ! is then only for the uncoloured fallback, where the compute loop's if(use_color) runs on the
+    ! host (and must not run otherwise: with device-resident fields the host U is stale).
+    host_fill = .true.
+#ifdef _OPENACC
+    host_fill = .not. use_color
+#endif
     call ensure_buf_n3(recon_v_Ut_buf, nu)
-    ! Explicit loop instead of transpose(U): the intrinsic would allocate a full (nu,3)
-    ! temporary before the assignment, on every call.
-    do kk = 1, 3
-      recon_v_Ut_buf(1:nu, kk) = U(kk, 1:nu)
-    end do
     ! gradt is only ever read inside the SCHEME_QUICK branch below, so for other schemes the
     ! buffer just needs a valid (already-allocated) shape, not fresh values.
     call ensure_buf_3n3(recon_v_gradt_buf, nc)
-    if (scheme == SCHEME_QUICK) then
+    ! Explicit loops instead of transpose(U): the intrinsic would allocate a full (nu,3)
+    ! temporary before the assignment, on every call.
+    if (host_fill) then
+      do kk = 1, 3
+        recon_v_Ut_buf(1:nu, kk) = U(kk, 1:nu)
+      end do
+    end if
+    if (scheme == SCHEME_QUICK .and. host_fill) then
       ! grad_U's 3rd extent is n_cells+n_ghost; only owned cells are read back out of this
       ! buffer downstream, so slice to 1:nc (a bare `:` here is a non-conforming assignment
       ! that overruns recon_v_gradt_buf by 3*n_ghost reals).
@@ -1289,7 +1302,7 @@ contains
     !$acc      ccent_soa(:,1:nc+msh%n_ghost), cfo_soa(1:nc+1), cell_faces_p(1:size(cell_faces_p)), &
     !$acc      fcp(1:nf)) &
     !$acc      create(recon_v_Ut_buf(1:nu,1:3), recon_v_gradt_buf(:,1:nc,:)) &
-    !$acc      copy(rhs(:,1:nc)) if(use_color)
+    !$acc      copyout(rhs(:,1:nc)) if(use_color)
 
     ! Device-side fill: only executes on-device when use_color (matches the compute loop's own
     ! if(use_color) below); when use_color is false this runs on host and is a harmless redundant
@@ -1317,6 +1330,13 @@ contains
       !$acc end parallel loop
     end if
 #endif
+    ! rhs is zeroed inside the data region (see advection_rhs_scalar_cds_soa).
+    !$acc parallel loop if(use_color) default(present)
+    do idx = 1, nc
+      rhs(1, idx) = 0.0_rp
+      rhs(2, idx) = 0.0_rp
+      rhs(3, idx) = 0.0_rp
+    end do
     do col = 1, n_loops
       if (use_color) then
         lo = msh%color_offsets(col)
