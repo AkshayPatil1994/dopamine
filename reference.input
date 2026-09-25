@@ -129,7 +129,7 @@
   !   'DYNAMIC_SMAG' - Germano-Lilly dynamic Smagorinsky; Cs^2 computed locally each step from a
   !                    compact test-filtered Germano identity (no homogeneous-direction averaging,
   !                    so noisier than the classic channel-flow formulation), clipped to >= 0.
-  !                    Not GPU-ported (host-only under -acc); see mod_dynamic_smagorinsky.f90.
+  !                    Runs on the device under -acc (test filter over the CSR cell-face lists).
   sgs_model = 'VREMAN'
 
   ! Wall-model sampling height in mesh units; <= 0 (default) samples the wall-adjacent cell.
@@ -252,9 +252,121 @@
 !     petsc_options_tmp(N) = '-ksp_view'
 !
 ! -- GPU (CUDA) builds, PETSc-GPU branch -------------------------------------
-!   Only the pressure solve runs on GPU (MATAIJCUSPARSE/VECCUDA + BoomerAMG on
-!   device); nothing else in the solver is GPU-accelerated yet. Controlled by
-!   env vars at runtime, not here: DOPAMINE_PETSC_USE_GPU=0 forces CPU PETSc
+!   The pressure solve runs on GPU (MATAIJCUSPARSE/VECCUDA + BoomerAMG on
+!   device); with an OpenACC build the rest of the time step does too (see the
+!   OpenACC paragraph below). Controlled by env vars at runtime, not here: DOPAMINE_PETSC_USE_GPU=0 forces CPU PETSc
+!   objects even in a CUDA build; DOPAMINE_PETSC_USE_GPU_AWARE_MPI=0 disables
+!   device-to-device MPI transfers (needed unless your MPI was built with CUDA
+!   support -- most distro packages aren't). See README.md "GPU (CUDA) Build".
+!
+!   If overriding BoomerAMG tuning above while running with
+!   DOPAMINE_PETSC_USE_GPU=1, do not set -pc_hypre_boomeramg_interp_type or
+!   -pc_hypre_boomeramg_coarsen_type to a host-only value (e.g. interp_type
+!   'FF1', 'FF', or 'classical' -- the solver's own CPU-path default is
+!   'FF1', which is exactly the one that crashes on GPU). hypre's setup
+!   segfaults applying a host-only routine to a device-resident matrix. The
+!   GPU path already sets safe defaults (coarsen_type PMIS, interp_type
+!   ext+i, relax_type_all l1scaled-Jacobi); only override with other
+!   GPU-supported values if you need to.
+!
+!   OpenACC: the whole time step is device-resident (BCs, advection, viscous,
+!   SGS, gradients, projection, dt); fields are copied to the host only on
+!   output/stats/sampling/checkpoint steps. Purely a CMake build-time toggle
+!   (DOPAMINE_ENABLE_OPENACC), nothing to set in this namelist. See README.md
+!   "OpenACC (nvfortran) Build".
+!
+!   Multi-GPU: run one MPI rank per GPU (mpirun -np <ngpu> ...); ranks are
+!   bound to devices automatically (node-local rank % ndevices) and halos use
+!   CUDA-aware MPI when available (DOPAMINE_GPU_AWARE_MPI=0/1 overrides the
+!   query). hypre's parallel AMG scales poorly across PCIe GPUs; an optional
+!   overlapped block-Jacobi (ASM) + local AMG preconditioner can be enabled with
+!   the options listed in docs/usage.md "Multi-GPU (one MPI rank per GPU)":
+!   (-pc_type asm, -pc_asm_overlap 16, plus the -sub_pc_hypre_boomeramg_* GPU-safe
+!   settings; the sub_ lines are required.) Default remains parallel BoomerAMG.
+!
+&dopamine_PetscParams below.
+  pressure_solver = 'boomeramg'
+
+  ! Gradient reconstruction scheme for velocity, temperature, and scalar fields.
+  !   'LEAST_SQUARES' (default) - weighted least-squares; accurate on skewed meshes.
+  !   'GREEN_GAUSS'             - cell-based Green-Gauss; faster but less accurate.
+  gradient_scheme = 'LEAST_SQUARES'
+
+  ! Currently unused: parsed but not wired into the Poisson absolute tolerance.
+  ! atol is computed internally from a fixed machine-precision floor
+  ! (see solver_init/p_atol_factor in mod_fv_solver.f90); this value has no effect.
+  p_target_divU = 1.0e-8
+
+  ! Enable rotational pressure correction (Brown, Cortez & Minion 2001).
+  !   p^{n+1} = phi - nu.div u*   Reduces splitting error from O(deltat) to O(deltat^2).
+  !   Requires an extra halo exchange per step; negligible cost.
+  !   Recommended for wall-resolved LES and urban flows with no-slip surfaces.
+  !   Default: .true. for improved accuracy on fractional-step schemes.
+  use_rotational_projection = .true.
+
+  ! Maximum number of time steps. 0 = unlimited (simulation runs to t_end).
+  nstep_max = 0
+
+  ! Enable subgrid-scale (SGS) eddy-viscosity model (Vreman 2004 or Dynamic Smagorinsky).
+  !   .true.  - SGS model (selected by sgs_model) active; nu_sgs added to viscous fluxes.
+  !   .false. - DNS mode; no SGS model applied.
+  use_sgs = .true.
+
+  ! Number of iterative Green-Gauss gradient sweeps (only active when
+  ! gradient_scheme = 'GREEN_GAUSS'). Each sweep applies a skewness correction
+  ! using the gradient from the previous iteration.
+  !   1  - single sweep (standard GG, no skewness correction)
+  !   2+ - iterative correction; 2 is sufficient for most meshes
+  gg_iterations = 2
+
+  ! Number of non-orthogonal pressure gradient correction iterations per step.
+  ! The Jasak deferred correction adds the non-orthogonal face flux to the Poisson RHS.
+  !   0  - auto (default): 1 if the mesh is orthogonal, else 2
+  !   1  - single correction pass (sufficient for mildly non-orthogonal meshes)
+  !   2+ - extra passes for highly skewed or non-orthogonal polyhedral meshes
+  n_nonortho_corr = 0
+
+  ! Verbose runtime diagnostics: startup projection-idempotency check, per-report interface
+  ! KE budget/conservation error, and the worst-divergence-cell report. Off by default; the
+  ! periodic performance snapshot (sec/step, every PERF_REPORT_INTERVAL steps) is unaffected.
+  debug_diagnostics = .false.
+/
+
+! PETSc solver fine-tuning options (optional)
+! Each entry is a raw PETSc option string, exactly as you would pass on the
+! command line.  These are injected into PETSc's global options database before
+! KSPSetFromOptions, so they override any programmatic defaults set by dopamine.
+! n_petsc_options = number of options provided (max 32).
+!
+! -- BoomerAMG examples (pressure_solver = 'boomeramg') ---------------------
+!   Override strong threshold (default 0.5; raise to 0.6 for anisotropic meshes,
+!   lower to 0.25 for 2-D problems):
+!     petsc_options_tmp(1) = '-pc_hypre_boomeramg_strong_threshold 0.6'
+!
+!   Switch coarsening algorithm (default HMIS; PMIS is faster but less robust):
+!     petsc_options_tmp(2) = '-pc_hypre_boomeramg_coarsen_type PMIS'
+!
+!   Enable aggressive coarsening (default 0; use for very large meshes):
+!     petsc_options_tmp(3) = '-pc_hypre_boomeramg_agg_nl 1'
+!
+!   Override smoother (default symmetric-sor/jacobi = Sym-GS; see -help for names):
+!     petsc_options_tmp(4) = '-pc_hypre_boomeramg_relax_type_all l1-gauss-seidel'
+!
+! -- GAMG examples (pressure_solver = 'gamg') -------------------------------
+!   Override aggregation threshold (default 0.02):
+!     petsc_options_tmp(1) = '-pc_gamg_threshold 0.05'
+!
+!   Override coarse equation limit per rank (default 200):
+!     petsc_options_tmp(2) = '-pc_gamg_coarse_eq_limit 500'
+!
+! -- Diagnostics (any solver) -----------------------------------------------
+!     petsc_options_tmp(N) = '-ksp_monitor_true_residual'
+!     petsc_options_tmp(N) = '-ksp_view'
+!
+! -- GPU (CUDA) builds, PETSc-GPU branch -------------------------------------
+!   The pressure solve runs on GPU (MATAIJCUSPARSE/VECCUDA + BoomerAMG on
+!   device); with an OpenACC build the rest of the time step does too (see the
+!   OpenACC paragraph below). Controlled by env vars at runtime, not here: DOPAMINE_PETSC_USE_GPU=0 forces CPU PETSc
 !   objects even in a CUDA build; DOPAMINE_PETSC_USE_GPU_AWARE_MPI=0 disables
 !   device-to-device MPI transfers (needed unless your MPI was built with CUDA
 !   support -- most distro packages aren't). See README.md "GPU (CUDA) Build".
