@@ -23,7 +23,7 @@ program dopamine_main
   use mod_stats
   use mod_sampling
   use mod_initconditions
-  use mod_device, only: device_bind
+  use mod_device, only: device_bind, device_mpi_gpu_aware
   use mpi_f08
   implicit none
 
@@ -340,7 +340,7 @@ program dopamine_main
 
   ! From here on the solver fields live on the device (OpenACC builds); the host copy is
   ! refreshed with sync_host only when output, statistics, sampling or checkpoints need it.
-  call solver%to_device(gpu_aware_mpi=.false.)
+  call solver%to_device(gpu_aware_mpi=device_mpi_gpu_aware)
 
   if (rank == 0) write(*, '(A)') ' Starting time loop...'
   call MPI_Barrier(MPI_COMM_WORLD, ierr)  ! Synchronize all ranks before time loop

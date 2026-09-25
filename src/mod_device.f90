@@ -13,6 +13,9 @@ module mod_device
   private
 
   public :: device_bind
+  !> MPI accepts device pointers (CUDA-aware MPI); DOPAMINE_GPU_AWARE_MPI=0/1 overrides the
+  !> runtime query. Only meaningful in OpenACC builds.
+  logical, public, protected :: device_mpi_gpu_aware = .false.
 
   !> Device this rank is bound to (-1 = host-only build or no device found).
   integer(ip), public, protected :: device_id = -1
@@ -25,6 +28,10 @@ module mod_device
       import :: c_int
       integer(c_int), value :: local_rank
     end subroutine
+
+    integer(c_int) function dopamine_mpi_gpu_aware() bind(C)
+      import :: c_int
+    end function
   end interface
 
 contains
@@ -48,6 +55,7 @@ contains
     call fvm_petsc_set_device_local_rank(int(device_local_rank, c_int))
 
     ndev = 0
+    device_mpi_gpu_aware = (dopamine_mpi_gpu_aware() /= 0_c_int)
 #ifdef _OPENACC
     ndev = acc_get_num_devices(acc_device_nvidia)
     if (ndev > 0) then
@@ -78,6 +86,7 @@ contains
         write(*, '(A,I0,A,I0,A)') ' WARNING: ', max_local_size, ' ranks per node share ', ndev, &
           ' device(s); GPUs are oversubscribed (expected one rank per GPU)'
       if (ndev == 0) write(*, '(A)') ' WARNING: OpenACC build but no NVIDIA device found; kernels run on host'
+      write(*, '(A,L1)') ' GPU-aware MPI: ', device_mpi_gpu_aware
 #endif
     end if
     deallocate(all_dev, all_local)

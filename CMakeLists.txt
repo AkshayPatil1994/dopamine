@@ -671,6 +671,7 @@ set(DOPAMINE_FORTRAN_SOURCES
 # ============================================================================
 add_library(dopamine_lib STATIC
   ${DOPAMINE_FORTRAN_SOURCES}
+  src/mpi_gpu_support.c
   $<TARGET_OBJECTS:petsc_pressure_backend>)
 if(TARGET nvtx_shim)
   target_sources(dopamine_lib PRIVATE $<TARGET_OBJECTS:nvtx_shim>)
