@@ -1265,6 +1265,7 @@ contains
 
       t_sub = wall_time_now()
       call prof_push('sgs_wall_model')
+      call prof_push('sgs_model')
       if (self%params%use_sgs) then
         select case (trim(self%params%sgs_model))
         case ('SMAGORINSKY')
@@ -1283,7 +1284,11 @@ contains
         end do
       end if
 
+      call prof_pop()
+      call prof_push('nu_sgs_halo')
       call exchange_nu_sgs_halo(self)
+      call prof_pop()
+      call prof_push('wall_model')
       select case (self%abl_config%wall_model_id)
       case (WM_MOST)
         ! MOST runs on the host: refresh its inputs there and push its outputs back.
@@ -1303,6 +1308,7 @@ contains
                                  t_filt=self%params%wall_model_filter_time, &
                                  dt=merge(dt, 0.0_rp, k == 1))
       end select
+      call prof_pop()
       call prof_pop()
       self%perf_t_rhs_sgs = self%perf_t_rhs_sgs + (wall_time_now() - t_sub)
 
