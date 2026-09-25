@@ -15,9 +15,13 @@ module mod_viscous
   ! Persistent scratch buffers, same rationale as mod_gradient.f90: mesh topology is static
   ! for a run, so grow these once instead of allocate/deallocate every RK substage.
   integer(ip), allocatable, target, save :: fcp_identity_buf(:)  ! shared by both routines below
-  real(rp),    allocatable, save :: vec_U_bnd_buf(:,:)           ! viscous_rhs_vector, (3, n)
-  real(rp),    allocatable, save :: sca_phi_bnd_buf(:)           ! viscous_rhs_scalar
   real(rp),    allocatable, target, save :: visc_inv_vol_buf(:)  ! fallback 1/volume when inv_vol not passed in
+
+  ! Stand-ins bound to an absent U_bnd/phi_bnd: an absent optional can't be named inside an !$acc
+  ! region. Read only behind has_bnd.
+  real(rp), target, save :: visc_dummy_v(3, 1) = 0.0_rp
+  real(rp), target, save :: visc_dummy_s(1)    = 0.0_rp
+  !$acc declare create(visc_dummy_v, visc_dummy_s)
 
 contains
 
@@ -37,7 +41,7 @@ contains
     real(rp),   intent(in)    :: grad_U(:,:,:)  ! (3, 3, n_cells + n_ghost)
     type(Mesh), intent(in), target :: msh
     real(rp),   intent(inout) :: rhs(:,:)  ! (3, n_cells)
-    real(rp),   intent(in), optional :: U_bnd(:,:)  ! (3, n_bnd_faces)
+    real(rp),   intent(in), optional, target :: U_bnd(:,:)  ! (3, n_bnd_faces)
     real(rp),   intent(in), optional, target :: inv_vol(:)  ! (n_cells) cached 1/volume
 
     integer(ip) :: f, o, nb, k, f_bnd, patch_id, bc_id, pair_face, nb_per, pair_bnd
@@ -46,18 +50,16 @@ contains
     real(rp)    :: grad_Uf(3,3), d_on(3), d_on_len, gc
     real(rp)    :: s_dot_dhat, dn_perp(3), d_per, gc_per, weight_ortho
     integer(ip) :: col, idx, n_loops, lo, hi, nc, ng, nf, n_int, nbnd, n_patches
-    integer(ip) :: n_bnd_buf
     logical     :: use_color, has_bnd
     integer(ip), pointer :: fo_soa(:), fn_soa(:), fcp(:), fpatch_soa(:), pbc_soa(:)
     integer(ip), pointer :: pneigh_soa(:), ppair_soa(:)
     real(rp),    pointer :: sf_soa(:,:), gc_soa(:), fnorm_soa(:,:), farea_soa(:)
     real(rp),    pointer :: fcentre_soa(:,:), fdcf_soa(:), ppair_dcf_soa(:)
-    real(rp),    pointer :: ccent_soa(:,:), cvol_soa(:), vinv(:)
+    real(rp),    pointer :: ccent_soa(:,:), cvol_soa(:), vinv(:), ubnd(:,:)
 
     if (.not. msh%soa_ready .and. msh%n_faces > 0) &
       error stop 'viscous_rhs_vector: msh%soa_ready is false; call mesh%build_soa_mirror first'
 
-    rhs = 0.0_rp
     nc = msh%n_cells
     ng = msh%n_ghost
     nf = msh%n_faces
@@ -88,16 +90,9 @@ contains
       vinv => visc_inv_vol_buf(1:nc)
     end if
 
-    ! U_bnd copied to a plain (always-present) local array: an absent optional
-    ! can't be referenced inside a statically-mapped !$acc region.
     has_bnd = present(U_bnd)
-    n_bnd_buf = max(merge(size(U_bnd, 2), nbnd, has_bnd), 1_ip)
-    call ensure_buf_2d3(vec_U_bnd_buf, n_bnd_buf)
-    if (has_bnd) then
-      vec_U_bnd_buf(:, 1:n_bnd_buf) = U_bnd
-    else
-      vec_U_bnd_buf(:, 1:n_bnd_buf) = 0.0_rp
-    end if
+    ubnd => visc_dummy_v
+    if (has_bnd) ubnd => U_bnd
 
     use_color = (msh%n_colors > 0 .and. allocated(msh%face_color_perm) &
                  .and. allocated(msh%color_offsets) .and. msh%soa_ready)
@@ -110,16 +105,22 @@ contains
       fcp => fcp_identity_buf(1:nf)
     end if
 
-#ifdef _OPENACC
-    !$acc data copyin(U(:,:), nu_sgs(:), grad_U(:,:,:), vec_U_bnd_buf(:,1:n_bnd_buf), &
+    ! rhs is zeroed inside the data region, so this works whether the fields are device-resident
+    ! or copied in and out.
+    !$acc data copyin(U(:,:), nu_sgs(:), grad_U(:,:,:), ubnd, &
     !$acc      fo_soa(1:nf), fn_soa(1:nf), sf_soa(:,1:nf), gc_soa(1:nf), &
     !$acc      fnorm_soa(:,1:nf), farea_soa(1:nf), fcentre_soa(:,1:nf), fdcf_soa(1:nf), &
     !$acc      fpatch_soa(1:nf), pbc_soa(1:max(n_patches,1_ip)), &
     !$acc      pneigh_soa(1:max(nbnd,1_ip)), ppair_soa(1:max(nbnd,1_ip)), &
     !$acc      ppair_dcf_soa(1:max(nbnd,1_ip)), ccent_soa(:,1:nc+ng), vinv(1:nc), &
     !$acc      fcp(1:nf)) &
-    !$acc      copy(rhs(:,1:nc)) if(use_color)
-#endif
+    !$acc      copyout(rhs(:,1:nc)) if(use_color)
+    !$acc parallel loop collapse(2) if(use_color) default(present)
+    do idx = 1, nc
+      do k = 1, 3
+        rhs(k, idx) = 0.0_rp
+      end do
+    end do
     do col = 1, n_loops
       if (use_color) then
         lo = msh%color_offsets(col)
@@ -231,7 +232,7 @@ contains
             else
               nu_eff_f = nu + nu_sgs(o)
               if (has_bnd) then
-                dU_n = (vec_U_bnd_buf(:, max(f_bnd,1_ip)) - U(:, o)) / (fdcf_soa(f) + SMALL)
+                dU_n = (ubnd(:, max(f_bnd,1_ip)) - U(:, o)) / (fdcf_soa(f) + SMALL)
                 stress_f = nu_eff_f * dU_n * farea_soa(f)
               else
                 stress_f = 0.0_rp
@@ -253,7 +254,7 @@ contains
               weight_ortho = ortho_weight(s_dot_dhat, farea_soa(f))
               do k = 1, 3
                 stress_f(k) = nu_eff_f * ( &
-                     (vec_U_bnd_buf(k, max(f_bnd,1_ip)) - U(k, o)) * weight_ortho / d_on_len &
+                     (ubnd(k, max(f_bnd,1_ip)) - U(k, o)) * weight_ortho / d_on_len &
                    + dot_product(grad_Uo(:, k), dn_perp) &
                    + dot_product(grad_Uo(k, :), sf) )
               end do
@@ -290,7 +291,7 @@ contains
     real(rp),   intent(in)    :: grad_phi(:,:)  ! (3, n_cells + n_ghost) cell gradients
     type(Mesh), intent(in), target :: msh
     real(rp),   intent(inout) :: rhs(:)  ! (n_cells)
-    real(rp),   intent(in), optional :: phi_bnd(:)  ! (n_bnd_faces)
+    real(rp),   intent(in), optional, target :: phi_bnd(:)  ! (n_bnd_faces)
     real(rp),   intent(in), optional, target :: inv_vol(:)  ! (n_cells) cached 1/volume
 
     integer(ip) :: f, o, nb, f_bnd, patch_id, bc_id, pair_face, nb_per, pair_bnd
@@ -298,18 +299,16 @@ contains
     real(rp)    :: dn_len, s_dot_dhat, dn_perp(3), d_per, gc_per
     real(rp)    :: grad_o(3), grad_nb(3), grad_f(3)
     integer(ip) :: col, idx, n_loops, lo, hi, nc, ng, nf, n_int, nbnd, n_patches
-    integer(ip) :: n_bnd_buf
     logical     :: use_color, has_bnd
     integer(ip), pointer :: fo_soa(:), fn_soa(:), fcp(:), fpatch_soa(:), pbc_soa(:)
     integer(ip), pointer :: pneigh_soa(:), ppair_soa(:)
     real(rp),    pointer :: sf_soa(:,:), gc_soa(:), fnorm_soa(:,:), farea_soa(:)
     real(rp),    pointer :: fcentre_soa(:,:), fdcf_soa(:), ppair_dcf_soa(:)
-    real(rp),    pointer :: ccent_soa(:,:), cvol_soa(:), vinv(:)
+    real(rp),    pointer :: ccent_soa(:,:), cvol_soa(:), vinv(:), pbnd(:)
 
     if (.not. msh%soa_ready .and. msh%n_faces > 0) &
       error stop 'viscous_rhs_scalar: msh%soa_ready is false; call mesh%build_soa_mirror first'
 
-    rhs = 0.0_rp
     nc = msh%n_cells
     ng = msh%n_ghost
     nf = msh%n_faces
@@ -341,13 +340,8 @@ contains
     end if
 
     has_bnd = present(phi_bnd)
-    n_bnd_buf = max(merge(size(phi_bnd), nbnd, has_bnd), 1_ip)
-    call ensure_buf_1d(sca_phi_bnd_buf, n_bnd_buf)
-    if (has_bnd) then
-      sca_phi_bnd_buf(1:n_bnd_buf) = phi_bnd
-    else
-      sca_phi_bnd_buf(1:n_bnd_buf) = 0.0_rp
-    end if
+    pbnd => visc_dummy_s
+    if (has_bnd) pbnd => phi_bnd
 
     use_color = (msh%n_colors > 0 .and. allocated(msh%face_color_perm) &
                  .and. allocated(msh%color_offsets) .and. msh%soa_ready)
@@ -360,16 +354,19 @@ contains
       fcp => fcp_identity_buf(1:nf)
     end if
 
-#ifdef _OPENACC
-    !$acc data copyin(phi(:), nu_sgs(:), grad_phi(:,:), sca_phi_bnd_buf(1:n_bnd_buf), &
+    ! rhs is zeroed inside the data region, see viscous_rhs_vector.
+    !$acc data copyin(phi(:), nu_sgs(:), grad_phi(:,:), pbnd, &
     !$acc      fo_soa(1:nf), fn_soa(1:nf), sf_soa(:,1:nf), gc_soa(1:nf), &
     !$acc      fnorm_soa(:,1:nf), farea_soa(1:nf), fcentre_soa(:,1:nf), fdcf_soa(1:nf), &
     !$acc      fpatch_soa(1:nf), pbc_soa(1:max(n_patches,1_ip)), &
     !$acc      pneigh_soa(1:max(nbnd,1_ip)), ppair_soa(1:max(nbnd,1_ip)), &
     !$acc      ppair_dcf_soa(1:max(nbnd,1_ip)), ccent_soa(:,1:nc+ng), vinv(1:nc), &
     !$acc      fcp(1:nf)) &
-    !$acc      copy(rhs(1:nc)) if(use_color)
-#endif
+    !$acc      copyout(rhs(1:nc)) if(use_color)
+    !$acc parallel loop if(use_color) default(present)
+    do idx = 1, nc
+      rhs(idx) = 0.0_rp
+    end do
     do col = 1, n_loops
       if (use_color) then
         lo = msh%color_offsets(col)
@@ -472,7 +469,7 @@ contains
                 s_dot_dhat = dot_product(sf, d_on) / dn_len
                 dn_perp    = sf - (s_dot_dhat / dn_len) * d_on
                 grad_o     = grad_phi(:, o)
-                dphi_n     = (sca_phi_bnd_buf(max(f_bnd,1_ip)) - phi(o)) * ortho_weight(s_dot_dhat, farea_soa(f)) / dn_len &
+                dphi_n     = (pbnd(max(f_bnd,1_ip)) - phi(o)) * ortho_weight(s_dot_dhat, farea_soa(f)) / dn_len &
                            + dot_product(grad_o, dn_perp)
                 flux       = alpha_eff * dphi_n
               else
@@ -488,7 +485,7 @@ contains
               s_dot_dhat = dot_product(sf, d_on) / dn_len
               dn_perp    = sf - (s_dot_dhat / dn_len) * d_on
               grad_o     = grad_phi(:, o)
-              dphi_n     = (sca_phi_bnd_buf(max(f_bnd,1_ip)) - phi(o)) * ortho_weight(s_dot_dhat, farea_soa(f)) / dn_len &
+              dphi_n     = (pbnd(max(f_bnd,1_ip)) - phi(o)) * ortho_weight(s_dot_dhat, farea_soa(f)) / dn_len &
                          + dot_product(grad_o, dn_perp)
               flux       = alpha_eff * dphi_n
             else
