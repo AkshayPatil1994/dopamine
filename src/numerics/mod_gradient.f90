@@ -22,14 +22,16 @@ module mod_gradient
   public :: ensure_buf_3n3
   public :: ensure_fcp_identity
 
-  ! Persistent scratch buffers grown once instead of allocate/deallocate every RK substage; calls into this module must stay serial, never concurrent, since these buffers are shared mutable state.
+  ! Persistent scratch buffer grown once instead of allocate/deallocate every RK substage.
   integer(ip), allocatable, target, save :: fcp_identity_buf(:)     ! shared by both Green-Gauss routines
-  real(rp),    allocatable, save :: gg_s_phi_bnd_buf(:)             ! green_gauss_gradient_scalar
-  real(rp),    allocatable, save :: gg_s_grad_prev_buf(:,:)         ! (3, n)
-  real(rp),    allocatable, save :: gg_v_U_bnd_buf(:,:)             ! green_gauss_gradient_vector, (3, n)
-  real(rp),    allocatable, save :: gg_v_grad_prev_buf(:,:,:)       ! (3, 3, n)
-  real(rp),    allocatable, save :: ls_s_phi_bnd_buf(:)             ! ls_gradient_scalar
-  real(rp),    allocatable, save :: ls_v_U_bnd_buf(:,:)             ! ls_gradient_vector, (3, n)
+
+  ! Stand-ins bound to absent optional arguments (phi_bnd, grad_*_prev): an absent optional can't
+  ! be named inside an !$acc region, so the kernels always see a real, device-resident array.
+  ! They are only ever read behind the matching has_* guard.
+  real(rp), target, save :: grad_dummy_s(1)       = 0.0_rp
+  real(rp), target, save :: grad_dummy_v(3, 1)    = 0.0_rp
+  real(rp), target, save :: grad_dummy_t(3, 3, 1) = 0.0_rp
+  !$acc declare create(grad_dummy_s, grad_dummy_v, grad_dummy_t)
 
 contains
 
@@ -39,28 +41,24 @@ contains
     real(rp),    intent(in)    :: phi(:)
     type(Mesh),  intent(in), target :: msh
     real(rp),    intent(inout) :: grad_phi(:,:)  ! (3, n_cells)
-    real(rp),    intent(in), optional :: phi_bnd(:)  ! (n_bnd_faces)
-    real(rp),    intent(in), optional :: grad_phi_prev(:,:)  ! (3, n_cells)
+    real(rp),    intent(in), optional, target :: phi_bnd(:)  ! (n_bnd_faces)
+    real(rp),    intent(in), optional, target :: grad_phi_prev(:,:)  ! (3, n_cells)
 
-    integer(ip) :: f, o, nb
+    integer(ip) :: f, o, nb, c
     real(rp)    :: phi_f, phi_f_plain, sf(3), gc, eps(3), grad_mean(3), w_blend
-    integer(ip) :: col, idx, n_loops, lo, hi, nc, n_bnd, n_prev, nf, n_int
+    integer(ip) :: col, idx, n_loops, lo, hi, nc, n_prev, nf, n_int, ng
     logical     :: use_color, has_bnd, has_prev
     integer(ip), pointer :: fo_soa(:), fn_soa(:), fcp(:)
     real(rp),    pointer :: sf_soa(:,:), gc_soa(:), eps_soa(:,:), cvol_soa(:), skew_soa(:)
+    real(rp),    pointer :: pbnd(:), gprev(:,:)
 
     if (.not. msh%soa_ready .and. msh%n_faces > 0) &
       error stop 'green_gauss_gradient_scalar: msh%soa_ready is false; call mesh%build_soa_mirror first'
 
-    grad_phi = 0.0_rp
     nc = msh%n_cells
     nf = msh%n_faces
     n_int = msh%n_int_faces
-    ! If grad_phi is already device-resident (caller-owned outer copyout region), the host
-    ! zero above never reaches it and the scatter below accumulates onto garbage; push it.
-#ifdef _OPENACC
-    !$acc update device(grad_phi(:,1:nc)) if_present
-#endif
+    ng = size(grad_phi, 2)
     fo_soa   => msh%face_owner_soa
     fn_soa   => msh%face_neighbour_soa
     sf_soa   => msh%face_sf_soa
@@ -69,25 +67,13 @@ contains
     cvol_soa => msh%cell_volume_soa
     skew_soa => msh%face_skew_soa
 
-    ! phi_bnd/grad_phi_prev copied to plain (always-present) local arrays: an absent optional
-    ! can't be referenced inside a statically-mapped !$acc region, same as ls_gradient_scalar.
     has_bnd = present(phi_bnd)
-    n_bnd = merge(size(phi_bnd), 1_ip, has_bnd)
-    call ensure_buf_1d(gg_s_phi_bnd_buf, n_bnd)
-    if (has_bnd) then
-      gg_s_phi_bnd_buf(1:n_bnd) = phi_bnd
-    else
-      gg_s_phi_bnd_buf(1:n_bnd) = 0.0_rp
-    end if
-
+    pbnd => grad_dummy_s
+    if (has_bnd) pbnd => phi_bnd
     has_prev = present(grad_phi_prev)
-    n_prev = merge(size(grad_phi_prev, 2), 1_ip, has_prev)
-    call ensure_buf_2d3(gg_s_grad_prev_buf, n_prev)
-    if (has_prev) then
-      gg_s_grad_prev_buf(:, 1:n_prev) = grad_phi_prev
-    else
-      gg_s_grad_prev_buf(:, 1:n_prev) = 0.0_rp
-    end if
+    gprev => grad_dummy_v
+    if (has_prev) gprev => grad_phi_prev
+    n_prev = merge(size(gprev, 2), 1_ip, has_prev)
 
     use_color = (msh%n_colors > 0 .and. allocated(msh%face_color_perm) &
                  .and. allocated(msh%color_offsets) .and. msh%soa_ready)
@@ -102,12 +88,15 @@ contains
       fcp => fcp_identity_buf(1:nf)
     end if
 
-#ifdef _OPENACC
-    !$acc data copyin(phi(:), gg_s_phi_bnd_buf(1:n_bnd), gg_s_grad_prev_buf(:,1:n_prev), &
-    !$acc      fo_soa(1:nf), fn_soa(1:nf), sf_soa(:,1:nf), gc_soa(1:nf), eps_soa(:,1:nf), &
-    !$acc      skew_soa(1:nf), fcp(1:nf)) &
-    !$acc      copy(grad_phi(:,1:nc)) if(use_color)
-#endif
+    ! The output is zeroed (ghost slots too, filled later by the halo exchange) and scaled on
+    ! the device, so the routine works the same whether grad_phi is resident or copied.
+    !$acc data copyin(phi, pbnd, gprev, fcp(1:nf)) copyout(grad_phi) if(use_color)
+    !$acc parallel loop collapse(2) if(use_color) default(present)
+    do c = 1, ng
+      do f = 1, 3
+        grad_phi(f, c) = 0.0_rp
+      end do
+    end do
     do col = 1, n_loops
       if (use_color) then
         lo = msh%color_offsets(col)
@@ -117,7 +106,7 @@ contains
         hi = nf
       end if
 #ifdef _OPENACC
-      !$acc parallel loop if(use_color) private(f, o, nb, sf, gc, eps, grad_mean, phi_f, &
+      !$acc parallel loop if(use_color) default(present) private(f, o, nb, sf, gc, eps, grad_mean, phi_f, &
       !$acc      phi_f_plain, w_blend)
 #else
       !$omp parallel do if(use_color) default(shared) &
@@ -139,7 +128,7 @@ contains
             eps       = eps_soa(:, f)  ! precomputed at mesh setup: static interior-face geometry
             ! Ghost gradients are halo-exchanged before each sweep, so both sides of a processor
             ! face see the same mean gradient (result independent of the partitioning).
-            grad_mean = gc * gg_s_grad_prev_buf(:, o) + (1.0_rp - gc) * gg_s_grad_prev_buf(:, nb)
+            grad_mean = gc * gprev(:, o) + (1.0_rp - gc) * gprev(:, nb)
             phi_f_plain = gc * phi(o) + (1.0_rp - gc) * phi(nb)
             phi_f       = phi_f_plain + dot_product(grad_mean, eps)
             ! Fade the eps-correction out toward refinement interfaces; see refine_blend_weight.
@@ -155,7 +144,7 @@ contains
           if (nb >= 1 .and. nb <= nc) grad_phi(:, nb) = grad_phi(:, nb) - phi_f * sf
         else
           if (has_bnd) then
-            phi_f = gg_s_phi_bnd_buf(f - n_int)
+            phi_f = pbnd(f - n_int)
           else
             phi_f = phi(o)
           end if
@@ -170,15 +159,14 @@ contains
       !$omp end parallel do
 #endif
     end do
-#ifdef _OPENACC
-    !$acc end data
-#endif
 
+    !$acc parallel loop if(use_color) default(present)
     do o = 1, nc
       if (cvol_soa(o) > SMALL) &
         grad_phi(:, o) = grad_phi(:, o) * (1.0_rp / cvol_soa(o))
     end do
-    nullify(fo_soa, fn_soa, fcp, sf_soa, gc_soa, eps_soa, cvol_soa, skew_soa)
+    !$acc end data
+    nullify(fo_soa, fn_soa, fcp, sf_soa, gc_soa, eps_soa, cvol_soa, skew_soa, pbnd, gprev)
   end subroutine green_gauss_gradient_scalar
 
   !> Green-Gauss gradient of a vector field: grad_U(i,j,c) = dU_j/dx_i.
@@ -187,28 +175,24 @@ contains
     real(rp),   intent(in)    :: U(:,:)
     type(Mesh), intent(in), target :: msh
     real(rp),   intent(inout) :: grad_U(:,:,:)  ! (3, 3, n_cells)
-    real(rp),   intent(in), optional :: U_bnd(:,:)  ! (3, n_bnd_faces)
-    real(rp),   intent(in), optional :: grad_U_prev(:,:,:)  ! (3, 3, n_cells)
+    real(rp),   intent(in), optional, target :: U_bnd(:,:)  ! (3, n_bnd_faces)
+    real(rp),   intent(in), optional, target :: grad_U_prev(:,:,:)  ! (3, 3, n_cells)
 
-    integer(ip) :: f, o, nb, k
+    integer(ip) :: f, o, nb, k, c
     real(rp)    :: Uf(3), Uf_plain(3), sf(3), gc, eps(3), grad_mean(3), w_blend
-    integer(ip) :: col, idx, n_loops, lo, hi, nc, n_bnd, n_prev, nf, n_int
+    integer(ip) :: col, idx, n_loops, lo, hi, nc, n_prev, nf, n_int, ng
     logical     :: use_color, has_bnd, has_prev
     integer(ip), pointer :: fo_soa(:), fn_soa(:), fcp(:)
     real(rp),    pointer :: sf_soa(:,:), gc_soa(:), eps_soa(:,:), cvol_soa(:), skew_soa(:)
+    real(rp),    pointer :: ubnd(:,:), gprev(:,:,:)
 
     if (.not. msh%soa_ready .and. msh%n_faces > 0) &
       error stop 'green_gauss_gradient_vector: msh%soa_ready is false; call mesh%build_soa_mirror first'
 
-    grad_U = 0.0_rp
     nc = msh%n_cells
     nf = msh%n_faces
     n_int = msh%n_int_faces
-    ! If grad_U is already device-resident (caller-owned outer copyout region), the host
-    ! zero above never reaches it and the scatter below accumulates onto garbage; push it.
-#ifdef _OPENACC
-    !$acc update device(grad_U(:,:,1:nc)) if_present
-#endif
+    ng = size(grad_U, 3)
     fo_soa   => msh%face_owner_soa
     fn_soa   => msh%face_neighbour_soa
     sf_soa   => msh%face_sf_soa
@@ -217,24 +201,13 @@ contains
     cvol_soa => msh%cell_volume_soa
     skew_soa => msh%face_skew_soa
 
-    ! U_bnd/grad_U_prev copied to plain (always-present) local arrays, same reason as the scalar version.
     has_bnd = present(U_bnd)
-    n_bnd = merge(size(U_bnd, 2), 1_ip, has_bnd)
-    call ensure_buf_2d3(gg_v_U_bnd_buf, n_bnd)
-    if (has_bnd) then
-      gg_v_U_bnd_buf(:, 1:n_bnd) = U_bnd
-    else
-      gg_v_U_bnd_buf(:, 1:n_bnd) = 0.0_rp
-    end if
-
+    ubnd => grad_dummy_v
+    if (has_bnd) ubnd => U_bnd
     has_prev = present(grad_U_prev)
-    n_prev = merge(size(grad_U_prev, 3), 1_ip, has_prev)
-    call ensure_buf_3d33(gg_v_grad_prev_buf, n_prev)
-    if (has_prev) then
-      gg_v_grad_prev_buf(:, :, 1:n_prev) = grad_U_prev
-    else
-      gg_v_grad_prev_buf(:, :, 1:n_prev) = 0.0_rp
-    end if
+    gprev => grad_dummy_t
+    if (has_prev) gprev => grad_U_prev
+    n_prev = merge(size(gprev, 3), 1_ip, has_prev)
 
     use_color = (msh%n_colors > 0 .and. allocated(msh%face_color_perm) &
                  .and. allocated(msh%color_offsets) .and. msh%soa_ready)
@@ -249,12 +222,16 @@ contains
       fcp => fcp_identity_buf(1:nf)
     end if
 
-#ifdef _OPENACC
-    !$acc data copyin(U(:,:), gg_v_U_bnd_buf(:,1:n_bnd), gg_v_grad_prev_buf(:,:,1:n_prev), &
-    !$acc      fo_soa(1:nf), fn_soa(1:nf), sf_soa(:,1:nf), gc_soa(1:nf), eps_soa(:,1:nf), &
-    !$acc      skew_soa(1:nf), fcp(1:nf)) &
-    !$acc      copy(grad_U(:,:,1:nc)) if(use_color)
-#endif
+    ! Zeroed and scaled on the device, see green_gauss_gradient_scalar.
+    !$acc data copyin(U, ubnd, gprev, fcp(1:nf)) copyout(grad_U) if(use_color)
+    !$acc parallel loop collapse(3) if(use_color) default(present)
+    do c = 1, ng
+      do k = 1, 3
+        do f = 1, 3
+          grad_U(f, k, c) = 0.0_rp
+        end do
+      end do
+    end do
     do col = 1, n_loops
       if (use_color) then
         lo = msh%color_offsets(col)
@@ -264,7 +241,7 @@ contains
         hi = nf
       end if
 #ifdef _OPENACC
-      !$acc parallel loop if(use_color) private(f, o, nb, k, Uf, Uf_plain, sf, gc, eps, &
+      !$acc parallel loop if(use_color) default(present) private(f, o, nb, k, Uf, Uf_plain, sf, gc, eps, &
       !$acc      grad_mean, w_blend)
 #else
       !$omp parallel do if(use_color) default(shared) &
@@ -285,7 +262,7 @@ contains
             gc   = gc_soa(f)
             eps  = eps_soa(:, f)  ! precomputed at mesh setup: static interior-face geometry
             do k = 1, 3
-              grad_mean = gc * gg_v_grad_prev_buf(:, k, o) + (1.0_rp - gc) * gg_v_grad_prev_buf(:, k, nb)
+              grad_mean = gc * gprev(:, k, o) + (1.0_rp - gc) * gprev(:, k, nb)
               Uf(k) = gc * U(k, o) + (1.0_rp - gc) * U(k, nb) + dot_product(grad_mean, eps)
             end do
             ! Fade the eps-correction out toward refinement interfaces; see refine_blend_weight.
@@ -301,7 +278,7 @@ contains
           end if
         else
           if (has_bnd) then
-            Uf = gg_v_U_bnd_buf(:, f - n_int)
+            Uf = ubnd(:, f - n_int)
           else
             Uf = U(:, o)
           end if
@@ -318,15 +295,14 @@ contains
       !$omp end parallel do
 #endif
     end do
-#ifdef _OPENACC
-    !$acc end data
-#endif
 
+    !$acc parallel loop if(use_color) default(present)
     do o = 1, nc
       if (cvol_soa(o) > SMALL) &
         grad_U(:, :, o) = grad_U(:, :, o) * (1.0_rp / cvol_soa(o))
     end do
-    nullify(fo_soa, fn_soa, fcp, sf_soa, gc_soa, eps_soa, cvol_soa, skew_soa)
+    !$acc end data
+    nullify(fo_soa, fn_soa, fcp, sf_soa, gc_soa, eps_soa, cvol_soa, skew_soa, ubnd, gprev)
   end subroutine green_gauss_gradient_vector
 
   !> Weighted least-squares gradient using precomputed stencil.
@@ -334,22 +310,22 @@ contains
     real(rp),   intent(in)    :: phi(:)
     type(Mesh), intent(in), target :: msh
     real(rp),   intent(inout) :: grad_phi(:,:)  ! (3, n_cells)
-    real(rp),   intent(in), optional :: phi_bnd(:)  ! (n_bnd_faces)
+    real(rp),   intent(in), optional, target :: phi_bnd(:)  ! (n_bnd_faces)
 
     integer(ip) :: c, k, nb, f, bnd_idx
     integer(ip) :: nvals, nc, n_int_faces, n_bnd, n_stencil
     real(rp)    :: dphi, phi_nb
 #ifdef _OPENACC
     real(rp)    :: gx, gy, gz  ! GPU-path-only per-cell reduction accumulators, see below
+    integer(ip) :: ng
 #endif
     logical     :: has_bnd
     integer(ip), pointer :: stencil_offset(:), stencil(:), stencil_face(:)
-    real(rp),    pointer :: ls_w(:,:)
+    real(rp),    pointer :: ls_w(:,:), pbnd(:)
 
     if (.not. allocated(msh%ls_stencil_face)) &
       error stop 'ls_gradient_scalar: ls_stencil_face not allocated; call mesh%build_ls_stencil first'
 
-    grad_phi = 0.0_rp
     nvals = size(phi)
     nc = msh%n_cells
     n_int_faces = msh%n_int_faces
@@ -359,24 +335,26 @@ contains
     ls_w           => msh%ls_weights
     n_stencil = size(stencil)
 
-    ! phi_bnd copied to a plain (always-present) local array: an optional dummy can't be
-    ! referenced from inside an !$acc region, since device data clauses are resolved statically.
+    ! An absent optional can't be named inside an !$acc region: bind a resident stand-in.
     has_bnd = present(phi_bnd)
-    n_bnd = merge(size(phi_bnd), 1_ip, has_bnd)
-    call ensure_buf_1d(ls_s_phi_bnd_buf, n_bnd)
-    if (has_bnd) then
-      ls_s_phi_bnd_buf(1:n_bnd) = phi_bnd
-    else
-      ls_s_phi_bnd_buf(1:n_bnd) = 0.0_rp
-    end if
+    pbnd => grad_dummy_s
+    if (has_bnd) pbnd => phi_bnd
+    n_bnd = size(pbnd)
 
 #ifdef _OPENACC
     ! GPU path only: spreads the stencil walk across a gang's vector threads with a manual reduction (nsys: 97.5% of kernel time otherwise, one thread crawling the whole list).
-    ! grad_phi is fully overwritten below (each cell's reduction starts at 0, never reads the
-    ! incoming value), so copyout -- not copy -- avoids uploading a value the kernel never uses.
-    !$acc data copyin(phi(1:nvals), ls_s_phi_bnd_buf(1:n_bnd), stencil_offset(1:nc+1), &
+    ! Owned cells are fully overwritten below and ghost slots zeroed (filled later by the halo
+    ! exchange), so copyout -- not copy -- avoids uploading a value the kernel never uses.
+    ng = size(grad_phi, 2)
+    !$acc data copyin(phi(1:nvals), pbnd, stencil_offset(1:nc+1), &
     !$acc              stencil(1:n_stencil), stencil_face(1:n_stencil), ls_w(:,1:n_stencil)) &
-    !$acc      copyout(grad_phi(:,1:nc))
+    !$acc      copyout(grad_phi)
+    !$acc parallel loop default(present)
+    do c = nc + 1, ng
+      grad_phi(1, c) = 0.0_rp
+      grad_phi(2, c) = 0.0_rp
+      grad_phi(3, c) = 0.0_rp
+    end do
     !$acc parallel loop gang private(gx, gy, gz)
     do c = 1, nc
       gx = 0.0_rp
@@ -393,7 +371,7 @@ contains
             bnd_idx = -1
           end if
           if (has_bnd .and. bnd_idx >= 1 .and. bnd_idx <= n_bnd) then
-            phi_nb = ls_s_phi_bnd_buf(bnd_idx)
+            phi_nb = pbnd(bnd_idx)
           else
             phi_nb = phi(c)
           end if
@@ -415,6 +393,7 @@ contains
     !$acc end parallel loop
     !$acc end data
 #else
+    grad_phi = 0.0_rp
     !$omp parallel do private(c, k, nb, f, bnd_idx, dphi, phi_nb) schedule(static)
     do c = 1, nc
       do k = stencil_offset(c), stencil_offset(c+1) - 1
@@ -427,7 +406,7 @@ contains
             bnd_idx = -1
           end if
           if (has_bnd .and. bnd_idx >= 1 .and. bnd_idx <= n_bnd) then
-            phi_nb = ls_s_phi_bnd_buf(bnd_idx)
+            phi_nb = pbnd(bnd_idx)
           else
             phi_nb = phi(c)
           end if
@@ -443,7 +422,7 @@ contains
     !$omp end parallel do
 #endif
 
-    nullify(stencil_offset, stencil, stencil_face, ls_w)
+    nullify(stencil_offset, stencil, stencil_face, ls_w, pbnd)
   end subroutine ls_gradient_scalar
 
   !> Weighted least-squares gradient for each component of a vector field.
@@ -451,22 +430,22 @@ contains
     real(rp),   intent(in)    :: U(:,:)
     type(Mesh), intent(in), target :: msh
     real(rp),   intent(inout) :: grad_U(:,:,:)  ! (3, 3, n_cells)
-    real(rp),   intent(in), optional :: U_bnd(:,:)  ! (3, n_bnd_faces)
+    real(rp),   intent(in), optional, target :: U_bnd(:,:)  ! (3, n_bnd_faces)
 
     integer(ip) :: c, k, nb, j, f, bnd_idx
     integer(ip) :: nvals, nc, n_int_faces, n_bnd, n_stencil
     real(rp)    :: dU(3), U_nb(3)
 #ifdef _OPENACC
     real(rp)    :: g11, g21, g31, g12, g22, g32, g13, g23, g33  ! GPU-path-only reduction accumulators
+    integer(ip) :: ng
 #endif
     logical     :: has_bnd
     integer(ip), pointer :: stencil_offset(:), stencil(:), stencil_face(:)
-    real(rp),    pointer :: ls_w(:,:)
+    real(rp),    pointer :: ls_w(:,:), ubnd(:,:)
 
     if (.not. allocated(msh%ls_stencil_face)) &
       error stop 'ls_gradient_vector: ls_stencil_face not allocated; call mesh%build_ls_stencil first'
 
-    grad_U = 0.0_rp
     nvals = size(U, 2)
     nc = msh%n_cells
     n_int_faces = msh%n_int_faces
@@ -476,25 +455,29 @@ contains
     ls_w           => msh%ls_weights
     n_stencil = size(stencil)
 
-    ! U_bnd copied to a plain (always-present) local array: an optional dummy can't be
-    ! referenced from inside an !$acc region, since device data clauses are resolved statically.
+    ! An absent optional can't be named inside an !$acc region: bind a resident stand-in.
     has_bnd = present(U_bnd)
-    n_bnd = merge(size(U_bnd, 2), 1_ip, has_bnd)
-    call ensure_buf_2d3(ls_v_U_bnd_buf, n_bnd)
-    if (has_bnd) then
-      ls_v_U_bnd_buf(:, 1:n_bnd) = U_bnd
-    else
-      ls_v_U_bnd_buf(:, 1:n_bnd) = 0.0_rp
-    end if
+    ubnd => grad_dummy_v
+    if (has_bnd) ubnd => U_bnd
+    n_bnd = size(ubnd, 2)
 
 #ifdef _OPENACC
     ! GPU path only, same rationale as ls_gradient_scalar above (97.5% of measured GPU kernel time); CPU loop below is untouched.
     ! Unrolled into 9 scalar accumulators, not a g(3,3) array reduction: the array form hit an nvfortran 26.5 shared-memory codegen bug.
-    ! grad_U is fully overwritten below (each cell's reduction starts at 0, never reads the
-    ! incoming value), so copyout -- not copy -- avoids uploading a value the kernel never uses.
-    !$acc data copyin(U(:,1:nvals), ls_v_U_bnd_buf(:,1:n_bnd), stencil_offset(1:nc+1), &
+    ! Owned cells are fully overwritten below and ghost slots zeroed (filled later by the halo
+    ! exchange), so copyout -- not copy -- avoids uploading a value the kernel never uses.
+    ng = size(grad_U, 3)
+    !$acc data copyin(U(:,1:nvals), ubnd, stencil_offset(1:nc+1), &
     !$acc              stencil(1:n_stencil), stencil_face(1:n_stencil), ls_w(:,1:n_stencil)) &
-    !$acc      copyout(grad_U(:,:,1:nc))
+    !$acc      copyout(grad_U)
+    !$acc parallel loop collapse(2) default(present)
+    do c = nc + 1, ng
+      do j = 1, 3
+        grad_U(1, j, c) = 0.0_rp
+        grad_U(2, j, c) = 0.0_rp
+        grad_U(3, j, c) = 0.0_rp
+      end do
+    end do
     !$acc parallel loop gang private(g11,g21,g31,g12,g22,g32,g13,g23,g33)
     do c = 1, nc
       g11 = 0.0_rp; g21 = 0.0_rp; g31 = 0.0_rp
@@ -512,7 +495,7 @@ contains
             bnd_idx = -1
           end if
           if (has_bnd .and. bnd_idx >= 1 .and. bnd_idx <= n_bnd) then
-            U_nb = ls_v_U_bnd_buf(:, bnd_idx)
+            U_nb = ubnd(:, bnd_idx)
           else
             U_nb = U(:, c)
           end if
@@ -546,6 +529,7 @@ contains
     !$acc end parallel loop
     !$acc end data
 #else
+    grad_U = 0.0_rp
     !$omp parallel do private(c, k, nb, j, f, bnd_idx, dU, U_nb) schedule(static)
     do c = 1, nc
       do k = stencil_offset(c), stencil_offset(c+1) - 1
@@ -558,7 +542,7 @@ contains
             bnd_idx = -1
           end if
           if (has_bnd .and. bnd_idx >= 1 .and. bnd_idx <= n_bnd) then
-            U_nb = ls_v_U_bnd_buf(:, bnd_idx)
+            U_nb = ubnd(:, bnd_idx)
           else
             U_nb = U(:, c)
           end if
@@ -576,7 +560,7 @@ contains
     !$omp end parallel do
 #endif
 
-    nullify(stencil_offset, stencil, stencil_face, ls_w)
+    nullify(stencil_offset, stencil, stencil_face, ls_w, ubnd)
   end subroutine ls_gradient_vector
 
   !> Face interpolation of a scalar with optional gradient correction (O(h^2) on skewed grids).
