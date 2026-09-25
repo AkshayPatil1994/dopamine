@@ -108,8 +108,9 @@ step time on the CPU path) works as follows: PETSc's pressure matrix/vectors
 run as `MATAIJCUSPARSE`/`VECCUDA`, and BoomerAMG (hypre) runs its setup and
 solve on-device. In this build nothing outside the pressure solve runs on
 GPU; the explicit kernels are offloaded separately by the OpenACC build
-described below. Validated on a single-GPU workstation (RTX 3060, CUDA 12.0);
-multi-GPU/multi-node has not been exercised. See
+described below. Validated on a single-GPU workstation (RTX 3060, CUDA 12.0)
+and, in the combined OpenACC + CUDA build, on two RTX A6000 (one rank per GPU,
+see "Multi-GPU" below); multi-node has not been exercised. See
 `docs/external-lib-guidance/PETSc_GPU_porting.md` (local, gitignored) for
 implementation notes.
 
@@ -374,29 +375,31 @@ accelerates.
 
 ## OpenACC (nvfortran) Run
 
-`!$acc` directives cover:
+`!$acc` directives cover the whole time step:
 
-- `vreman_sgs_viscosity`, `smagorinsky_sgs` (`mod_vreman.f90`) and
-  `dynamic_smagorinsky_sgs` (`mod_dynamic_smagorinsky.f90`).
-- `green_gauss_gradient_scalar`/`vector` and `ls_gradient_scalar`/`vector`
-  (`mod_gradient.f90`).
-- `viscous_rhs_vector`/`viscous_rhs_scalar` (`mod_viscous.f90`, momentum and
-  scalar diffusion).
-- The advection kernels (`mod_advection.f90`): the CDS, reconstruction
-  (QUICK/van Leer/Koren TVD) and KEP scalar/vector SoA paths.
+- the SGS models (`vreman_sgs_viscosity`, `smagorinsky_sgs`,
+  `dynamic_smagorinsky_sgs` incl. its test filter) and the log-law wall model;
+- the gradients (Green-Gauss and least-squares, scalar and vector), the
+  viscous fluxes, and the advection kernels (CDS, QUICK/van Leer/Koren TVD, KEP,
+  scalar and vector);
+- the boundary-condition application (velocity, pressure, temperature,
+  passive scalars), the face-flux assembly, the pressure-RHS and the
+  velocity/flux projection, the RK3 arithmetic, the time-step and bulk-velocity
+  reductions, and the halo pack/unpack.
 
 All of these read geometry through the mesh's flat SoA mirror (cell centroid
 and volume, face owner/neighbour, normal/area/centre/`d_cf`, interpolation and
 skewness factors, least-squares stencils, patch BC ids and periodic pairing
 maps), which `main.f90` stages on the device once with a single
-`!$acc enter data` so each kernel's own `copyin` finds it already resident. The
-mesh is static, so this never needs refreshing. Boundary-condition application
-and halo exchange remain host-side. On a single rank the solver keeps `U`,
-`grad_U`, `nu_sgs` and the scalars device-resident across the SGS/gradient/
-viscous block of each RK3 stage; under MPI (`nranks > 1`) that residency is
-disabled and each kernel transfers its own data, since the halo exchange
-between stages runs on the host. See the "OpenACC (nvfortran) build" section
-above for the build recipe (`build-acc26/`).
+`!$acc enter data`; the static projection operator (face indices, coefficients,
+non-orthogonal caches) is staged by `solver_init`. `solver%to_device` then moves
+every field and work array to the device once, before the time loop, and the
+device copy stays authoritative: `solver%sync_host` refreshes the host copy
+only on steps that write output, statistics, samples or checkpoints. Still on
+the host, with narrow updates around them: the MOST wall model, scalar
+sources, nudging, SEM inflow, and the PETSc interface when the backend cannot
+take device pointers. See the "OpenACC (nvfortran) build" section above for the
+build recipe (`build-acc26/`).
 
 ```bash
 export PATH="$HOME/nvhpc_26/Linux_x86_64/26.5/comm_libs/hpcx/bin:$HOME/nvhpc_26/Linux_x86_64/26.5/compilers/bin:$PATH"
