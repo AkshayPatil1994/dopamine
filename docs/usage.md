@@ -416,6 +416,55 @@ driver-version error, see the "OpenACC (nvfortran) build" section above for
 the fallback (pair `nvfortran` 26.5 with an older `nvcc` via
 `DOPAMINE_PETSC_CUDAC`).
 
+
+### Multi-GPU (one MPI rank per GPU)
+
+Run one rank per GPU: `mpirun -np 2 ./build-acc/dopamine case.input` on a two-GPU
+node. At startup the code binds each rank to `local_rank % ndevices` (for both
+OpenACC and PETSc) and prints the mapping and whether the MPI is CUDA-aware. All
+solver fields stay on the device for the whole run — the host copy is refreshed
+only on steps that write output, statistics, samples or checkpoints — and halos
+are packed on the GPU and sent as device buffers when the MPI is CUDA-aware
+(HPC-X from NVHPC is; `DOPAMINE_GPU_AWARE_MPI=0` forces host staging of the
+packed buffers).
+
+- Two GPUs only pay off above a few million cells per GPU: the explicit part
+  scales well, but at ~1M cells per GPU every kernel and AMG level is
+  launch/latency bound.
+- **The pressure solve does not scale with hypre's parallel BoomerAMG on this
+  class of node.** On two PCIe-connected RTX A6000 (no NVLink) the parallel
+  V-cycle splits every SpMV into a diagonal and an off-diagonal block and each
+  launch costs as much as the whole-domain one on a single GPU, so pressure gets
+  *slower* than on one GPU (TGV 192^3: 1.46 s/step on one GPU, 2.01 s on two).
+  Block-Jacobi with a local AMG per GPU (additive Schwarz with overlap) avoids the
+  inter-GPU traffic inside the cycle; add to the input file:
+
+  ```fortran
+  &dopamine_PetscParams
+    n_petsc_options = 12
+    petsc_options_tmp(1)  = '-pc_type asm'
+    petsc_options_tmp(2)  = '-pc_asm_overlap 16'
+    petsc_options_tmp(3)  = '-pc_asm_type basic'
+    petsc_options_tmp(4)  = '-sub_ksp_type preonly'
+    petsc_options_tmp(5)  = '-sub_pc_type hypre'
+    petsc_options_tmp(6)  = '-sub_pc_hypre_type boomeramg'
+    petsc_options_tmp(7)  = '-sub_pc_hypre_boomeramg_strong_threshold 0.25'
+    petsc_options_tmp(8)  = '-sub_pc_hypre_boomeramg_coarsen_type PMIS'
+    petsc_options_tmp(9)  = '-sub_pc_hypre_boomeramg_interp_type ext+i'
+    petsc_options_tmp(10) = '-sub_pc_hypre_boomeramg_relax_type_all l1scaled-Jacobi'
+    petsc_options_tmp(11) = '-sub_pc_hypre_boomeramg_agg_nl 0'
+    petsc_options_tmp(12) = '-sub_pc_hypre_boomeramg_P_max 4'
+  /
+  ```
+
+  The `-sub_pc_hypre_boomeramg_*` lines are required: they are the GPU-safe
+  settings the backend applies to the unprefixed `-pc_hypre_boomeramg_*`
+  options, and hypre's host-only defaults crash on a device matrix. Overlap trades
+  iterations for setup cost (TGV 128^3, 2 GPUs: overlap 2/8/32 → 46/34/21 CG
+  iterations per solve; step 0.73/0.67/0.63 s versus 0.82 s with the default).
+  This is specific to few, well-connected GPUs; with many ranks stay with the
+  default parallel BoomerAMG.
+
 ## Choosing a Mesh Path
 
 `mesh_type` selects between two quite different startup paths. The choice is
