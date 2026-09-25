@@ -14,6 +14,24 @@ static char g_pc_solver_type[64] = "boomeramg";
  * falls back to its own MPI_COMM_WORLD-rank % ndev choice). */
 static int g_device_local_rank = -1;
 
+/* When set, the rhs and solution arguments of fvm_petsc_solve_pressure are device pointers and
+ * are moved to/from the PETSc vectors with device-to-device copies (no host round trip); the
+ * NaN scrub of the host path is the caller's job then. */
+static int g_io_on_device = 0;
+
+void fvm_petsc_set_io_on_device(int on) {
+  g_io_on_device = on;
+}
+
+/* Whether this backend can take device pointers at all (needs the CUDA runtime for the copies). */
+int fvm_petsc_device_io_supported(void) {
+#if defined(PETSC_HAVE_CUDA)
+  return 1;
+#else
+  return 0;
+#endif
+}
+
 #ifdef FVM_HAVE_PETSC
 #include <petscksp.h>
 #if defined(PETSC_HAVE_CUDA)
@@ -470,6 +488,12 @@ static int fvm_petsc_pressure_ctx_build(fvm_petsc_pressure_ctx_t *ctx,
 
   /* Check if all local rows are owned locally to enable the fast copy path. */
   ctx->use_direct_solution_copy = 1;
+  {
+    /* Test hook: force the scatter/VecSetValues path (used when local rows are not one
+     * contiguous owned block) to keep it exercised, including with device I/O. */
+    const char *no_direct = getenv("DOPAMINE_PETSC_NO_DIRECT_COPY");
+    if (no_direct != NULL && no_direct[0] == '1') ctx->use_direct_solution_copy = 0;
+  }
   ctx->ref_local_offset = -1;
   for (row = 0; row < (PetscInt) n_cells_local; ++row) {
     if (ctx->sol_rows[row] < ownership_start || ctx->sol_rows[row] >= ownership_end) {
@@ -686,9 +710,47 @@ int fvm_petsc_solve_pressure(const int n_cells_local,
     }
   }
 
+#if defined(PETSC_HAVE_CUDA)
+  /* Device I/O: direct copy path uses device-to-device copies; anything else falls back to host
+   * staging with temporaries, so the caller never has to know which path the ctx took. */
+  double *sol_dev_orig = solution;
+  double *tmp_rhs = NULL, *tmp_sol = NULL;
+  int dev_direct = 0;
+  if (g_io_on_device) {
+    const size_t nbytes = (size_t) n_cells_local * sizeof(double);
+    if (g_pressure_ctx.use_direct_solution_copy && fvm_petsc_gpu_backend_enabled()) {
+      PetscScalar *d_rhs = NULL, *d_sol = NULL;
+      PetscMemType mt_r, mt_s;
+      dev_direct = 1;
+      ierr = VecGetArrayWriteAndMemType(g_pressure_ctx.rhs_vector, &d_rhs, &mt_r);
+      if (ierr != PETSC_SUCCESS) return -15;
+      ierr = VecGetArrayWriteAndMemType(g_pressure_ctx.solution_vector, &d_sol, &mt_s);
+      if (ierr != PETSC_SUCCESS) return -25;
+      if (cudaMemcpy(d_rhs, rhs, nbytes, cudaMemcpyDefault) != cudaSuccess) return -15;
+      if (cudaMemcpy(d_sol, solution, nbytes, cudaMemcpyDefault) != cudaSuccess) return -25;
+      ierr = VecRestoreArrayWriteAndMemType(g_pressure_ctx.rhs_vector, &d_rhs);
+      if (ierr != PETSC_SUCCESS) return -15;
+      ierr = VecRestoreArrayWriteAndMemType(g_pressure_ctx.solution_vector, &d_sol);
+      if (ierr != PETSC_SUCCESS) return -25;
+    } else {
+      tmp_rhs = (double *) malloc(nbytes);
+      tmp_sol = (double *) malloc(nbytes);
+      if (tmp_rhs == NULL || tmp_sol == NULL) return -15;
+      if (cudaMemcpy(tmp_rhs, rhs, nbytes, cudaMemcpyDefault) != cudaSuccess) return -15;
+      if (cudaMemcpy(tmp_sol, solution, nbytes, cudaMemcpyDefault) != cudaSuccess) return -25;
+      rhs = tmp_rhs;
+      solution = tmp_sol;
+    }
+  }
+#endif
+
   // Load RHS and initial guess into the PETSc vectors.
    // Fast path (use_direct_solution_copy == 1): compact global IDs are
-  if (g_pressure_ctx.use_direct_solution_copy) {
+  if (
+#if defined(PETSC_HAVE_CUDA)
+      !dev_direct &&
+#endif
+      g_pressure_ctx.use_direct_solution_copy) {
     PetscScalar *rhs_arr = NULL;
     PetscScalar *sol_arr = NULL;
 
@@ -711,7 +773,11 @@ int fvm_petsc_solve_pressure(const int n_cells_local,
     ierr = VecRestoreArray(g_pressure_ctx.solution_vector, &sol_arr);
     if (ierr != PETSC_SUCCESS) return -25;
     /* No VecAssembly needed: values were written directly to owned memory. */
-  } else {
+  } else
+#if defined(PETSC_HAVE_CUDA)
+  if (!dev_direct)
+#endif
+  {
     for (row = 0; row < (PetscInt) n_cells_local; ++row) {
       PetscScalar rhs_value = (PetscScalar) rhs[row];
       PetscScalar p0        = (PetscScalar) solution[row];
@@ -886,6 +952,19 @@ int fvm_petsc_solve_pressure(const int n_cells_local,
     if (ierr != PETSC_SUCCESS) return -32;
   }
 
+#if defined(PETSC_HAVE_CUDA)
+  if (dev_direct) {
+    const PetscScalar *d_sol = NULL;
+    PetscMemType mt;
+    ierr = VecGetArrayReadAndMemType(g_pressure_ctx.solution_vector, &d_sol, &mt);
+    if (ierr != PETSC_SUCCESS) return -43;
+    if (cudaMemcpy(sol_dev_orig, d_sol, (size_t) n_cells_local * sizeof(double), cudaMemcpyDefault) != cudaSuccess)
+      return -43;
+    ierr = VecRestoreArrayReadAndMemType(g_pressure_ctx.solution_vector, &d_sol);
+    if (ierr != PETSC_SUCCESS) return -44;
+    return status;
+  }
+#endif
   if (g_pressure_ctx.use_direct_solution_copy) {
     const PetscScalar *sol_arr = NULL;
     ierr = VecGetArrayRead(g_pressure_ctx.solution_vector, &sol_arr);
@@ -913,6 +992,15 @@ int fvm_petsc_solve_pressure(const int n_cells_local,
       if (ierr != PETSC_SUCCESS) return -44;
     }
   }
+#if defined(PETSC_HAVE_CUDA)
+  if (tmp_sol != NULL) {
+    /* Host-staged fallback of the device I/O mode: hand the solution back to the device. */
+    if (cudaMemcpy(sol_dev_orig, tmp_sol, (size_t) n_cells_local * sizeof(double), cudaMemcpyDefault) != cudaSuccess)
+      status = -43;
+    free(tmp_sol);
+    free(tmp_rhs);
+  }
+#endif
   return status;
 #else
   (void) n_cells_local;

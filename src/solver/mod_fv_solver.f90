@@ -1453,13 +1453,10 @@ contains
             end do
           end if
           call prof_push('ksp_solve')
-          ! The PETSc interface still takes host arrays: stage the RHS and initial guess out and
-          ! the solution back in.
-          !$acc update host(rhsp(1:nc), p(1:nc)) if(self%on_device)
+          ! With resident fields the RHS and solution go to PETSc as device pointers.
           call pressure_solver_solve(self%psolver, rhs_p, self%p(1:nc), tol=self%params%p_tol, &
                          max_iter=self%params%p_max_iter, n_iter=p_iter, residual=p_resid, &
-                         atol_in=atol_dynamic)
-          !$acc update device(p(1:nc)) if(self%on_device)
+                         atol_in=atol_dynamic, on_device=self%on_device)
           call prof_pop()
           call self%mesh%begin_halos_scalar(self%p)
           if (self%skip_grad_p) then

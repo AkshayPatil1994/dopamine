@@ -40,6 +40,16 @@ module mod_pressure_solver
       character(kind=c_char), intent(in) :: solver_name(*)
     end subroutine
 
+    integer(c_int) function fvm_petsc_device_io_supported() bind(C)
+      use iso_c_binding
+    end function
+
+    !> Solve with rhs/solution given as device pointers (0 = host pointers again).
+    subroutine fvm_petsc_set_io_on_device(on) bind(C)
+      use iso_c_binding
+      integer(c_int), value :: on
+    end subroutine
+
     !> Insert a single option string into PETSc's global options database.
     !> opt_str must be null-terminated, e.g. "-pc_hypre_boomeramg_strong_threshold 0.5"
     subroutine fvm_petsc_insert_option(opt_str) bind(C)
@@ -613,10 +623,12 @@ contains
     end if
   end subroutine audit_periodic_consistency
 
-  subroutine pressure_solver_solve(handle, rhs, p, tol, max_iter, n_iter, residual, atol_in)
-    type(pressure_solver_handle_t), intent(inout) :: handle
+  subroutine pressure_solver_solve(handle, rhs, p, tol, max_iter, n_iter, residual, atol_in, on_device)
+    type(pressure_solver_handle_t), intent(inout), target :: handle
     real(rp),                       intent(in)    :: rhs(:)
     real(rp),                       intent(inout) :: p(:)
+    !> rhs and p are device-resident (OpenACC): the solve then runs on device pointers with no host copy.
+    logical,              optional, intent(in)    :: on_device
     real(rp),             optional, intent(in)    :: tol
     integer(ip),          optional, intent(in)    :: max_iter
     integer(ip),          optional, intent(out)   :: n_iter
@@ -625,9 +637,12 @@ contains
 
     real(c_double) :: c_tol, c_atol, c_residual
     integer(c_int) :: c_max_iter, c_n_iter, status
-    integer(ip) :: nc, o, idx
+    integer(ip) :: nc, o, idx, nd
     integer(c_int) :: empty_rows(1)
     real(c_double) :: empty_vals(1)
+    logical :: dev, host_sync
+    real(c_double), pointer :: rw(:), pw(:), dvals(:)
+    integer(c_int), pointer :: drows(:)
 
     nc = handle%n_cells
     ! rtol: primary convergence criterion; atol_in: dimensional floor for near-zero RHS only.
@@ -659,46 +674,106 @@ contains
       end if
     end block
 
-    handle%rhs_work(1:nc) = real(rhs(1:nc), c_double)
-    handle%p_work(1:nc) = real(p(1:nc), c_double)
+    dev = .false.
+    if (present(on_device)) dev = on_device
+    ! Backend without CUDA-runtime copies: fall back to host arrays with explicit updates.
+    host_sync = .false.
+    if (dev .and. fvm_petsc_device_io_supported() == 0_c_int) then
+      dev = .false.
+      host_sync = .true.
+      !$acc update host(rhs, p)
+    end if
+    rw => handle%rhs_work
+    pw => handle%p_work
 
-    ! Outlet Dirichlet rhs increments: rhs(o) += c_b * p_val per outlet face.
-    if (handle%n_dirichlet_rows > 0 .and. allocated(handle%dirichlet_rows)) then
-      do idx = 1, handle%n_dirichlet_rows
-        o = int(handle%dirichlet_rows(idx), ip)
-        if (o >= 1 .and. o <= nc) then
-          handle%rhs_work(o) = handle%rhs_work(o) + handle%dirichlet_values(idx)
-        end if
+    if (dev) then
+      ! Device path: build the work vectors on the device (with the NaN scrub the host path does
+      ! in the backend) and hand device pointers to PETSc below.
+      nd = 0
+      if (handle%n_dirichlet_rows > 0 .and. allocated(handle%dirichlet_rows)) nd = handle%n_dirichlet_rows
+      if (nd > 0) then
+        drows => handle%dirichlet_rows
+        dvals => handle%dirichlet_values
+      else
+        drows => null()
+        dvals => null()
+      end if
+      !$acc enter data create(rw(1:nc), pw(1:nc))
+      !$acc parallel loop present(rhs, p, rw, pw)
+      do idx = 1, nc
+        rw(idx) = real(rhs(idx), c_double)
+        pw(idx) = real(p(idx), c_double)
+        if (.not. (abs(rw(idx)) <= huge(1.0_c_double))) rw(idx) = 0.0_c_double
+        if (.not. (abs(pw(idx)) <= huge(1.0_c_double))) pw(idx) = 0.0_c_double
       end do
+      if (nd > 0) then
+        ! Outlet Dirichlet rhs increments; outlet faces can share an owner, hence atomics.
+        !$acc parallel loop copyin(drows(1:nd), dvals(1:nd)) present(rw) private(o)
+        do idx = 1, nd
+          o = int(drows(idx), ip)
+          if (o >= 1 .and. o <= nc) then
+            !$acc atomic update
+            rw(o) = rw(o) + dvals(idx)
+          end if
+        end do
+      end if
+    else
+      handle%rhs_work(1:nc) = real(rhs(1:nc), c_double)
+      handle%p_work(1:nc) = real(p(1:nc), c_double)
+
+      ! Outlet Dirichlet rhs increments: rhs(o) += c_b * p_val per outlet face.
+      if (handle%n_dirichlet_rows > 0 .and. allocated(handle%dirichlet_rows)) then
+        do idx = 1, handle%n_dirichlet_rows
+          o = int(handle%dirichlet_rows(idx), ip)
+          if (o >= 1 .and. o <= nc) then
+            handle%rhs_work(o) = handle%rhs_work(o) + handle%dirichlet_values(idx)
+          end if
+        end do
+      end if
     end if
 
     empty_rows(1) = int(0, c_int)
     empty_vals(1) = 0.0_c_double
 
+    if (dev) call fvm_petsc_set_io_on_device(1_c_int)
+    !$acc host_data use_device(rw, pw) if(dev)
     if (handle%n_dirichlet_rows > 0) then
       status = fvm_petsc_solve_pressure(int(nc, c_int), int(handle%n_cells_global, c_int), int(handle%n_faces, c_int), &
                         handle%local_to_global, handle%face_owner, handle%face_neighbor_local, &
                         handle%face_neighbor_global, handle%skip_face, &
-                                        handle%diagonal, handle%rhs_work, handle%face_coeff, &
+                                        handle%diagonal, rw, handle%face_coeff, &
                         int(handle%reference_cell, c_int), c_max_iter, c_tol, c_atol, &
                         handle%dirichlet_rows, handle%dirichlet_values, int(handle%n_dirichlet_rows, c_int), &
-                        handle%p_work, c_n_iter, c_residual)
+                        pw, c_n_iter, c_residual)
     else
       status = fvm_petsc_solve_pressure(int(nc, c_int), int(handle%n_cells_global, c_int), int(handle%n_faces, c_int), &
                         handle%local_to_global, handle%face_owner, handle%face_neighbor_local, &
                         handle%face_neighbor_global, handle%skip_face, &
-                                        handle%diagonal, handle%rhs_work, handle%face_coeff, &
+                                        handle%diagonal, rw, handle%face_coeff, &
                         int(handle%reference_cell, c_int), c_max_iter, c_tol, c_atol, &
                         empty_rows, empty_vals, int(0, c_int), &
-                        handle%p_work, c_n_iter, c_residual)
+                        pw, c_n_iter, c_residual)
     end if
+    !$acc end host_data
+    if (dev) call fvm_petsc_set_io_on_device(0_c_int)
     if (status /= 0_c_int) then
       write(*,'(A,I0,A,I0,A,ES12.4)') 'pressure_solver_solve: PETSc solve failed status=', &
            int(status, ip), ' iter=', int(c_n_iter, ip), ' residual=', real(c_residual, rp)
       error stop 'pressure_solver_solve: PETSc solve failed'
     end if
 
-    p(1:nc) = real(handle%p_work(1:nc), rp)
+    if (dev) then
+      !$acc parallel loop present(p, pw)
+      do idx = 1, nc
+        p(idx) = real(pw(idx), rp)
+      end do
+      !$acc exit data delete(rw(1:nc), pw(1:nc))
+    else
+      p(1:nc) = real(handle%p_work(1:nc), rp)
+      if (host_sync) then
+        !$acc update device(p)
+      end if
+    end if
 
     if (present(n_iter)) n_iter = int(c_n_iter, ip)
     if (present(residual)) residual = real(c_residual, rp)
