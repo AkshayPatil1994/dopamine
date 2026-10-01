@@ -23,9 +23,17 @@ void fvm_petsc_set_io_on_device(int on) {
   g_io_on_device = on;
 }
 
-/* Whether this backend can take device pointers at all (needs the CUDA runtime for the copies). */
-int fvm_petsc_device_io_supported(void) {
+#ifdef FVM_HAVE_PETSC
+#include <petscksp.h>
 #if defined(PETSC_HAVE_CUDA)
+#include <cuda_runtime.h>
+#endif
+#endif
+
+/* Whether this backend can take device pointers at all (needs the CUDA runtime for the copies).
+ * Defined after the PETSc include: PETSC_HAVE_CUDA only exists once petscconf.h has been read. */
+int fvm_petsc_device_io_supported(void) {
+#if defined(FVM_HAVE_PETSC) && defined(PETSC_HAVE_CUDA)
   return 1;
 #else
   return 0;
@@ -33,10 +41,6 @@ int fvm_petsc_device_io_supported(void) {
 }
 
 #ifdef FVM_HAVE_PETSC
-#include <petscksp.h>
-#if defined(PETSC_HAVE_CUDA)
-#include <cuda_runtime.h>
-#endif
 
 typedef struct {
   int ready;
@@ -735,9 +739,13 @@ int fvm_petsc_solve_pressure(const int n_cells_local,
     } else {
       tmp_rhs = (double *) malloc(nbytes);
       tmp_sol = (double *) malloc(nbytes);
-      if (tmp_rhs == NULL || tmp_sol == NULL) return -15;
-      if (cudaMemcpy(tmp_rhs, rhs, nbytes, cudaMemcpyDefault) != cudaSuccess) return -15;
-      if (cudaMemcpy(tmp_sol, solution, nbytes, cudaMemcpyDefault) != cudaSuccess) return -25;
+      if (tmp_rhs == NULL || tmp_sol == NULL ||
+          cudaMemcpy(tmp_rhs, rhs, nbytes, cudaMemcpyDefault) != cudaSuccess ||
+          cudaMemcpy(tmp_sol, solution, nbytes, cudaMemcpyDefault) != cudaSuccess) {
+        free(tmp_rhs);
+        free(tmp_sol);
+        return -15;
+      }
       rhs = tmp_rhs;
       solution = tmp_sol;
     }

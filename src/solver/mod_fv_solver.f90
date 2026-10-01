@@ -717,7 +717,14 @@ contains
     call MPI_Allreduce(n_local, n_global, 1, MPI_INTEGER, MPI_SUM, self%mesh%comm, ierr)
 
     self%diag_interface = (n_global > 0)
+    ! The KE budget accumulates in the host array-of-structs advection loops only. Under OpenACC the
+    ! fields live on the device, so enabling it would route KEP/CDS through a host path that reads
+    ! stale data; the budget is a debug diagnostic, so it stays off in device builds.
+#ifdef _OPENACC
+    call advection_set_ke_budget(.false.)
+#else
     call advection_set_ke_budget(self%diag_interface)
+#endif
 
     if (self%mesh%rank == 0 .and. self%diag_interface) &
       write(*,'(A,I0,A)') ' [interface-diag] ', n_global, ' cells adjacent to a refinement interface'
@@ -1502,7 +1509,7 @@ contains
         U_face(c) = face_flux(c)
       end do
       self%u_face_ready = .true.
-      if (self%diag_interface) then
+      if (self%diag_interface .and. self%params%debug_diagnostics) then
         call solver_sync_host(self)
         call record_divergence_split(self, jno)
       end if
@@ -2892,8 +2899,10 @@ contains
     logical,         intent(in)    :: gpu_aware_mpi
 #ifdef _OPENACC
     if (self%on_device) return
+    if (self%params%p_max_iter <= 0) &
+      error stop 'solver_to_device: OpenACC builds need the pressure solver (p_max_iter > 0)'
     if (self%mesh%n_colors <= 0 .or. self%psolver%n_colors <= 0) &
-      error stop 'solver_to_device: face colouring is missing; the device kernels need it'
+      error stop 'solver_to_device: face colouring is missing (a rank with no faces?); the device kernels need it'
     call stage_static_on_device(self)
     !$acc enter data copyin(self%U, self%p, self%p_old, self%T, self%nu_sgs, self%U_bnd, self%p_bnd, &
     !$acc      self%phi_prev, self%phi_prev_bnd, self%T_bnd, self%tau_w_bnd, self%sem_fluc_bnd, &
@@ -3751,7 +3760,13 @@ contains
 
     if (.not. self%params%debug_diagnostics) return
 
+    ! The worst-cell report below runs on the host.
+    call solver_sync_host(self)
+
     if (self%mesh%rank == 0) then
+#ifdef _OPENACC
+      write(*,'(A)') ' [interface-diag] KE budget is not accumulated in device builds (values below are zero)'
+#endif
       write(*,'(A)') '--- Interface Diagnostics ---'
       write(*,'(A,1X,ES12.4)') 'KE production  smooth  ', glb(1)/denom
       write(*,'(A,1X,ES12.4)') 'KE production  refine  ', glb(2)/denom

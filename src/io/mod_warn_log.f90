@@ -92,11 +92,13 @@ contains
 
     if (log_rank == 0_ip .and. any(cnt_g > 0_ip)) then
       call ensure_open()
-      do i = 1, NWARN
-        if (cnt_g(i) > 0_ip) call write_line(step, time, i, cnt_g(i), aux_g(i))
-      end do
-      n_total = n_total + 1_ip
-      flush(unit_no)
+      if (is_open) then
+        do i = 1, NWARN
+          if (cnt_g(i) > 0_ip) call write_line(step, time, i, cnt_g(i), aux_g(i))
+        end do
+        n_total = n_total + 1_ip
+        flush(unit_no)
+      end if
     end if
 
     cnt = 0_ip
@@ -111,6 +113,7 @@ contains
     real(rp),     intent(in), optional :: time
     if (.not. is_init .or. log_rank /= 0_ip) return
     call ensure_open()
+    if (.not. is_open) return
     if (present(step) .and. present(time)) then
       write(unit_no, '(A,I8,A,ES11.4,2A,1X,A)') 'step ', step, '  t=', time, '  ', tag_in, trim(text)
     else
@@ -157,7 +160,6 @@ contains
          action='write', iostat=ios)
     if (ios /= 0) then
       write(*, '(A,A)') 'WARNING: cannot open warning log ', trim(log_file)
-      is_init = .false.
       return
     end if
     is_open = .true.

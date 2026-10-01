@@ -1,0 +1,59 @@
+! Regression case: as channel, but on a wall-graded mesh (bump 0.01) with refinement-interface faces, KEP advection.
+&dopamine_domain
+  mesh_file = 'mesh.msh'
+  mesh_type = 'gmsh'
+/
+&dopamine_numerics
+  advection_scheme = 'KEP'
+  time_integrator  = 'RK3W'
+  use_sgs          = .true.
+  sgs_model        = 'VREMAN'
+  dt               = 2.0e-3
+  t_end            = 100.0
+  nstep_max        = 20
+  cfl_max          = 0.5
+  adapt_dt         = .false.
+  p_tol            = 1.0e-10
+  p_max_iter       = 1000
+/
+&dopamine_physics
+  nu = 2.5316e-3
+  fx = 1.0
+/
+&dopamine_bc
+  n_patches = 6
+  patch_name(1) = 'bottom_wall'
+  patch_type(1) = 'wallModel'
+  patch_name(2) = 'top_wall'
+  patch_type(2) = 'wallModel'
+  patch_name(3) = 'periodic_x0'
+  patch_type(3) = 'periodic'
+  patch_name(4) = 'periodic_xL'
+  patch_type(4) = 'periodic'
+  patch_name(5) = 'periodic_y0'
+  patch_type(5) = 'periodic'
+  patch_name(6) = 'periodic_yL'
+  patch_type(6) = 'periodic'
+  patch_scalar_mode(1,1)  = 'dirichlet'
+  patch_scalar_value(1,1) = 1.0
+/
+&dopamine_initial_condition
+  ic_type = 'taylor_green'
+  ic_uref = 1.0
+  ic_lref = 1.0
+  noise_level = 0.0
+/
+&dopamine_scalars
+  n_scalars = 1
+  scalar_name(1) = 'tracer'
+  scalar_diffusivity(1) = 1.0e-3
+  scalar_pr_t(1) = 1.0
+  scalar_tvd_scheme = 'VANLEER_TVD'
+/
+&dopamine_output
+  prefix         = 'case'
+  write_interval = 100000
+/
+&dopamine_stats
+  solver_stats_frequency = 1
+/

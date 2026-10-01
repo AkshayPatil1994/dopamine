@@ -11,6 +11,7 @@ being restructured (e.g. the GPU port); they are not validation cases.
 | `rb` | 24x24x16 | Boussinesq buoyancy, fixed-temperature walls, van Leer TVD, least-squares gradients, rotational projection |
 | `duct` | 32x16x16 (4 x 1 x 1) | velocity inlet, fixed-pressure outlet, no-slip walls, CDS; the Dirichlet-pressure terms of the projection |
 | `dynsmag` | 32x16x16 (as `channel`) | Germano-Lilly dynamic Smagorinsky: test filter and the halo exchanges of its packed fields |
+| `graded` | 32x16x16, wall bump 0.01 | as `channel`, but the grading creates refinement-interface faces (interface diagnostics on); KEP advection must stay on the device path |
 
 Run everything through CTest from a build tree (meshes are generated with gmsh on first use):
 
