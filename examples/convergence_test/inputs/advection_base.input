@@ -1,0 +1,73 @@
+! DOPAMINE input - passive-scalar advection test (1D periodic bar).
+! Placeholders are substituted by run_advection.py.
+!
+! Uniform velocity U = 1 along x; the scalar (T, solved with boussinesq = .true. and
+! beta = 0, so it never feeds back on the flow) is advected once around the unit-length
+! periodic box and compared with the initial profile, which is the exact solution.
+! Diffusion and SGS are off so the only error is the advection scheme.
+
+&dopamine_domain
+  mesh_file = '__MESH_FILE__'
+  mesh_type = 'gmsh'
+/
+
+&dopamine_numerics
+  advection_scheme   = 'CENTRAL'
+  temperature_scheme = '__SCHEME__'
+  time_integrator    = 'RK3W'
+  use_sgs            = .false.
+  dt                 = __DT__
+  t_end              = __T_END__
+  adapt_dt           = .false.
+  cfl_max            = 100.0
+  p_tol              = 1.0e-10
+  p_max_iter         = 2000
+/
+
+&dopamine_physics
+  nu         = 0.0
+  alpha_T    = 0.0
+  beta       = 0.0
+  T_ref      = 0.0
+  boussinesq = .true.
+/
+
+&dopamine_bc
+  n_patches = 6
+  patch_name(1) = 'periodic_x0'
+  patch_type(1) = 'periodic'
+  patch_name(2) = 'periodic_xL'
+  patch_type(2) = 'periodic'
+  patch_name(3) = 'periodic_y0'
+  patch_type(3) = 'periodic'
+  patch_name(4) = 'periodic_yL'
+  patch_type(4) = 'periodic'
+  patch_name(5) = 'periodic_z0'
+  patch_type(5) = 'periodic'
+  patch_name(6) = 'periodic_zL'
+  patch_type(6) = 'periodic'
+/
+
+&dopamine_initial_condition
+  ic_type = '__IC__'
+  ic_uref = 1.0
+  ic_lref = 1.0
+/
+
+&dopamine_output
+  prefix         = 'adv'
+  write_interval = 999999
+/
+
+&dopamine_stats
+  solver_stats_frequency = 1000000
+/
+
+&dopamine_sampling_lines
+  n_lines = 1
+  line_name(1) = 'x'
+  line_p0(1,:) = __P0__
+  line_p1(1,:) = __P1__
+  line_npts(1) = __N__
+  line_write_frequency(1) = __NSTEPS__
+/
