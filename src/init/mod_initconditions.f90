@@ -72,6 +72,8 @@ contains
       end if
     case ('taylor_green', 'TaylorGreen', 'TAYLOR_GREEN')
       call initialize_taylor_green_ic(slv, uref)
+    case ('scalar_gauss', 'scalar_pulse')
+      call initialize_scalar_advection_ic(slv, uref, trim(ic_type))
     case ('linear', 'channel_linear')
       call initialize_channel_profile_ic(slv, uref, lref_eff, 'linear', wnd, xmin_g, xmax_g)
     case ('parabolic', 'channel_parabolic', 'poiseuille')
@@ -325,5 +327,45 @@ contains
       write(*, '(A,F10.5)')  ' TGV IC amplitude     :', u0
     end if
   end subroutine initialize_taylor_green_ic
+
+  !> Passive-scalar advection test: uniform streamwise velocity uref and a temperature profile
+  !> T = T_ref + f(x) along x on the periodic domain.
+  !>   'scalar_gauss' : Gaussian, centre 0.25 L, sigma 0.05 L (smooth; for order-of-accuracy tests)
+  !>   'scalar_pulse' : the same Gaussian plus a square pulse on [0.55, 0.75] L (for scheme comparison)
+  subroutine initialize_scalar_advection_ic(slv, uref, kind)
+    type(FVSolver),   intent(inout) :: slv
+    real(rp),         intent(in)    :: uref
+    character(len=*), intent(in)    :: kind
+
+    integer(ip) :: c
+    real(rp)    :: xmin_g(3), xmax_g(3), lx, s, d, f
+
+    call compute_domain_bounds(slv, xmin_g, xmax_g)
+    lx = max(xmax_g(1) - xmin_g(1), SMALL)
+
+    do c = 1, slv%mesh%n_cells
+      s = modulo(slv%mesh%cells(c)%centroid(1) - xmin_g(1), lx) / lx
+      d = s - 0.25_rp
+      d = d - anint(d)
+      f = exp(-0.5_rp * (d / 0.05_rp)**2)
+      if (trim(kind) == 'scalar_pulse') then
+        if (s >= 0.55_rp .and. s < 0.75_rp) f = f + 1.0_rp
+      end if
+      slv%U(1, c) = uref
+      slv%U(2, c) = 0.0_rp
+      slv%U(3, c) = 0.0_rp
+      slv%p(c)    = 0.0_rp
+      slv%T(c)    = slv%params%T_ref + f
+    end do
+
+    if (slv%mesh%n_ghost > 0) then
+      slv%U(:, slv%mesh%n_cells+1:slv%mesh%n_cells+slv%mesh%n_ghost) = 0.0_rp
+      slv%p(slv%mesh%n_cells+1:slv%mesh%n_cells+slv%mesh%n_ghost) = 0.0_rp
+      slv%T(slv%mesh%n_cells+1:slv%mesh%n_cells+slv%mesh%n_ghost) = slv%params%T_ref
+    end if
+    call slv%mesh%exchange_halos_state(slv%U, slv%p, slv%T)
+
+    if (slv%mesh%rank == 0) write(*, '(A,A,A,ES12.4)') ' IC: ', trim(kind), ', Uref = ', uref
+  end subroutine initialize_scalar_advection_ic
 
 end module mod_initconditions

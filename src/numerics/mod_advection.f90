@@ -425,6 +425,10 @@ contains
             nb_simple = -1
             if (f_bnd >= 1 .and. f_bnd <= nbnd) nb_simple = pneigh_soa(f_bnd)
           end if
+          ! periodic_neighbor is not always populated (single rank); without a neighbour the face
+          ! value below falls back to phi(o), which on the inflow side of the seam is the wrong cell.
+          ! nb_per was resolved above through the periodic pair, so use it.
+          if (nb_simple < 1) nb_simple = nb_per
 
           if (nb_simple >= 1 .and. nb_simple <= nc + msh%n_ghost) then
             if (f > n_int) then
@@ -441,6 +445,9 @@ contains
             end if
             grad_mean = gc * grad_phi(:, o) + (1.0_rp - gc) * grad_phi(:, nb_simple)
             phi_f = phi_f_plain + dot_product(grad_mean, epsilon)
+            ! d_on above is the raw centroid difference, a whole domain length across a periodic seam,
+            ! so eps is meaningless there; plain interpolation, as in the momentum path.
+            if (f > n_int) phi_f = phi_f_plain
             ! Fade the eps-correction out toward refinement interfaces; see refine_blend_weight.
             if (f <= n_int) then
               w_blend = refine_blend_weight(skew_soa(f))

@@ -523,6 +523,150 @@ Pressure solves are delegated to the PETSc-backed sparse operator path
 and face-coupling coefficients, and skip masks for invalid/degenerate faces;
 the backend then performs Krylov/PC solve using these assembled arrays.
 
+## Verification: Spatial Convergence
+
+The convergence suite in `examples/convergence_test/` measures the observed order of
+accuracy on the 3D Taylor-Green vortex (periodic $$[0,2\pi]^3$$, $$\nu = 0.01$$, plain
+`CENTRAL` advection, `RK3W`, no SGS model, pressure tolerance $$10^{-10}$$). The raw numbers
+are in [results.json]({{ site.baseurl }}/assets/convergence/results.json). To reproduce:
+
+```bash
+cd examples/convergence_test
+python3 run_convergence.py all --bin ../../build/dopamine
+python3 plot_convergence.py results/results.json --out ../../docs/assets/convergence
+```
+
+There is no closed-form solution of the 3D problem for $$t > 0$$, so two kinds of
+measurement are used: self-convergence on successive meshes, which needs no
+exact solution, and the analytic initial values $$E(0) = 1/8$$ and
+$$\varepsilon(0) = 0.75\,\nu$$. Temporal accuracy is discussed separately below.
+
+### Spatial order: second order
+
+![Spatial convergence]({{ site.baseurl }}/assets/convergence/spatial_convergence.png)
+
+Meshes are $$N^3$$ hexahedra with $$N = 8, 16, 32, 64$$, one fixed $$\Delta t = 4\times10^{-3}$$
+for all of them, so the time error is the same on every mesh and drops out of the
+differences. The `warped` family is the same mesh pushed through a smooth periodic
+coordinate map (maximum non-orthogonality about 10 degrees), which exercises the
+non-orthogonal corrections and least-squares gradients; its exact solution is unchanged.
+
+| Quantity | Family | Observed order (successive refinements) |
+|---|---|---|
+| $$\lvert E_N - E_{2N}\rvert$$ at $$t=1$$ | hex | 1.74, 2.13 |
+| $$\lvert E_N - E_{2N}\rvert$$ at $$t=1$$ | warped | 1.86, 2.17 |
+| $$\lvert\varepsilon_0 - 0.75\nu\rvert$$ (true error) | hex | 1.52, 1.87, 1.97 |
+| $$\lvert\varepsilon_0 - 0.75\nu\rvert$$ (true error) | warped | 1.52, 1.87, 1.97 |
+
+Both families approach the design second order as $$h \to 0$$. The coarsest meshes are
+pre-asymptotic (order 1.5 at $$N = 8 \to 16$$).
+
+### Discussion: temporal accuracy
+
+The Runge-Kutta stages are third order (shown with the model below), but the solver does not show third order in $$\Delta t$$ at
+a fixed mesh: the observed order is first, with an error that scales as $$\Delta t\,h^2$$. The
+measurements and their cause are given here. The corresponding
+[figure]({{ site.baseurl }}/assets/convergence/temporal_convergence.png) is produced by
+`plot_convergence.py`.
+
+Time steps are halved from $$0.2$$ to $$0.0016$$ at fixed $$t_{end} = 1$$ on $$16^3$$, $$32^3$$ and
+$$64^3$$ meshes (largest step limited to $$U\Delta t/h \le 0.9$$).
+
+| Mesh | Observed order of $$\lvert E(\Delta t) - E(\Delta t/2)\rvert$$ |
+|---|---|
+| $$16^3$$ | 0.89, 0.95, 0.97, 0.99, 0.99, 1.00 |
+| $$32^3$$ | 0.95, 0.97, 0.99, 0.99, 1.00 |
+| $$64^3$$ | 0.98, 0.99, 1.00, 1.00 |
+
+**The observed temporal order is 1, not the 3 of the Wray scheme.** This holds from
+$$\Delta t = 0.2$$ down to $$0.003$$ and is insensitive to the advection scheme, the
+rotational-projection switch, the gradient scheme and the pressure tolerance (checked on the
+$$16^3$$ mesh). In an inviscid run ($$\nu = 10^{-8}$$, panel b), where the exact answer is
+$$E = 1/8$$ for all time, the solver loses energy at a rate $$c(h)\,\Delta t$$, and $$c(h)$$
+falls by a factor of 4.4 and 4.1 for each halving of $$h$$ (panel c): the dominant time-step
+error is $$O(\Delta t\,h^2)$$. The scheme is consistent (the term vanishes under joint
+refinement), but refining $$\Delta t$$ alone on a fixed mesh gains only a factor of 2 per halving.
+
+#### Source of the $$O(\Delta t\,h^2)$$ term
+
+`examples/convergence_test/projection_model.py` is a small numpy model of one RK3W step
+(cell velocities plus a separate face flux, the stage weights above, wide-gradient
+pre-correction, Rhie-Chow face flux, compact Poisson solve, wide-gradient velocity
+correction). It reproduces the solver's inviscid energy loss to 0.03% (5.024e-6 against
+5.025e-6 at $$N=16$$, $$\Delta t=0.01$$), and the same ablation run in the solver gives the same
+numbers. The findings:
+
+1. The face flux is $$q^* = \mathrm{interp}(\hat{\mathbf u}) - \delta\,\nabla_c p^{old}$$ (compact
+   gradient) because the Rhie-Chow term adds back exactly the cell gradient that the
+   pre-correction removed. The Poisson solve therefore does not depend on $$p^{old}$$ at all
+   (switching the pre-correction off changes nothing), and the projection of the flux is
+   exact for the compact operator $$L_c$$.
+2. The cell velocity is corrected with the *wide* (cell-centred) gradient $$G_w$$ of the same
+   $$\varphi$$. The adjoint of $$G_w$$ is minus the interpolate-then-difference operator, not
+   $$L_c$$, so the cell-velocity update is not an orthogonal projection. Per stage it changes the
+   energy by $$-\delta_k^2(a - b/2)$$ with $$a = \langle|\nabla_c p|^2\rangle$$ and
+   $$b = \langle|G_w p|^2\rangle$$, where the consistent value is $$-\delta_k^2 b/2$$. The
+   difference $$a - b = O(h^2)$$ is dissipated, giving a loss rate of about
+   $$\tfrac12\sum_k\gamma_k^2\,\Delta t\,(a-b)$$ (within 10% of the measured value on the
+   $$16^3$$ and $$32^3$$ meshes).
+
+| Variant (inviscid TGV, $$t=0.2$$, $$N=16$$) | Energy loss, $$\Delta t = 0.01$$ | Order in $$\Delta t$$ |
+|---|---|---|
+| as implemented | 5.0e-6 | 1.0 |
+| Rhie-Chow term removed | 3.6e-8 (also 3.7e-8 in the solver) | 2.0 |
+| cell velocity projected orthogonally | 4.0e-11 | 3.1 |
+
+Making the cell-velocity projection orthogonal restores third order in $$\Delta t$$ in the
+model, so the Runge-Kutta stages themselves are third order and the limit is the
+projection. Removing the Rhie-Chow term has the same effect but is not an option, since it
+suppresses pressure-velocity decoupling. The model is a uniform Cartesian grid; on general
+meshes the same mismatch exists but its size was not measured.
+
+## Verification: Advection Schemes
+
+The scalar advection schemes (`temperature_scheme`: `CDS`, `QUICK`, `KOREN_TVD`, `VANLEER_TVD`)
+are compared on a periodic bar of unit length with uniform velocity $$U = 1$$, so the exact
+solution after one revolution ($$t = 1$$) is the initial profile. Diffusion and SGS are off, the
+temperature is a passive scalar (`boussinesq = .true.`, `beta = 0`), time stepping is `RK3W` at
+CFL 0.2, and the mesh is $$N \times 4 \times 4$$ cubic hexahedra. The initial profile is a Gaussian
+(centre $$0.25$$, $$\sigma = 0.05$$), optionally with a square pulse on $$[0.55, 0.75]$$
+(`ic_type = 'scalar_gauss'` and `'scalar_pulse'`). To reproduce:
+
+```bash
+cd examples/convergence_test
+python3 run_advection.py --bin ../../build/dopamine
+python3 plot_advection.py results/advection.json --out ../../docs/assets/convergence
+```
+
+![Advection schemes]({{ site.baseurl }}/assets/convergence/advection_schemes.png)
+
+With 100 cells the schemes behave as their construction predicts. The raw numbers are in
+[advection.json]({{ site.baseurl }}/assets/convergence/advection.json).
+
+| Scheme | Final min / max (exact: 0 / 1 for the square pulse, Gaussian peak 1) | Character |
+|---|---|---|
+| `CDS` | -0.27 / 1.32 | no dissipation; dispersive oscillations around both features |
+| `QUICK` | -0.14 / 1.14 | much less dispersion, but over- and undershoots at the pulse edges |
+| `KOREN_TVD` | 0.00 / 1.00 | bounded, no oscillations; smears the pulse and clips the Gaussian peak to 0.87 |
+| `VANLEER_TVD` | 0.00 / 1.00 | bounded; slightly more smearing than Koren |
+
+![Advection convergence]({{ site.baseurl }}/assets/convergence/advection_convergence.png)
+
+For the smooth Gaussian ($$N = 25$$ to $$400$$) the observed orders over the last refinement are:
+
+| Scheme | $$L_2$$ order | $$L_\infty$$ order |
+|---|---|---|
+| `CDS` | 1.99 | 2.03 |
+| `QUICK` | 2.09 | 2.14 |
+| `KOREN_TVD` | 1.61 | 1.32 |
+| `VANLEER_TVD` | 1.73 | 1.42 |
+
+`CDS` is second order as designed. `QUICK` also converges at second order here, not the third
+order of its one-dimensional finite-difference form. The TVD schemes are between first and
+second order, which is expected: the limiter reverts to first order at the Gaussian's extremum,
+and this loss is largest in the maximum norm. These results are for the scalar path only; the
+momentum advection schemes use separate code and are covered by the Taylor-Green study above.
+
 ## Practical Interpretation for Users
 
 For current defaults and updated implementation:
