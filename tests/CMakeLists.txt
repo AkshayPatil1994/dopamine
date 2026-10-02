@@ -20,3 +20,35 @@ foreach(_case tgv channel rb duct dynsmag graded)
       TIMEOUT 900)
   endforeach()
 endforeach()
+
+# Unit tests (built on demand: `cmake --build build --target test_sem_inflow`, run with `ctest -L unit`).
+add_executable(test_sem_inflow unit/test_sem_inflow.f90)
+target_link_options(test_sem_inflow PRIVATE -Wl,--no-as-needed)
+target_link_libraries(test_sem_inflow PRIVATE dopamine_lib MPI::MPI_Fortran MPI::MPI_C dl)
+add_test(NAME unit_sem_inflow COMMAND test_sem_inflow)
+set_tests_properties(unit_sem_inflow PROPERTIES LABELS unit TIMEOUT 300)
+
+add_executable(test_inflow_db unit/test_inflow_db.f90)
+target_link_options(test_inflow_db PRIVATE -Wl,--no-as-needed)
+target_link_libraries(test_inflow_db PRIVATE dopamine_lib MPI::MPI_Fortran MPI::MPI_C dl)
+add_test(NAME unit_inflow_db COMMAND test_inflow_db)
+set_tests_properties(unit_inflow_db PROPERTIES LABELS unit TIMEOUT 120)
+
+add_executable(test_inflow_gen unit/test_inflow_gen.f90)
+target_link_options(test_inflow_gen PRIVATE -Wl,--no-as-needed)
+target_link_libraries(test_inflow_gen PRIVATE dopamine_lib MPI::MPI_Fortran MPI::MPI_C dl)
+add_test(NAME unit_inflow_gen COMMAND test_inflow_gen)
+set_tests_properties(unit_inflow_gen PROPERTIES LABELS unit TIMEOUT 300)
+
+add_executable(test_inflow_planes unit/test_inflow_planes.f90)
+target_link_options(test_inflow_planes PRIVATE -Wl,--no-as-needed)
+target_link_libraries(test_inflow_planes PRIVATE dopamine_lib MPI::MPI_Fortran MPI::MPI_C dl)
+add_test(NAME unit_inflow_planes COMMAND test_inflow_planes)
+set_tests_properties(unit_inflow_planes PROPERTIES LABELS unit TIMEOUT 600)
+
+# End-to-end inflow-plane chain (needs gmsh): export grid -> generate -> replay, stop checks,
+# restart, precursor recorder. `ctest -L inflow`.
+add_test(NAME inflow_chain COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/inflow/chain.sh" "${CMAKE_BINARY_DIR}/inflow_chain")
+set_tests_properties(inflow_chain PROPERTIES
+  ENVIRONMENT "DOPAMINE_BIN=$<TARGET_FILE:dopamine>;DOPAMINE_GEN=$<TARGET_FILE:dopamine-inflow-gen>;MPIRUN=${MPIEXEC_EXECUTABLE}"
+  LABELS inflow PROCESSORS 2 TIMEOUT 1200)

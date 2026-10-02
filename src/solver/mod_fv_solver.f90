@@ -16,6 +16,8 @@ module mod_fv_solver
   use mod_abl_types
   use mod_abl_profiles
   use mod_sem_inflow
+  use mod_inflow_planes
+  use mod_inflow_gen, only: inflow_write_grid_file
   use mod_abl_weather
   use mod_abl_wall
   use mod_pressure_solver
@@ -131,6 +133,8 @@ module mod_fv_solver
     ! -- ABL module state
     type(ABLConfig)   :: abl_config
     type(SEMState)    :: sem_state
+    type(InflowPlanes) :: inflow_planes   ! database-driven inlet fluctuation (inflow_source = 'planes')
+    logical           :: inflow_planes_on = .false.
     type(NudgingData) :: nudging_data
 
     ! -- gradients (recomputed each step / stage; pressure gradient is built
@@ -250,6 +254,7 @@ module mod_fv_solver
 
   contains
     procedure :: init         => solver_init
+    procedure :: refresh_inflow => solver_refresh_inflow
     procedure :: advance      => solver_advance
     procedure :: project_once => solver_project_once
     procedure :: projection_idempotency => solver_projection_idempotency
@@ -371,14 +376,16 @@ contains
   end subroutine copy_solver_params
 
   ! Initialisation
-  subroutine solver_init(self, msh, params, bc_configs, abl_cfg)
+  subroutine solver_init(self, msh, params, bc_configs, abl_cfg, inflow_cfg)
     class(FVSolver),    intent(inout) :: self
     type(Mesh), target, intent(inout) :: msh
     type(solver_params_t), intent(in) :: params
     type(BCConfig),    intent(in)     :: bc_configs(:)
     type(ABLConfig),   intent(in), optional :: abl_cfg
+    type(InflowConfig), intent(in), optional :: inflow_cfg
 
     integer(ip) :: nc, ng, nbnd, s, c
+    logical     :: want_planes
     integer(ip) :: q_out, f_loc_out, f_bnd_out, f_glob_out, ocell_out
 
     self%mesh    => msh
@@ -552,12 +559,21 @@ contains
       allocate(self%L_bnd(nbnd), source=0.0_rp)
     end if
 
-    if (self%abl_config%use_sem) then
+    want_planes = .false.
+    if (present(inflow_cfg)) then
+      if (len_trim(inflow_cfg%export_grid) > 0) call export_inflow_grid(self, inflow_cfg%export_grid)
+      want_planes = (trim(inflow_cfg%source) == 'planes')
+    end if
+
+    if (want_planes) then
+      call setup_inflow_planes(self, inflow_cfg)
+      call update_sem_inflow(self, self%time)
+    else if (self%abl_config%use_sem) then
       ! sem_init derives the inlet frame from the ABL inlet patch and reduces it across ranks.
       call sem_init(self%sem_state, self%abl_config, self%mesh)
-      ! A prescribed profile also supplies the inlet mean, not just the stresses.
-      if (self%sem_state%has_profile) allocate(self%abl_mean_bnd(3, nbnd), source=0.0_rp)
-      call update_sem_inflow(self)
+      ! A prescribed profile or power-law mean also supplies the inlet mean, not just the stresses.
+      if (self%sem_state%override_mean) allocate(self%abl_mean_bnd(3, nbnd), source=0.0_rp)
+      call update_sem_inflow(self, self%time)
     end if
 
     if (self%abl_config%use_nudging) then
@@ -1579,9 +1595,9 @@ contains
 
     self%time = time_n
 
-    if (self%abl_config%use_sem) then
-      call sem_advance(self%sem_state, dt)
-      call update_sem_inflow(self)
+    if (self%abl_config%use_sem .or. self%inflow_planes_on) then
+      if (.not. self%inflow_planes_on) call sem_advance(self%sem_state, self%abl_config, dt)
+      call update_sem_inflow(self, time_n + dt)
       !$acc update device(self%sem_fluc_bnd) if(self%on_device)
       if (allocated(self%abl_mean_bnd)) then
         !$acc update device(self%abl_mean_bnd) if(self%on_device)
@@ -2042,26 +2058,42 @@ contains
     end do
   end subroutine apply_all_bc_subset
 
-  !> Refresh the SEM inflow fluctuation on every ABL inlet face.
+  !> Refresh the inflow fluctuation (and, when prescribed, the mean) on every ABL inlet face for
+  !> physical time t. The source is the online SEM or the inflow-plane database.
   !> The patch-mean normal component is removed so the inlet mass flux is unchanged.
-  subroutine update_sem_inflow(self)
+  subroutine update_sem_inflow(self, t)
     class(FVSolver), intent(inout) :: self
+    real(rp),        intent(in)    :: t
 
-    integer(ip) :: p, f, f_bnd, f_global, ierr
-    real(rp)    :: u_mean(3), u_fluc(3), buf(2), gbuf(2), delta
+    integer(ip) :: p, f, f_bnd, f_global, ierr, kf
+    real(rp)    :: u_mean(3), u_fluc(3), buf(2), gbuf(2), delta, R(6), L(3)
+    real(rp), allocatable :: fl_planes(:,:)
 
     if (.not. allocated(self%sem_fluc_bnd)) return
     self%sem_fluc_bnd = 0.0_rp
-    if (.not. self%sem_state%initialized) return
+    if (.not. self%inflow_planes_on .and. .not. self%sem_state%initialized) return
+
+    if (self%inflow_planes_on) then
+      allocate(fl_planes(3, self%inflow_planes%nf))
+      if (self%inflow_planes%nf > 0) call inflow_planes_eval(self%inflow_planes, t, fl_planes)
+    end if
 
     buf = 0.0_rp
+    kf = 0
     do p = 1, self%mesh%n_patches
       if (self%mesh%patches(p)%bc_id /= BC_ABL_INLET) cycle
       do f = 1, self%mesh%patches(p)%n_faces
         f_bnd    = self%mesh%patches(p)%start_face + f - 1
         f_global = self%mesh%n_int_faces + f_bnd
-        call sem_velocity_at_face(self%sem_state, self%abl_config, &
-                                  self%mesh%faces(f_global)%centre, u_mean, u_fluc)
+        if (self%inflow_planes_on) then
+          kf = kf + 1
+          if (self%inflow_planes%f_bnd(kf) /= f_bnd) error stop 'update_inflow: inlet face order changed since binding'
+          u_fluc = fl_planes(:, kf)
+          call sem_target_at(self%sem_state, self%abl_config, self%mesh%faces(f_global)%centre(3), u_mean, R, L)
+        else
+          call sem_velocity_at_face(self%sem_state, self%abl_config, &
+                                    self%mesh%faces(f_global)%centre, u_mean, u_fluc)
+        end if
         self%sem_fluc_bnd(:, f_bnd) = u_fluc
         if (allocated(self%abl_mean_bnd)) self%abl_mean_bnd(:, f_bnd) = u_mean
         buf(1) = buf(1) + dot_product(u_fluc, self%mesh%faces(f_global)%sf)
@@ -2083,6 +2115,121 @@ contains
       end do
     end do
   end subroutine update_sem_inflow
+
+  !> Open the inflow-plane database and map it onto this rank's ABL inlet faces. Stops unless the
+  !> domain is periodic in the spanwise direction, which the replay (spanwise shifts) relies on.
+  subroutine setup_inflow_planes(self, icfg)
+    class(FVSolver),    intent(inout) :: self
+    type(InflowConfig), intent(in)    :: icfg
+
+    logical     :: found, ok
+    integer(ip) :: p, f, nf, k, nbnd, f_bnd, f_global
+    real(rp)    :: W
+    real(rp), allocatable :: xf(:,:)
+    integer(ip), allocatable :: fb(:)
+
+    nbnd = self%mesh%n_bnd_faces
+    call sem_init_targets(self%sem_state, self%abl_config, self%mesh, found)
+    if (.not. found) error stop "inflow_source = 'planes' needs an ablInlet patch"
+    call inflow_check_lateral_periodic(self%mesh, self%sem_state%t1, W, ok)
+    if (.not. ok) then
+      if (self%mesh%rank == 0) then
+        write(*,'(A)') 'ERROR: inflow_source = "planes" needs the domain to be periodic in the spanwise direction'
+        write(*,'(A)') '       (paired periodic patches with normals +-t1 across the ablInlet plane); none were found.'
+      end if
+      error stop 'inflow planes: spanwise periodicity required'
+    end if
+
+    nf = 0
+    do p = 1, self%mesh%n_patches
+      if (self%mesh%patches(p)%bc_id == BC_ABL_INLET) nf = nf + self%mesh%patches(p)%n_faces
+    end do
+    allocate(xf(3, nf), fb(nf))
+    k = 0
+    do p = 1, self%mesh%n_patches
+      if (self%mesh%patches(p)%bc_id /= BC_ABL_INLET) cycle
+      do f = 1, self%mesh%patches(p)%n_faces
+        k = k + 1
+        f_bnd = self%mesh%patches(p)%start_face + f - 1
+        f_global = self%mesh%n_int_faces + f_bnd
+        xf(:, k) = self%mesh%faces(f_global)%centre
+        fb(k) = f_bnd
+      end do
+    end do
+
+    call inflow_planes_open(self%inflow_planes, icfg, self%abl_config, self%mesh%rank)
+    call inflow_planes_bind(self%inflow_planes, xf, fb, self%sem_state%n_in, self%sem_state%t1, W, self%mesh%rank)
+    self%inflow_planes_on = .true.
+    if (self%sem_state%override_mean) allocate(self%abl_mean_bnd(3, nbnd), source=0.0_rp)
+  end subroutine setup_inflow_planes
+
+  !> Write the inlet plane grid (uniform spanwise nodes, distinct heights) in the format read by
+  !> dopamine-inflow-gen, so a database can be generated on exactly these face positions, then stop.
+  subroutine export_inflow_grid(self, filename)
+    class(FVSolver),  intent(inout) :: self
+    character(len=*), intent(in)    :: filename
+
+    type(SEMState) :: st
+    logical     :: found, ok
+    integer(ip) :: p, f, fg, nl, i, j, ierr, ny
+    real(rp)    :: W, y0, dy, zscale
+    real(rp), allocatable :: al(:), zl(:), ua(:), uz(:)
+
+    call sem_init_targets(st, self%abl_config, self%mesh, found)
+    if (.not. found) error stop 'inflow_export_grid needs an ablInlet patch'
+    call inflow_check_lateral_periodic(self%mesh, st%t1, W, ok)
+    if (.not. ok) error stop 'inflow_export_grid: the domain is not periodic in the spanwise direction'
+
+    nl = 0
+    do p = 1, self%mesh%n_patches
+      if (self%mesh%patches(p)%bc_id == BC_ABL_INLET) nl = nl + self%mesh%patches(p)%n_faces
+    end do
+    allocate(al(nl), zl(nl))
+    i = 0
+    do p = 1, self%mesh%n_patches
+      if (self%mesh%patches(p)%bc_id /= BC_ABL_INLET) cycle
+      do f = 1, self%mesh%patches(p)%n_faces
+        i = i + 1
+        fg = self%mesh%n_int_faces + self%mesh%patches(p)%start_face + f - 1
+        al(i) = dot_product(self%mesh%faces(fg)%centre, st%t1)
+        zl(i) = self%mesh%faces(fg)%centre(3)
+      end do
+    end do
+    zscale = 1.0_rp
+    if (nl > 0) zscale = max(maxval(abs(zl)), 1.0_rp)
+    call MPI_Allreduce(MPI_IN_PLACE, zscale, 1, MPI_DOUBLE_PRECISION, MPI_MAX, self%mesh%comm, ierr)
+    call inflow_unique_sorted_global(self%mesh%comm, al, 1.0e-9_rp * W, ua)
+    call inflow_unique_sorted_global(self%mesh%comm, zl, 1.0e-9_rp * zscale, uz)
+    ny = size(ua)
+
+    if (self%mesh%rank == 0) then
+      y0 = ua(1); dy = W / real(ny, rp)
+      do j = 1, ny
+        if (abs(ua(j) - (y0 + real(j - 1, rp) * dy)) > 1.0e-6_rp * dy) then
+          write(*,'(A,I0,A,ES11.4,A)') 'ERROR: inlet spanwise nodes are not uniform (node ', j, ' is off by ', &
+            ua(j) - (y0 + real(j - 1, rp) * dy), ' m).'
+          error stop 'inflow_export_grid: the inlet must be uniformly spaced across the periodic span'
+        end if
+      end do
+      call inflow_write_grid_file(trim(filename), W, y0, int(ny, ip), st%n_in, uz)
+      write(*,'(A,I0,A,I0,A,A)') ' Inflow grid exported: ', ny, ' spanwise nodes x ', size(uz), ' heights -> ', trim(filename)
+      write(*,'(A)') ' Use it as gen_grid_file in dopamine-inflow-gen; stopping.'
+    end if
+    call MPI_Barrier(self%mesh%comm, ierr)
+    call MPI_Finalize(ierr)
+    stop
+  end subroutine export_inflow_grid
+
+  !> Re-evaluate the inflow at the solver's current time; used after a restart restores the clock.
+  subroutine solver_refresh_inflow(self)
+    class(FVSolver), intent(inout) :: self
+    if (.not. self%inflow_planes_on) return
+    call update_sem_inflow(self, self%time)
+    !$acc update device(self%sem_fluc_bnd) if(self%on_device)
+    if (allocated(self%abl_mean_bnd)) then
+      !$acc update device(self%abl_mean_bnd) if(self%on_device)
+    end if
+  end subroutine solver_refresh_inflow
 
   !> Add the wall-model traction to H_U as an acceleration (thin-wall approximation).
   !> In H rather than applied post-predictor so it carries the RK3 alpha/beta weighting.
@@ -4040,6 +4187,9 @@ contains
     if (allocated(self%L_bnd))                 deallocate(self%L_bnd)
     if (allocated(self%sem_state%pos))         deallocate(self%sem_state%pos)
     if (allocated(self%sem_state%amp))         deallocate(self%sem_state%amp)
+    if (allocated(self%sem_state%sig))         deallocate(self%sem_state%sig)
+    if (allocated(self%sem_state%uconv))       deallocate(self%sem_state%uconv)
+    if (self%inflow_planes_on) call inflow_planes_close(self%inflow_planes)
     call vreman_free()
     call dynamic_smagorinsky_free()
     call wall_model_free()

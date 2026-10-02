@@ -716,7 +716,7 @@ In the input file, set the following in `&dopamine_abl`:
   wind_dir_deg = 270.0                ! Wind direction (meteorological convention)
   use_sem = .true.                    ! Enable Synthetic Eddy inflow
   n_eddies = 500                      ! Number of synthetic eddies
-  sem_sigma = 0.0                     ! Eddy length scale [m]; 0 = auto (0.1*z_ref)
+  sem_sigma = 0.0                     ! Streamwise integral length scale Lx at z_ref [m]; 0 = auto
   use_nudging = .false.               ! Enable large-scale relaxation
   nudging_file = ''                   ! Path to weather profile (CSV/netCDF)
   nudging_tau = 1800.0                ! Relaxation timescale [s]
@@ -800,79 +800,233 @@ resolve distinct surfaces as separate mesh patches.
 
 When `use_sem = .true.`:
 
-- SEM generates $$N_e$$ eddies (default 500) in a recycle box upstream of inlet
-- Eddies are convected downstream and create anisotropic turbulent fluctuations
-- Target Reynolds stress anisotropy matches ABL log-layer profiles
-- Eddy length scale $$\sigma$$ defaults to $$0.1 \times$$ `z_ref` (override with `sem_sigma`)
+- SEM generates `n_eddies` **divergence-free** eddies (default 500) in a recycle box upstream of the inlet
+- Each eddy is the curl of a vector potential, so $$\nabla\cdot\mathbf{u}'=0$$ holds exactly
+  for the field it builds, not only on average; see the theory section for the construction
+- Eddy sizes follow integral length scales that can vary with height and differ by direction
+- The inflow is described the way wind-tunnel data is: a mean profile plus turbulence intensities
+  (or Reynolds stresses), either from a table or from a few namelist laws
+- Eddies are convected at the local mean speed and recycled when they leave the box
 
 **Usage notes:**
 - Apply SEM only to inlet patches; other BCs are unaffected
 - SEM injects velocity fluctuations only; it does not require `boussinesq = .true.`
-- Recycle box depth is estimated from mesh bounds automatically
-- Eddy recycling is not enabled in the current SEM path
+- The recycle box is sized from the inlet extent and the largest eddy automatically
+- At startup, rank 0 prints the eddy density, and warns if the targets are not realisable
+  with the chosen length scales or if `n_eddies` is too low
 
-#### Prescribed Inflow Profiles
+#### Inputs: mean profile, intensities and length scales
 
-By default SEM builds its own mean profile (neutral log law from `u_ref`,
-`z_ref`, `z0_m`) and its own stresses (Panofsky–Dutton ratios
-$$\sigma_u/u_* = 2.4$$, $$\sigma_v/u_* = 1.9$$, $$\sigma_w/u_* = 1.25$$, constant with
-height, no shear stress). To drive the inflow from measured, wind-tunnel or
-WRF-derived data instead, point `sem_profile_file` at a CSV:
+Three ways to specify the inflow, in order of precedence.
+
+**1. A table** (`sem_profile_file`, `sem_profile_format`). Rows need not be sorted; values are
+interpolated linearly in `z` and clamped outside the table, so extend it past the domain top.
+
+| `sem_profile_format` | columns | frame |
+|---|---|---|
+| `'ti'` | `z U Iu Iv Iw [rho_uw [Lx [Ly [Lz]]]]` | wind-aligned |
+| `'stress'` (default), 6 col | `z U uu vv ww uw` | wind-aligned |
+| `'stress'`, 10 col | `z U V W uu vv ww uv uw vw` | global axes |
+
+Either `stress` layout may be followed by three length columns `Lx Ly Lz`
+(9 and 13 columns). The `ti` layout is the wind-tunnel one:
+$$I_u=\sigma_u/U$$ etc. are turbulence intensities relative to the local mean speed, and
+`rho_uw` is the correlation coefficient $$\overline{u'w'}/(\sigma_u\sigma_w)$$, typically
+$$-0.1$$ to $$-0.35$$ in the surface layer.
+
+```
+# z     U      Iu    Iv     Iw    rho_uw   Lx
+ 0.5   4.0   0.30  0.22   0.15   -0.30    2.0
+10.0   7.1   0.19  0.14   0.095  -0.30    5.5
+60.0  12.0   0.10  0.075  0.05   -0.30   20.0
+```
+
+A missing `rho_uw` uses `sem_rho_uw`; missing lengths use the model below. With a table the
+wind direction comes from `wind_dir_deg` (`ti` and 6-column `stress`) or from the
+file itself (10/13-column `stress`, where the axes are global and lengths are along x, y, z).
+
+**2. Namelist laws** (no file; set `sem_Iu_ref > 0`):
 
 ```fortran
 &dopamine_abl
   use_sem = .true.
-  sem_profile_file = 'inflow_profiles.csv'
+  u_ref = 10.0    z_ref = 100.0    z0_m = 0.03
+  sem_mean_law = 'power'       ! or 'log' (default)
+  sem_alpha    = 0.2           ! U = u_ref (z/z_ref)^alpha
+  sem_Iu_ref   = 0.15          ! Iu at z_ref; decays like ln(z_ref/z0)/ln(z/z0) below it
+  sem_Iv_ratio = 0.75          ! Iv/Iu
+  sem_Iw_ratio = 0.5           ! Iw/Iu
+  sem_rho_uw   = -0.3          ! u'w' correlation coefficient
 /
 ```
 
-Two layouts are accepted, chosen automatically from the column count.
-**Six columns**, wind-aligned — the common case when you have a target profile
-and turbulence intensities:
+Intensity is evaluated no lower than $$10 z_0$$, where the log law stops being meaningful.
 
-```
-# z      U     uu     vv     ww     uw
-10.0   5.20  1.020  0.560  0.290  -0.185
-20.0   6.05  0.910  0.500  0.262  -0.170
-...
-```
+**3. Panofsky–Dutton defaults** (neither of the above): neutral log law and
+$$\sigma_{u,v,w}/u_* = 2.4,\,1.9,\,1.25$$ with $$\overline{u'w'}=-u_*^2$$. The momentum flux was zero in
+earlier versions, so the shear stress had to regenerate over fetch; it is now present at the inlet.
 
-`U` is a speed along `wind_dir_deg`, and the stresses are streamwise, lateral
-and vertical; both are rotated into the wind direction together.
+**Length scales** apply to all three routes (a table's own `Lx Ly Lz` columns win):
 
-**Ten columns**, global axes — for data already in domain coordinates:
-
-```
-# z     U     V     W     uu     vv     ww     uv     uw     vw
-10.0  5.20  0.31  0.00  1.020  0.560  0.290  0.041  -0.185  0.012
+```fortran
+  sem_sigma      = 40.0     ! Lx at z_ref [m]; 0 = 0.05 * smaller inlet span
+  sem_L_exponent = 0.3      ! Lx(z) = sem_sigma * (z/z_ref)^exponent; 0 = same at all heights
+  sem_Ly_ratio   = 0.5      ! lateral  length / Lx
+  sem_Lz_ratio   = 0.35     ! vertical length / Lx
+  sem_L_min      = 0.0      ! floor on every length [m]; set to a few grid cells
 ```
 
-Here `wind_dir_deg` is *not* applied; the file defines the direction.
+Wind-tunnel integral scales follow roughly a power law in height, so
+`sem_L_exponent` of 0.2–0.4 is typical. $$L_x$$ is the streamwise integral scale; the
+semi-axes of the eddy kernel are $$1.678\,L_i$$. Keep $$L_y, L_z < L_x$$ (eddies elongated
+in the flow direction): isotropic or flow-flattened eddies cannot reproduce
+$$\overline{u'u'} > \overline{v'v'}+\overline{w'w'}$$ exactly, and the setup warns if the chosen
+scales prevent the stresses being matched.
 
-Conventions:
+`sem_seed` changes the random sequence (0 = built-in seed) for ensemble runs; every rank
+uses the same sequence, so the field is identical for any rank count.
 
-- Stresses are kinematic, m²/s² (the solver carries no density).
-- Rows need not be sorted; they are ordered by height on read.
-- Values are interpolated linearly in `z` and **clamped** outside the table, so
-  extend the table to at least the domain top or the upper region inherits the
-  last row.
-- `uw` is the momentum flux and is the component that matters most. Supplying it
-  is the main reason to use this path: the analytic default sets $$\overline{u'w'}=0$$,
-  so the shear stress has to regenerate over fetch.
-- A non-positive-definite tensor is clipped rather than aborting, so a noisy
-  measured table will still run — check the profile if the realised stresses
-  look low.
+**Choosing `n_eddies`.** Fluctuation statistics are unbiased for any count, but the field
+becomes intermittent when too few eddies overlap. The setup prints `n_sigma`, the number of
+eddies per kernel volume $$\sigma_x\sigma_y\sigma_z$$, and warns below 1. Because eddy density rises
+as $$1/\sigma^3$$, small scales near the wall dominate the count: a power law with a low
+`sem_L_min`, or a fine inlet, needs many more eddies than the default 500.
+Cost is $$\mathcal{O}(N_{faces}\,N_e)$$ per step.
 
-The prescribed mean **replaces** the analytic log law at `ablInlet` faces, so
-`u_ref`, `z_ref` and `z0_m` no longer affect the inlet once a profile is loaded.
-They still set the MOST wall model, which is a separate consumer.
+**Mean profile.** A table or `sem_mean_law = 'power'` **replaces** the analytic log law at
+`ablInlet` faces, so `u_ref`, `z_ref` and `z0_m` then no longer set the inlet mean. They
+still set the MOST wall model, which is a separate consumer.
 
-The mean profile is imposed exactly. The Reynolds stresses are matched in the
-statistical sense: fluctuations are built by applying the Cholesky factor of the
-target tensor to a unit-variance eddy field, so the realised stresses approach
-the target as the eddy count rises and the sample lengthens. Expect a few
-percent scatter with `n_eddies = 1000`, and note the pressure projection adjusts
-the field immediately downstream of the inlet plane.
+**What is and is not exact.** The mean profile is imposed exactly. The fluctuation is
+divergence-free as an analytic field in 3D; the stresses are matched in the statistical
+sense and approach the target as sampling lengthens (a few percent at `n_sigma` of 1–3).
+The per-step uniform flux correction at the inlet remains, and the pressure projection still
+adjusts the field in the first cells downstream of the inlet plane. The heights are taken as
+`z` of the face centre, so terrain-following meshes need ground-relative heights in the table.
+
+The generator is checked by `tests/unit/test_sem_inflow.f90`
+(`cmake --build build --target test_sem_inflow && ctest --test-dir build -L unit`): divergence
+convergence, mean/intensity/shear-stress/length-scale recovery against the targets at four
+heights, the stress map, table parsing and the namelist laws.
+
+### Inflow-plane databases (precursor and successor)
+
+Instead of running the eddies online, the inflow can be **pre-computed** into a file of
+spanwise-periodic fluctuation planes and replayed by the solver. The same file format is written
+by two producers and read by one consumer:
+
+```
+ dopamine-inflow-gen (SEM) ──┐
+                             ├─►  planes.nc  ──►  successor run: inflow_source = 'planes'
+ precursor run (recorder) ───┘
+```
+
+The database holds the **fluctuation only** (mean removed). The successor takes its mean from the
+usual `&dopamine_abl` mean-profile options (`sem_profile_file`, `sem_mean_law`).
+The inlet must be periodic in the spanwise direction; the run stops otherwise.
+
+#### 1. Generate planes from the SEM
+
+`dopamine-inflow-gen input` reads the SEM inflow description from `&dopamine_abl` (exactly as for
+the online SEM) plus `&dopamine_inflow_gen`:
+
+```fortran
+&dopamine_inflow_gen
+  gen_file        = 'planes.nc'
+  gen_grid_file   = 'inlet_grid.txt'  ! plane grid exported by the solver (see below); or give
+  ! gen_W = 1.0  gen_y0 = 0.0  gen_ny = 64  gen_nz = 48  gen_z_min = 0.0  gen_z_max = 200.0
+  gen_n_turnovers = 2.0               ! length of each segment in eddy turnover times
+  gen_n_segments  = 4                 ! independent realisations, replayed in random order
+  gen_n_sigma     = 3.0               ! eddies per kernel volume (sets the eddy count)
+  gen_dt          = 0.0               ! frame spacing; 0 = 6 frames per shortest eddy passage
+  gen_seed        = 1
+/
+```
+
+- The eddy turnover time is $$T_e = L_x(z_{ref})/\sigma_u(z_{ref})$$, i.e. it follows from `u_ref`
+  and the turbulence intensity. `gen_T_turnover` overrides it.
+- The SEM runs in a box exactly one period wide with minimum-image distances, so the planes are
+  periodic across the span. The period must exceed twice the largest eddy half-extent (the run
+  stops with a message otherwise).
+- The generator prints the number of nodes that span the smallest eddy and verifies the written
+  planes against the targets (rms of each component and $$\overline{u'w'}$$ within 15%).
+
+**Generating on the successor's own lattice.** Run the solver once with
+`&dopamine_inflow inflow_export_grid = 'inlet_grid.txt'`. It writes the inlet's spanwise nodes and
+(graded) heights and stops; pass the file as `gen_grid_file`. The inlet must be uniformly spaced
+across the period. With this, the stored nodes *are* the inlet faces, so the solver copies values
+rather than interpolating them: no spatial filtering at all.
+
+#### 2. Record planes from a precursor
+
+```fortran
+&dopamine_inflow_record
+  record_enabled = .true.
+  record_file    = 'planes.nc'
+  record_point   = 100.0 0.0 0.0     ! a point on the plane
+  record_normal  = 1.0 0.0 0.0       ! flow direction through the plane (horizontal)
+  record_dt      = 0.02              ! frame spacing
+  record_t_start = 600.0             ! discard the spin-up before this time
+  record_segment_time = 60.0         ! length of one segment
+  record_n_segments   = 4
+/
+```
+
+The recorder samples the **layer of cell centres** on that plane (the solver's own cell values,
+nothing interpolated). The layer must form a regular lattice, uniform across a spanwise-periodic
+domain, otherwise the run stops. Frames are placed at `record_t_start + n*record_dt` by
+interpolating linearly between solver steps (adaptive time stepping is fine; keep the solver step
+below `record_dt`). Once the segments are complete the mean is removed, the measured stresses are
+stored, and the replay line is removed (below). The precursor must be statistically stationary
+over the recording: use `record_t_start` to skip the spin-up. Its mesh should be at least as fine
+as the successor's inlet; a finer successor receives smoothed data and re-grows the small scales
+over a development fetch.
+
+The database stores the flow direction; set `wind_dir_deg` in the successor to the value the
+recorder prints (270 for flow along +x).
+
+#### 3. Replay in the successor
+
+```fortran
+&dopamine_inflow
+  inflow_source  = 'planes'
+  inflow_file    = 'planes.nc'
+  inflow_seed    = 1               ! seeds the segment order and spanwise shifts
+  inflow_t_offset = 0.0            ! start offset into the replay sequence [s]
+  inflow_crossfade_time = 0.0      ! 0 = 10% of a segment
+/
+```
+
+Replay is a pure function of time and seed, so a restart needs no extra state and gives the same
+inflow. Period $$P = T_{seg} - T_x$$ uses a randomly chosen segment (never the same twice in a
+row) shifted spanwise by a whole number of nodes (golden-ratio sequence); consecutive periods
+cross-fade over $$T_x$$ with weights $$\sin\theta,\cos\theta$$, which keeps the variance for
+decorrelated segments and does not disturb the in-plane divergence (the weights are uniform in space).
+
+**Why independent segments are needed.** A spanwise shift moves every structure sideways but cannot
+change the spanwise-mean ($$k_y=0$$) part of the plane. Replaying $$K$$ segments in random order
+still leaves their *average* waveform repeating every period, a spectral line at $$1/P$$ holding
+about $$1/K$$ of the spanwise-mean variance. Both producers therefore subtract, at every frame
+index, the mean over segments of the spanwise-mean component and rescale it by
+$$\sqrt{K/(K-1)}$$ (`gen_decorrelate = .true.` by default). The unit test measures the line
+before (about 160 times the neighbouring spectral bins) and after (none). Use at least 4 segments.
+
+**Interpolation to the faces:**
+
+| direction | method | notes |
+|---|---|---|
+| span | exact Fourier (trigonometric) | spans are periodic and uniform; a shift is whole nodes, so it costs nothing |
+| height | 6-point Lagrange | works on graded levels; a matching level is copied |
+| time | Catmull-Rom cubic over four frames | needs frames well resolved: see the printed frame-to-frame correlation |
+
+At start-up rank 0 reports how many faces coincide with database nodes (copied, not filtered),
+the frame-to-frame correlation, and, when faces are interpolated, a vertical resolution check
+that warns if the stored heights under-resolve the data. A database whose heights do not cover
+the inlet, whose period differs from the domain width, whose flow direction differs from the inlet
+normal, or whose wind direction differs from `wind_dir_deg`, stops the run.
+
+The chain (export grid, generate, replay on 1 and 2 ranks, stop checks, restart, recorder against
+the solver's own output) is exercised by `ctest -L inflow` (`tests/inflow/chain.sh`).
 
 ### Davies Nudging (Large-Scale Coupling)
 

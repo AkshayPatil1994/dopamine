@@ -1,0 +1,19 @@
+&dopamine_abl
+  wall_model = 'none'
+  u_ref = 1.0
+  z_ref = 1.0
+  z0_m = 0.001
+  wind_dir_deg = 270.0
+  sem_sigma = 0.15
+  sem_L_exponent = 0.3
+  sem_mean_law = 'power'
+  sem_alpha = 0.15
+  sem_Iu_ref = 0.1
+/
+&dopamine_inflow_gen
+  gen_file = 'planes.nc'
+  gen_grid_file = 'inlet_grid.txt'
+  gen_n_turnovers = 2.0
+  gen_n_segments = 4
+  gen_n_sigma = 3.0
+/

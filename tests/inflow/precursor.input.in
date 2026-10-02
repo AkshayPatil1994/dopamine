@@ -1,0 +1,61 @@
+! Minimal precursor: the same box as a periodic channel (x and y periodic, wall-modelled walls in z)
+! with a body force; records a cell layer at x ~ 2 into an inflow database.
+&dopamine_domain
+  mesh_file = 'mesh.msh'
+  mesh_type = 'gmsh'
+/
+&dopamine_numerics
+  advection_scheme = 'KEP'
+  time_integrator  = 'RK3W'
+  use_sgs          = .true.
+  sgs_model        = 'VREMAN'
+  dt               = 2.0e-3
+  t_end            = 100.0
+  nstep_max        = @NSTEP@
+  cfl_max          = 0.5
+  adapt_dt         = .false.
+  p_tol            = 1.0e-10
+  p_max_iter       = 1000
+/
+&dopamine_physics
+  nu = 2.5316e-3
+  fx = 1.0
+/
+&dopamine_bc
+  n_patches = 6
+  patch_name(1) = 'bottom_wall'
+  patch_type(1) = 'wallModel'
+  patch_name(2) = 'top_wall'
+  patch_type(2) = 'wallModel'
+  patch_name(3) = 'periodic_x0'
+  patch_type(3) = 'periodic'
+  patch_name(4) = 'periodic_xL'
+  patch_type(4) = 'periodic'
+  patch_name(5) = 'periodic_y0'
+  patch_type(5) = 'periodic'
+  patch_name(6) = 'periodic_yL'
+  patch_type(6) = 'periodic'
+/
+&dopamine_initial_condition
+  ic_type = 'parabolic'
+  ic_uref = 1.0
+  ic_lref = 1.0
+  noise_level = 0.3
+/
+&dopamine_output
+  prefix         = 'case'
+  write_interval = @WRITE@
+/
+&dopamine_stats
+  solver_stats_frequency = 1
+/
+&dopamine_inflow_record
+  record_enabled = .true.
+  record_file = '@RECFILE@'
+  record_point = 2.0 0.5 0.5
+  record_normal = 1.0 0.0 0.0
+  record_dt = 0.01
+  record_t_start = 0.0
+  record_segment_time = 0.4
+  record_n_segments = @NSEG@
+/

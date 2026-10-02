@@ -439,21 +439,92 @@ Stanton number, $$\mathrm{k}B^{-1} = \ln(z_{0m}/z_{0h}) \approx 2$$.
 
 ### Synthetic Eddy Method (SEM) for Turbulent Inflow
 
-The SEM [@poletto2013] generates divergence-free turbulent fluctuations with
-anisotropic Reynolds stress matching the ABL log-layer spectrum:
+The inflow generator is a divergence-free synthetic eddy method in the spirit of
+[@poletto2013]. Each eddy is the *curl* of a compact vector potential, so its
+velocity is solenoidal by construction rather than by correction:
 
 $$
-\mathbf{u}'(\mathbf{x}) = \sqrt{\frac{V_{box}}{N_e}}\, \sum_{e=1}^{N_e} \mathbf{a}_e \, f\left(\frac{|\mathbf{x} - \mathbf{x}_e|}{\sigma}\right)
+\mathbf{u}'(\mathbf{x}) = \sum_{e=1}^{N_e} \nabla\phi\!\left(s_e\right) \times \mathbf{a}_e,
+\qquad s_e^2 = \sum_{i}\left(\frac{x_i - x_{e,i}}{\sigma_{e,i}}\right)^2,
+\qquad \phi(s) = (1-s^2)^3 \ (s<1)
 $$
 
-where $$\mathbf{a}_e$$ are eddy amplitude vectors, $$\mathbf{x}_e$$ eddy positions,
-and $$f(r) = \max(0, 1-r)$$ is a tent kernel. Amplitudes are rotated via Cholesky
-decomposition of the target Reynolds stress tensor to achieve realistic
-anisotropy: $$\sigma_u/u_* \approx 2.4$$, $$\sigma_v/u_* \approx 1.9$$, $$\sigma_w/u_* \approx 1.25$$.
+$$\nabla\cdot(\nabla\phi\times\mathbf{a}) = 0$$ identically, for *any* semi-axes
+$$\sigma_{e,i}$$ and any strength $$\mathbf{a}_e$$. That is what allows every eddy to carry
+its own height-dependent size and stress-fitted strength without losing
+$$\nabla\cdot\mathbf{u}'=0$$. The kernel is $$C^1$$, so vorticity is continuous. (Rescaling a
+solenoidal field by a Cholesky factor, as in the classical SEM, destroys this property.)
 
-Eddies are initialized in a recycle box upstream of the inlet and convected
-with a prescribed bulk velocity. The implementation supports incremental
-recycling of eddies exiting the upstream boundary (stub in current release).
+**Stresses.** The strengths are $$\mathbf{a}_e = C\boldsymbol{\xi}$$ with $$\xi_i=\pm1$$ random and
+$$CC^T = S$$. Because the kernel is even, the Reynolds stresses delivered by a population of
+eddies with density $$N_\sigma/(\sigma_x\sigma_y\sigma_z)$$ follow in closed form:
+
+$$
+\overline{u'u'} = Q_y S_{zz} + Q_z S_{yy},\quad
+\overline{v'v'} = Q_z S_{xx} + Q_x S_{zz},\quad
+\overline{w'w'} = Q_y S_{xx} + Q_x S_{yy},
+$$
+
+$$
+\overline{u'v'} = -Q_z S_{xy},\quad \overline{u'w'} = -Q_y S_{xz},\quad \overline{v'w'} = -Q_x S_{yz},
+\qquad Q_i = \frac{N_\sigma Q_J}{\sigma_i^2}
+$$
+
+with $$Q_J = 48\pi\cdot\tfrac{384}{45045}$$. At every eddy's height the solver inverts this
+$$3\times3$$ system for $$S$$ from the local target stresses and kernel scales. Not every
+(stress, scale) pair is attainable with divergence-free eddies: $$S$$ must be positive
+semi-definite, which for isotropic eddies requires $$\overline{u'u'}\le\overline{v'v'}+\overline{w'w'}$$.
+Neutral-ABL anisotropy ($$\sigma_u:\sigma_v:\sigma_w=2.4:1.9:1.25$$) is attainable once the eddies
+are elongated, which the default scale ratios $$L_x:L_y:L_z = 1:0.5:0.35$$ do. If a target is not
+attainable the nearest realisable $$S$$ is used and the setup prints the worst stress error.
+
+**Length scales.** Each eddy's semi-axes are $$\sigma_i = 1.678\,L_i(z)$$, where $$L_i$$ are
+integral length scales (the factor makes $$L_x$$ the streamwise integral scale of
+$$u'$$ for the isotropic kernel; for strongly elongated eddies the realised
+scale differs by tens of percent, see the unit test). The scales can follow a table or
+the power law $$L_x(z)=L_{ref}(z/z_{ref})^m$$, with $$L_y,L_z$$ fixed fractions of $$L_x$$. Eddy
+density is $$\propto 1/(\sigma_x\sigma_y\sigma_z)$$ so every height holds the same number of eddies per
+kernel, which keeps the stresses unbiased where the scales change.
+
+**Convection.** Eddies move along the inlet normal at their own mean speed $$U(z_e)$$
+(Taylor's hypothesis with shear). Eddies leaving the recycle box are re-inserted with heights
+drawn flux-weighted by $$U(z)$$, which keeps the height distribution stationary.
+
+**Inputs.** Targets come from, in order of precedence: a table (`sem_profile_file`), the
+wind-tunnel style laws in the namelist (mean profile + turbulence intensities), or the
+Panofsky–Dutton neutral surface layer ($$\sigma_{u,v,w}/u_*=2.4,1.9,1.25$$,
+$$\overline{u'w'}=-u_*^2$$).
+
+#### Pre-computed inflow planes
+
+For a pre-computed database the field is sampled on a spanwise-periodic $$(y,z)$$ grid at frame
+spacing $$\Delta t_p$$ and replayed with Taylor's hypothesis, i.e. the plane is the inlet. Replay
+period $$m$$ uses a randomly chosen stored segment $$k_m$$ shifted by $$s_m$$ nodes,
+
+$$
+\mathbf{u}'(y,z,t) = \sin\theta\;\mathbf{u}_{k_m}(y+s_m\Delta y,\,z,\,t-mP) + \cos\theta\;\mathbf{u}_{k_{m-1}}(y+s_{m-1}\Delta y,\,z,\,t-mP+P),
+\quad \theta=\frac{\pi}{2}\frac{t-mP}{T_x}\ (t-mP<T_x),
+$$
+
+with $$P = T_{seg}-T_x$$ and $$s_m=\lfloor \mathrm{frac}(\varphi_0 + m/\phi)\,N_y\rfloor$$ ($$\phi$$ the golden ratio).
+The shifts spread structures over the span; they cannot move the spanwise-mean part. If segment $$k$$
+has spanwise-mean waveform $$\bar u_k(z,\tau)$$, the replay contains the periodic part
+$$\frac1K\sum_k \bar u_k(z,\tau)$$, whose power is about $$1/K$$ of that of a single segment and is
+concentrated at $$1/P$$. Removing it by $$\bar u_k \to \sqrt{K/(K-1)}\,(\bar u_k - \frac1K\sum_j\bar u_j)$$
+leaves the variance unchanged and the periodic part exactly zero.
+
+Interpolation from the stored lattice to the inlet faces is a linear low-pass operator. Variance
+retained on a wave with $$n$$ points per wavelength, averaged over offsets:
+
+| $$n$$ | linear | cubic | 6-point Lagrange |
+|---|---|---|---|
+| 4 | 67% | 89% | 94% |
+| 6 | 83% | 97% | 99% |
+| 8 | 90% | 99.1% | 99.9% |
+
+so linear interpolation is not used. In the spanwise direction the nodes are periodic and
+uniform, where trigonometric interpolation is exact for the resolved wavenumbers; faces that
+coincide with stored nodes are copied unchanged.
 
 ### Davies Relaxation (Nudging)
 

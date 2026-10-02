@@ -26,7 +26,7 @@ backend. Source is organized by responsibility under `src/`:
 | `src/solver/` | Time integration (`mod_fv_solver.f90`), pressure Poisson solve (`mod_pressure_solver.f90`), and the PETSc C backend (`pressure_backend_petsc.c`) |
 | `src/bc/` | Boundary condition types and per-patch setup |
 | `src/sgs/` | SGS models (Vreman, constant-coefficient and dynamic Smagorinsky), wall models (log-law, MOST) |
-| `src/abl/` | Atmospheric boundary layer: MOST profiles/wall coupling, weather nudging, SEM synthetic inflow |
+| `src/abl/` | Atmospheric boundary layer: MOST profiles/wall coupling, weather nudging, divergence-free SEM inflow, inflow-plane database (`mod_inflow_db`), generator (`mod_inflow_gen`, `dopamine-inflow-gen`), replay (`mod_inflow_planes`) and precursor recorder (`mod_inflow_record`) |
 | `src/io/` | Input namelist parsing, NetCDF/XMF output, checkpoint I/O, runtime environment, warning log |
 | `src/stats/` | Runtime statistics and advanced sampling (planes/lines/curves/surfaces) |
 | `src/init/` | Initial condition assembly |
