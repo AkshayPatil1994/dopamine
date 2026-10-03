@@ -14,7 +14,9 @@ Status legend: **[confirmed]** = traced in code (and/or evidence); **[suspected]
 | 5 | fixed (also zero-gradient when the effective diffusivity is 0) | Impose Neumann scalar fluxes through the effective diffusivity |
 | 7 | fixed (collective finite check every 10 steps and before output; abort path not yet exercised) | Abort the run when velocity or pressure turn non-finite |
 | 6 | investigated, **not fixed** (see #6) | |
-| 3, 8-12, 14 | open | |
+| 11 | partly fixed: unknown `patch_type` (now case-insensitive), >32 patches, >32 PETSc options and `write_interval = 0` are rejected/handled; unlisted mesh patches, unknown `sgs_model`/`pressure_solver`/`gradient_scheme` and the rank-0-only `bc_setup` stop remain | Reject unknown patch types, oversized patch/PETSc lists and write_interval = 0 crashes |
+| 14 | fixed (cell-count sum check on read) | Abort when a preprocessed mesh is run on fewer ranks than it was decomposed for |
+| 3, 8, 9, 10, 12 | open | |
 | 13 | resolved by removing the readers | |
 
 ## Suggested fix order
