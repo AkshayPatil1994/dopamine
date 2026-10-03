@@ -446,7 +446,11 @@ contains
       error stop 'input namelist parse error (check variable names and syntax)'
     end if
 
-    config%n_bcs = min(n_patches, MAX_BC_PATCHES)
+    if (n_patches > MAX_BC_PATCHES) then
+      write(*, '(A,I0,A,I0)') 'ERROR: n_patches = ', n_patches, ' exceeds the supported maximum ', MAX_BC_PATCHES
+      error stop 'input: too many boundary patches'
+    end if
+    config%n_bcs = max(n_patches, 0_ip)
     do p = 1, config%n_bcs
       config%bc_patch_names(p)     = trim(patch_name(p))
       config%bc_configs(p)%bc_id   = bc_name_to_id(trim(patch_type(p)))
@@ -973,6 +977,10 @@ contains
       write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_PetscParams, ios=', ios
       error stop 'input namelist parse error (check variable names and syntax)'
     end if
+    if (n_petsc_options > max_opts) then
+      write(*, '(A,I0,A,I0)') 'ERROR: n_petsc_options = ', n_petsc_options, ' exceeds the supported maximum ', max_opts
+      error stop 'input: too many PETSc options'
+    end if
     if (n_petsc_options > 0) then
       if (allocated(config%petsc_options)) deallocate(config%petsc_options)
       allocate(character(len=256) :: config%petsc_options(n_petsc_options))
@@ -989,20 +997,20 @@ contains
 
   end subroutine read_PetScParams
 
-  pure integer(ip) function bc_name_to_id(name)
+  integer(ip) function bc_name_to_id(name)
     character(len=*), intent(in) :: name
-    select case (trim(name))
-    case ('velocity', 'inlet', 'fixedValue')
+    select case (trim(adjustl(lower_case(name))))
+    case ('velocity', 'inlet', 'fixedvalue')
       bc_name_to_id = BC_INLET
-    case ('outlet', 'fixedPressure', 'outflow')
+    case ('outlet', 'fixedpressure', 'outflow')
       bc_name_to_id = BC_OUTLET
-    case ('zeroGradient')
+    case ('zerogradient')
       bc_name_to_id = BC_ZEROGRADIENT
-    case ('noSlip')
+    case ('noslip')
       bc_name_to_id = BC_WALL_NOSLIP
-    case ('movingWall', 'wallVelocity')
+    case ('movingwall', 'wallvelocity')
       bc_name_to_id = BC_WALL_VELOCITY
-    case ('wallModel', 'wall')
+    case ('wallmodel', 'wall')
       bc_name_to_id = BC_WALL_MODEL
     case ('slip')
       bc_name_to_id = BC_SLIP
@@ -1010,12 +1018,14 @@ contains
       bc_name_to_id = BC_SYMMETRY
     case ('periodic', 'cyclic')
       bc_name_to_id = BC_PERIODIC
-    case ('fixedTemperature')
+    case ('fixedtemperature')
       bc_name_to_id = BC_FIXEDTEMP
-    case ('ablInlet')
+    case ('ablinlet')
       bc_name_to_id = BC_ABL_INLET
     case default
-      bc_name_to_id = BC_ZEROGRADIENT
+      ! A typo (e.g. a wrong-case 'noslip') used to become an open boundary without a word.
+      write(*, '(A,A,A)') 'ERROR: unrecognised patch_type ''', trim(name), ''''
+      error stop 'bc_name_to_id: unknown patch_type'
     end select
   end function bc_name_to_id
 

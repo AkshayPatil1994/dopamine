@@ -382,7 +382,8 @@ program dopamine_main
     if (use_write_time) then
       do_write = write_time_hit
     else
-      do_write = (mod(step, config%params%write_interval) == 0)
+      do_write = .false.
+      if (config%params%write_interval > 0) do_write = (mod(step, config%params%write_interval) == 0)
     end if
     ! Stop a diverged run instead of writing NaN until t_end; the check is collective, so every
     ! rank sees the same flags. Checked every 10 steps and before any output.
