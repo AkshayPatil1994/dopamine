@@ -29,6 +29,7 @@ program dopamine_main
 
   ! -- MPI
   integer(ip)    :: rank, nranks, ierr
+  real(rp)       :: t_target
 
   ! -- Objects
   type(Mesh)           :: mesh_global, mesh_local
@@ -386,8 +387,19 @@ program dopamine_main
     if (use_write_time) &
       call snap_dt_to_write_time(solver%time, config%params%write_time, dt, write_time_hit)
 
+    ! Land exactly on t_end instead of overshooting by up to a full step; a remainder below
+    ! round-off ends the run without another step.
+    if (config%params%t_end > 0.0_rp) then
+      if (config%params%t_end - solver%time <= 1.0e-12_rp * config%params%t_end) exit
+      dt = min(dt, config%params%t_end - solver%time)
+    end if
+
     ! Advance one step
+    t_target = solver%time + dt
     call solver%advance(dt)
+    ! advance() clamps a fixed dt to the CFL limit, which can leave the step short of the write time:
+    ! then the next step snaps to the same boundary again, so do not write (or count) it twice.
+    if (write_time_hit .and. solver%time < t_target - 1.0e-9_rp * config%params%write_time) write_time_hit = .false.
 
     do_stats = .false.
     if (config%stats_global_frequency > 0) &
