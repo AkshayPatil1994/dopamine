@@ -225,8 +225,9 @@ contains
 
     integer(ip) :: c, k, fi, fj, o, nb, f_bnd, ntot, nc, n_int, nbnd
     real(rp)    :: wsum, w
-    integer(ip), pointer :: cfo(:), cfaces(:), fo(:), fn(:), pnb(:)
+    integer(ip), pointer :: cfo(:), cfaces(:), fo(:), fn(:), pnb(:), ppair(:)
     real(rp),    pointer :: cvol(:)
+    integer(ip) :: pair_bnd
 
     nc = msh%n_cells
     ntot = nc + msh%n_ghost
@@ -237,14 +238,15 @@ contains
     fo => msh%face_owner_soa
     fn => msh%face_neighbour_soa
     pnb => msh%periodic_neighbor_soa
+    ppair => msh%periodic_pair_soa
     cvol => msh%cell_volume_soa
 
     ! field/field_out are the module scratch buffers (device-resident); the mesh SoA arrays are
     ! staged once with the mesh.
 #ifdef _OPENACC
-    !$acc parallel loop present(field, field_out) private(fi, fj, o, nb, f_bnd, wsum, w, k)
+    !$acc parallel loop present(field, field_out) private(fi, fj, o, nb, f_bnd, wsum, w, k, pair_bnd)
 #else
-    !$omp parallel do schedule(static) private(c, k, fi, fj, o, nb, f_bnd, wsum, w)
+    !$omp parallel do schedule(static) private(c, k, fi, fj, o, nb, f_bnd, wsum, w, pair_bnd)
 #endif
     do c = 1, nc
       wsum = cvol(c)
@@ -263,7 +265,14 @@ contains
         if (nb < 1 .and. fj > n_int) then
           f_bnd = fj - n_int
           if (f_bnd >= 1 .and. f_bnd <= nbnd) then
-            if (pnb(f_bnd) >= 1) nb = pnb(f_bnd)
+            if (pnb(f_bnd) >= 1) then
+              nb = pnb(f_bnd)
+            else
+              ! Single-rank meshes carry only the same-rank pairing, not periodic_neighbor; without
+              ! this fallback the filter silently dropped every periodic partner there.
+              pair_bnd = ppair(f_bnd)
+              if (pair_bnd >= 1 .and. pair_bnd <= nbnd) nb = fo(n_int + pair_bnd)
+            end if
           end if
         end if
 
