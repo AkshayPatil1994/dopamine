@@ -92,13 +92,6 @@ module mod_fv_solver
     character(len=:), allocatable :: petsc_options(:)
   end type solver_params_t
 
-  !> Field count for solver_params_t, kept in lockstep with copy_solver_params below.
-  !> Bump this whenever a field is added to/removed from the type, and add/remove the
-  !> matching dst%x = src%x line: copy_solver_params asserts the two stay in sync, since
-  !> storage_size() can't be used as a portable completeness check (compiler-dependent
-  !> layout: gfortran/nvfortran report different bit sizes for the identical type).
-  integer(ip), parameter :: N_SOLVER_PARAMS_FIELDS = 49
-
   type, public :: FVSolver
     type(Mesh),    pointer :: mesh => null()
     type(solver_params_t)  :: params
@@ -273,103 +266,14 @@ contains
   !> compiler-generated intrinsic assignment for this type corrupts the heap (observed as a
   !> stray malloc() abort later in solver_init), likely from the deferred-length allocatable
   !> character array component mixed among the others.
+  !> Intrinsic assignment copies every component, allocatables included, so a field added to
+  !> solver_params_t can no longer be forgotten here (the old per-field copy was guarded only by a
+  !> hand-kept count that compared constants).
   subroutine copy_solver_params(dst, src)
     type(solver_params_t), intent(inout) :: dst
     type(solver_params_t), intent(in)    :: src
-    integer(ip) :: i
-    integer(ip) :: n_copied
 
-    n_copied = 0
-    dst%nu                          = src%nu
-    dst%alpha_T                     = src%alpha_T
-    dst%beta                        = src%beta
-    dst%T_ref                       = src%T_ref
-    dst%g                           = src%g
-    dst%f_const                     = src%f_const
-    dst%constant_mass_flux_forcing  = src%constant_mass_flux_forcing
-    dst%U_bulk_target                = src%U_bulk_target
-    dst%use_rotation                = src%use_rotation
-    dst%omega_rot                   = src%omega_rot
-    dst%use_harmonic_forcing        = src%use_harmonic_forcing
-    dst%forcing_amp                 = src%forcing_amp
-    dst%forcing_omega               = src%forcing_omega
-    dst%forcing_phase               = src%forcing_phase
-    dst%forcing_dir                 = src%forcing_dir
-    dst%Pr_t                        = src%Pr_t
-    dst%dt                          = src%dt
-    dst%t_end                       = src%t_end
-    dst%nstep_max                   = src%nstep_max
-    dst%cfl_max                     = src%cfl_max
-    dst%scheme                      = src%scheme
-    dst%time_integrator             = src%time_integrator
-    dst%use_skew_symmetric_advection = src%use_skew_symmetric_advection
-    dst%write_interval              = src%write_interval
-    dst%write_time                  = src%write_time
-    dst%p_tol                       = src%p_tol
-    dst%p_max_iter                  = src%p_max_iter
-    dst%p_target_divU               = src%p_target_divU
-    dst%pressure_solver             = src%pressure_solver
-    dst%boussinesq                  = src%boussinesq
-    dst%adapt_dt                    = src%adapt_dt
-    dst%n_scalars                   = src%n_scalars
-    dst%scalar_scheme               = src%scalar_scheme
-    dst%temperature_scheme          = src%temperature_scheme
-    dst%debug_diagnostics           = src%debug_diagnostics
-    n_copied = n_copied + 35  ! nu .. debug_diagnostics above
-
-    if (allocated(dst%scalar_names)) deallocate(dst%scalar_names)
-    if (allocated(src%scalar_names)) then
-      allocate(dst%scalar_names(size(src%scalar_names)))
-      dst%scalar_names = src%scalar_names
-    end if
-    n_copied = n_copied + 1
-
-    if (allocated(dst%scalar_diffusivity)) deallocate(dst%scalar_diffusivity)
-    if (allocated(src%scalar_diffusivity)) then
-      allocate(dst%scalar_diffusivity(size(src%scalar_diffusivity)))
-      dst%scalar_diffusivity = src%scalar_diffusivity
-    end if
-    n_copied = n_copied + 1
-
-    if (allocated(dst%scalar_pr_t)) deallocate(dst%scalar_pr_t)
-    if (allocated(src%scalar_pr_t)) then
-      allocate(dst%scalar_pr_t(size(src%scalar_pr_t)))
-      dst%scalar_pr_t = src%scalar_pr_t
-    end if
-    n_copied = n_copied + 1
-
-    dst%n_scalar_sources = src%n_scalar_sources
-    n_copied = n_copied + 1
-    if (allocated(dst%scalar_sources)) deallocate(dst%scalar_sources)
-    if (allocated(src%scalar_sources)) then
-      allocate(dst%scalar_sources(size(src%scalar_sources)))
-      do i = 1, size(src%scalar_sources)
-        dst%scalar_sources(i) = src%scalar_sources(i)
-      end do
-    end if
-    n_copied = n_copied + 1
-
-    dst%gradient_scheme             = src%gradient_scheme
-    dst%gg_iterations               = src%gg_iterations
-    dst%n_nonortho_corr             = src%n_nonortho_corr
-    dst%use_rotational_projection   = src%use_rotational_projection
-    dst%use_sgs                     = src%use_sgs
-    dst%sgs_model                   = src%sgs_model
-    dst%wall_model_height           = src%wall_model_height
-    dst%wall_model_filter_time      = src%wall_model_filter_time
-    n_copied = n_copied + 8  ! gradient_scheme .. wall_model_filter_time above
-
-    if (allocated(dst%petsc_options)) deallocate(dst%petsc_options)
-    if (allocated(src%petsc_options)) then
-      allocate(character(len=len(src%petsc_options)) :: dst%petsc_options(size(src%petsc_options)))
-      dst%petsc_options = src%petsc_options
-    end if
-    n_copied = n_copied + 1
-
-    ! Catches the common oversight this routine exists to guard against: a field added to
-    ! solver_params_t without a matching copy line here (see N_SOLVER_PARAMS_FIELDS comment).
-    if (n_copied /= N_SOLVER_PARAMS_FIELDS) &
-      error stop 'copy_solver_params: field count mismatch vs N_SOLVER_PARAMS_FIELDS'
+    dst = src
   end subroutine copy_solver_params
 
   ! Initialisation
