@@ -16,7 +16,10 @@ Status legend: **[confirmed]** = traced in code (and/or evidence); **[suspected]
 | 6 | investigated, **not fixed** (see #6) | |
 | 11 | partly fixed: unknown `patch_type` (now case-insensitive), >32 patches, >32 PETSc options and `write_interval = 0` are rejected/handled; unlisted mesh patches, unknown `sgs_model`/`pressure_solver`/`gradient_scheme` and the rank-0-only `bc_setup` stop remain | Reject unknown patch types, oversized patch/PETSc lists and write_interval = 0 crashes |
 | 14 | fixed (cell-count sum check on read) | Abort when a preprocessed mesh is run on fewer ranks than it was decomposed for |
-| 3, 8, 9, 10, 12 | open | |
+| 9 | partly fixed: restarts continue/truncate the output and sample files (checked bit-identical on a 2-rank restart), a missing `.nc` starts a new file, and a repartitioned restart rebuilds `U_face`. Still open: SEM eddy state, wall-model time filter and `L_bnd` are not checkpointed, stats `E0_ref` is re-latched, a shorter rerun leaves a stale tail in the unlimited time dimension, and an old `.nc` reused after repartitioning keeps the old cell ordering | Continue output and sample files on restart...; Rebuild the face flux after a repartitioned restart... |
+| 10 | fixed (no skew correction on periodic faces, as in the SoA kernels; latent path, not exercised by the regression cases) | Skip the skewness correction on periodic faces in the host face interpolation |
+| 12 | partly fixed: unsupported element types and untagged boundary faces now stop with a message, large arrays moved to the heap. Still open: only the first physical tag per entity, vertex-mean face centres, tet-split volumes | Make the Gmsh reader reject unsupported element types and untagged boundary faces |
+| 3, 8 | open | |
 | 13 | resolved by removing the readers | |
 
 ## Suggested fix order
