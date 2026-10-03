@@ -658,6 +658,8 @@ contains
     if (ntok < 8 + nphys) return
 
     read(tok(9), *, err=900) phys_tag
+    if (nphys > 1) write(*, '(A,I0,A,I0,A,I0,A)') ' WARNING: Gmsh entity ', entity_tag, ' belongs to ', nphys, &
+      ' physical groups; only the first (', phys_tag, ') is used'
     call append_entity_phys_map(entity_phys, n_entity_phys, dim, entity_tag, phys_tag)
     return
 
