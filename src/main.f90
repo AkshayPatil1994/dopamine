@@ -384,6 +384,16 @@ program dopamine_main
     else
       do_write = (mod(step, config%params%write_interval) == 0)
     end if
+    ! Stop a diverged run instead of writing NaN until t_end; the check is collective, so every
+    ! rank sees the same flags. Checked every 10 steps and before any output.
+    if (mod(step, 10_ip) == 0 .or. do_stats .or. do_checkpoint .or. do_write) then
+      if (.not. solver%state_is_finite()) then
+        if (rank == 0) write(*, '(A,I0,A,ES12.4)') &
+          ' ERROR: non-finite velocity/pressure detected at step ', step, ', t = ', solver%time
+        call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
+      end if
+    end if
+
     if (do_write .or. do_stats .or. do_checkpoint .or. sampling_is_due(sampler, step)) &
       call solver%sync_host()
     if (do_write) then

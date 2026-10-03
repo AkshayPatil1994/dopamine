@@ -257,6 +257,7 @@ module mod_fv_solver
     procedure :: destroy      => solver_destroy
     procedure :: compute_dt   => solver_compute_dt
     procedure :: compute_cfl_rate => solver_compute_cfl_rate
+    procedure :: state_is_finite => solver_state_is_finite
     procedure :: to_device    => solver_to_device
     procedure :: sync_host    => solver_sync_host
   end type FVSolver
@@ -3601,6 +3602,30 @@ contains
     call MPI_Allreduce(cfl_max_local, cfl_max, 1, MPI_DOUBLE_PRECISION, &
                        MPI_MAX, self%mesh%comm, ierr)
   end function solver_compute_cfl_rate
+
+  !> True when U and p are finite on every rank (a NaN/Inf anywhere poisons the sum). MPI-collective;
+  !> reduces on the device when the fields live there, so no host sync is needed.
+  logical function solver_state_is_finite(self) result(ok)
+    class(FVSolver), intent(in), target :: self
+    integer(ip) :: c, nc, ierr, bad_local, bad_global
+    real(rp)    :: s
+    logical     :: dev
+    real(rp), pointer :: U(:,:), p(:)
+
+    nc  = self%mesh%n_cells
+    dev = self%on_device
+    U => self%U
+    p => self%p
+    s = 0.0_rp
+    !$acc parallel loop if(dev) default(present) reduction(+:s)
+    do c = 1, nc
+      s = s + U(1, c) + U(2, c) + U(3, c) + p(c)
+    end do
+    bad_local = 0
+    if (.not. (abs(s) <= huge(s))) bad_local = 1  ! false for NaN (unordered) and Inf
+    call MPI_Allreduce(bad_local, bad_global, 1, MPI_INTEGER, MPI_MAX, self%mesh%comm, ierr)
+    ok = (bad_global == 0)
+  end function solver_state_is_finite
 
   real(rp) function wall_time_now() result(t)
     integer :: count, rate
