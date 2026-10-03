@@ -314,6 +314,10 @@ program dopamine_main
     if (rank == 0) write(*, '(A,I0)') ' Reading checkpoint from step ', restart_step
     call read_checkpoint(solver, mesh_local, trim(config%restart_dir), restart_step, rank)
     if (rank == 0) write(*, '(A)') ' Checkpoint restored. Continuing from previous state...'
+    if (.not. solver%u_face_ready) then
+      if (rank == 0) write(*, '(A)') ' Checkpoint carries no face flux; rebuilding it from the restored velocity.'
+      call solver%rebuild_face_flux()
+    end if
   else
     ! Normal initial conditions
     ! Temperature initial condition is uniform reference temperature.

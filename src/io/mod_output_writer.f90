@@ -102,7 +102,7 @@ contains
     integer(ip) :: n_verts_dedup
     integer(ip), allocatable :: vtx_remap(:)
     character(len=512) :: fname
-    logical :: do_restart
+    logical :: do_restart, nc_exists
 
     writer%prefix     = trim(prefix)
     writer%mesh       => msh
@@ -278,6 +278,14 @@ contains
       end do
 
       fname = trim(prefix)//'.nc'
+      if (do_restart) then
+        ! A restart into a fresh output directory (e.g. after repartitioning) has no file to continue.
+        inquire(file=trim(fname), exist=nc_exists)
+        if (.not. nc_exists) then
+          write(*, '(A)') ' Output: '//trim(fname)//' not found; starting a new output file for the restart.'
+          do_restart = .false.
+        end if
+      end if
       if (do_restart) then
         if (present(restart_step)) then
           call reopen_netcdf_file(writer, trim(fname), restart_step)

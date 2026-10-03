@@ -252,6 +252,7 @@ module mod_fv_solver
     procedure :: init         => solver_init
     procedure :: advance      => solver_advance
     procedure :: project_once => solver_project_once
+    procedure :: rebuild_face_flux => solver_rebuild_face_flux
     procedure :: projection_idempotency => solver_projection_idempotency
     procedure :: divergence_metrics => solver_divergence_metrics
     procedure :: destroy      => solver_destroy
@@ -666,6 +667,54 @@ contains
     self%w_gp         = gp_save
     self%w_gp_rc      = gprc_save
   end subroutine solver_projection_idempotency
+
+  !> Rebuild U_face from the current U after a checkpoint that carries none (e.g. one written by
+  !> dopamine-checkpoint-partition, whose cell layout no longer matches the old face numbering).
+  !> Without it the first RK stage advects with a zero mass flux. Only U_face is kept: every other
+  !> field project_once touches is restored, so the restored U and p are unchanged.
+  subroutine solver_rebuild_face_flux(self, dt_proj)
+    class(FVSolver), intent(inout) :: self
+    real(rp), optional, intent(in) :: dt_proj
+
+    real(rp) :: dt_use
+    real(rp), allocatable :: U_save(:,:), p_save(:), pb_save(:), Ub_save(:,:)
+    real(rp), allocatable :: ff_save(:), pold_save(:), uf_new(:)
+    real(rp), allocatable :: pp_save(:), ppb_save(:), gp_save(:,:), gprc_save(:,:)
+
+    dt_use = self%params%dt
+    if (present(dt_proj)) then
+      dt_use = dt_proj
+    else if (self%params%adapt_dt) then
+      dt_use = self%compute_dt()
+    end if
+
+    U_save    = self%U
+    p_save    = self%p
+    pb_save   = self%p_bnd
+    Ub_save   = self%U_bnd
+    ff_save   = self%face_flux
+    pold_save = self%p_old
+    pp_save   = self%phi_prev
+    ppb_save  = self%phi_prev_bnd
+    gp_save   = self%w_gp
+    gprc_save = self%w_gp_rc
+
+    call solver_project_once(self, dt_use)
+    uf_new = self%U_face
+
+    self%U            = U_save
+    self%p            = p_save
+    self%p_bnd        = pb_save
+    self%U_bnd        = Ub_save
+    self%U_face       = uf_new
+    self%face_flux    = ff_save
+    self%p_old        = pold_save
+    self%phi_prev     = pp_save
+    self%phi_prev_bnd = ppb_save
+    self%w_gp         = gp_save
+    self%w_gp_rc      = gprc_save
+    self%u_face_ready = .true.
+  end subroutine solver_rebuild_face_flux
 
   !> Record post-projection max |div u| by cell class.
   subroutine record_divergence_split(self, jno)
