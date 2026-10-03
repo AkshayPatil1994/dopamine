@@ -11,6 +11,8 @@ module mod_wall_model
   public :: compute_wall_stress
   public :: apply_wall_model_bc
   public :: wall_model_free
+  public :: wall_model_get_filter_state
+  public :: wall_model_set_filter_state
   public :: wall_model_reset_cap_count
   public :: wall_model_get_cap_count
   public :: reichardt_uplus
@@ -37,6 +39,9 @@ module mod_wall_model
 
   !> False until the time filter has been seeded with its first instantaneous sample.
   logical, save :: filt_ready = .false.
+
+  !> Filter state handed in by a restart before the sampling cache (and u_par_filt) exists.
+  real(rp), allocatable, save :: pending_filt(:,:)
 
 contains
 
@@ -212,9 +217,16 @@ contains
             call find_sample_cell(msh, f_global, h_use, sample_cell(f_bnd), y_w_arr(f_bnd))
           end do
         end do
+        if (allocated(pending_filt)) then
+          if (size(pending_filt, 2) == n_bnd) then
+            u_par_filt = pending_filt
+            filt_ready = .true.
+          end if
+        end if
         !$acc update device(y_w_arr, sample_cell, u_par_filt)
       end if
     end if
+    if (allocated(pending_filt)) deallocate(pending_filt)
 
     ! One device thread per boundary face; non-wall-model faces are skipped. The sampling
     ! geometry and filter state live on the device (declare create above).
@@ -294,11 +306,33 @@ contains
     n = utau_cap_count
   end function wall_model_get_cap_count
 
+  !> Copy of the wall-stress time-filter state for a checkpoint; ready = .false. until it was seeded.
+  subroutine wall_model_get_filter_state(state, ready)
+    real(rp), allocatable, intent(out) :: state(:,:)
+    logical,               intent(out) :: ready
+
+    ready = filt_ready .and. allocated(u_par_filt)
+    if (.not. ready) return
+    !$acc update host(u_par_filt)
+    allocate(state(size(u_par_filt, 1), size(u_par_filt, 2)))
+    state = u_par_filt
+  end subroutine wall_model_get_filter_state
+
+  !> Hand a restored filter state to the module; it is adopted when the sampling cache is built.
+  subroutine wall_model_set_filter_state(state)
+    real(rp), intent(in) :: state(:,:)
+
+    if (allocated(pending_filt)) deallocate(pending_filt)
+    allocate(pending_filt(size(state, 1), size(state, 2)))
+    pending_filt = state
+  end subroutine wall_model_set_filter_state
+
   !> Free module-level persistent allocations (call on solver teardown).
   subroutine wall_model_free()
     if (allocated(y_w_arr))     deallocate(y_w_arr)
     if (allocated(sample_cell)) deallocate(sample_cell)
     if (allocated(u_par_filt))  deallocate(u_par_filt)
+    if (allocated(pending_filt)) deallocate(pending_filt)
     filt_ready = .false.
   end subroutine wall_model_free
 

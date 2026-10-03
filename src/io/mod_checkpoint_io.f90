@@ -14,6 +14,7 @@ contains
   subroutine write_checkpoint(solver, msh, checkpoint_dir, step, rank)
     ! Import types locally to avoid module-level dependency issues
     use mod_mesh,    only: Mesh
+    use mod_wall_model, only: wall_model_get_filter_state
     use mod_fv_solver, only: FVSolver
     use mpi_f08
     type(FVSolver),       intent(in) :: solver
@@ -27,6 +28,8 @@ contains
     character(len=16)  :: rank_str, step_str
     integer(ip) :: header(8)
     integer(ip) :: has_C
+    real(rp), allocatable :: wm_filt(:,:)
+    logical :: wm_ready
     logical :: dir_exists
 
     nc = msh%n_cells
@@ -46,7 +49,15 @@ contains
     header(6) = 0  ! reserved
     header(7) = 0
     if (solver%u_face_ready .and. allocated(solver%U_face)) header(7) = 1
-    header(8) = 0  ! reserved
+    ! header(8) is a bit mask of trailing wall-model records written after U_face:
+    ! 1 = tau_w_bnd, 2 = q_w_bnd, 4 = L_bnd, 8 = wall-stress filter. They carry the wall-stress time filter and the
+    ! Obukhov-length iteration, which restart from zero otherwise (same rank count only).
+    header(8) = 0
+    if (allocated(solver%tau_w_bnd)) header(8) = header(8) + 1
+    if (allocated(solver%q_w_bnd))   header(8) = header(8) + 2
+    if (allocated(solver%L_bnd))     header(8) = header(8) + 4
+    call wall_model_get_filter_state(wm_filt, wm_ready)
+    if (wm_ready) header(8) = header(8) + 8  ! 8 = wall-stress time-filter state
 
     ! Create processorR directory if needed (each rank creates its own to avoid race condition)
     write(rank_str, '(I0)') rank
@@ -98,6 +109,10 @@ contains
 
     ! Divergence-free face flux: advection reads it on the first stage after a restart.
     if (header(7) == 1) write(iunit) solver%U_face
+    if (iand(header(8), 1_ip) /= 0) write(iunit) solver%tau_w_bnd
+    if (iand(header(8), 2_ip) /= 0) write(iunit) solver%q_w_bnd
+    if (iand(header(8), 4_ip) /= 0) write(iunit) solver%L_bnd
+    if (iand(header(8), 8_ip) /= 0) write(iunit) wm_filt
 
     close(iunit)
 
@@ -123,12 +138,14 @@ contains
     ! Import types locally to avoid module-level dependency issues
     use mod_mesh,    only: Mesh
     use mod_fv_solver, only: FVSolver
+    use mod_wall_model, only: wall_model_set_filter_state
     type(FVSolver),       intent(inout) :: solver
     type(Mesh),           intent(in) :: msh
     character(len=*),     intent(in) :: checkpoint_dir
     integer(ip),          intent(in) :: step
     integer(ip),          intent(in) :: rank
 
+    real(rp), allocatable :: wm_filt(:,:)
     integer(ip) :: iunit, ios, nc, ns, nc_ckpt, ns_ckpt, step_ckpt
     character(len=512) :: filename
     character(len=16)  :: rank_str, step_str
@@ -198,7 +215,35 @@ contains
       solver%u_face_ready = .true.
       !$acc update device(solver%U_face) if_present
     else
-      write(*, '(A)') 'WARNING: checkpoint has no face flux; first stage after restart has no convective flux'
+      write(*, '(A)') 'WARNING: checkpoint has no face flux; it is rebuilt from the restored velocity'
+    end if
+
+    ! Wall-model state (absent in older checkpoints and in repartitioned ones: header(8) = 0 there).
+    if (iand(header(8), 1_ip) /= 0) then
+      if (allocated(solver%tau_w_bnd)) then
+        read(iunit) solver%tau_w_bnd
+      else
+        read(iunit)
+      end if
+    end if
+    if (iand(header(8), 2_ip) /= 0) then
+      if (allocated(solver%q_w_bnd)) then
+        read(iunit) solver%q_w_bnd
+      else
+        read(iunit)
+      end if
+    end if
+    if (iand(header(8), 4_ip) /= 0) then
+      if (allocated(solver%L_bnd)) then
+        read(iunit) solver%L_bnd
+      else
+        read(iunit)
+      end if
+    end if
+    if (iand(header(8), 8_ip) /= 0) then
+      allocate(wm_filt(3, size(solver%tau_w_bnd, 2)))
+      read(iunit) wm_filt
+      call wall_model_set_filter_state(wm_filt)
     end if
 
     ! Restore step counter
