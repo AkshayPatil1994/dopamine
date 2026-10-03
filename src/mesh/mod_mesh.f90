@@ -118,6 +118,13 @@ module mod_mesh
     real(rp),    allocatable :: ls_weights(:,:)  ! (3, size(ls_stencil))
     integer(ip), allocatable :: ls_stencil_face(:)  ! face index per stencil entry; -1 for non-boundary
 
+    ! -- vertex-adjacent owned/ghost cell pairs across partition cuts. Face neighbours are not enough
+    ! for the least-squares stencil: without these a cut cell loses the vertex neighbours that the
+    ! single-rank stencil has, so the gradient would depend on the decomposition.
+    integer(ip) :: n_vx = 0
+    integer(ip), allocatable :: vx_owned(:)  ! (n_vx) local owned cell
+    integer(ip), allocatable :: vx_ghost(:)  ! (n_vx) local ghost cell sharing a vertex with it
+
     ! -- global cell IDs (for output / partitioning)
     integer(lp), allocatable :: global_id(:)  ! size n_cells + n_ghost
     integer(lp), allocatable :: compact_id(:)  ! compact global IDs (size n_cells + n_ghost)
@@ -631,6 +638,25 @@ contains
         end do
       end do
       deallocate(voff, vcell)
+
+      ! Vertex neighbours on the other side of a partition cut (ghost cells).
+      do k = 1, self%n_vx
+        i   = self%vx_owned(k)
+        cnb = self%vx_ghost(k)
+        if (i < 1 .or. i > self%n_cells) cycle
+        if (cnb < self%n_cells + 1 .or. cnb > self%n_cells + self%n_ghost) cycle
+        found = .false.
+        do jj = 1, nbcount(i)
+          if (tmp_nb(jj, i) == cnb) then; found = .true.; exit; end if
+        end do
+        if (found) cycle
+        if (nbcount(i) < max_stencil) then
+          nbcount(i) = nbcount(i) + 1
+          tmp_nb(nbcount(i), i)          = cnb
+          tmp_is_periodic(nbcount(i), i) = .false.
+          tmp_face(nbcount(i), i)        = -1_ip
+        end if
+      end do
     end if
 
     ! Build CSR structure
@@ -1131,6 +1157,9 @@ contains
     if (allocated(self%ls_stencil))         deallocate(self%ls_stencil)
     if (allocated(self%ls_weights))         deallocate(self%ls_weights)
     if (allocated(self%ls_stencil_face))    deallocate(self%ls_stencil_face)
+    if (allocated(self%vx_owned))           deallocate(self%vx_owned)
+    if (allocated(self%vx_ghost))           deallocate(self%vx_ghost)
+    self%n_vx = 0
     if (allocated(self%global_id))          deallocate(self%global_id)
     if (allocated(self%compact_id))         deallocate(self%compact_id)
     if (allocated(self%halos))              deallocate(self%halos)

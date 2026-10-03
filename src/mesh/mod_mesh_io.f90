@@ -164,6 +164,13 @@ contains
       end do
     end if
 
+    ! Trailing record (absent in older files): vertex-adjacent owned/ghost pairs for the LS stencil.
+    write(iunit) msh%n_vx
+    if (msh%n_vx > 0) then
+      write(iunit) msh%vx_owned(1:msh%n_vx)
+      write(iunit) msh%vx_ghost(1:msh%n_vx)
+    end if
+
     close(iunit)
   end subroutine write_local_mesh_file
 
@@ -176,7 +183,7 @@ contains
 
     integer(ip) :: iunit, ios, nc, ng, nf, nif, nbf, np, nv, nh
     integer(ip) :: header(13), total_cell_verts, total_face_verts, ncf, format_version
-    integer(ip) :: i, rank_halo, n_send, n_recv
+    integer(ip) :: i, rank_halo, n_send, n_recv, n_vx_read
     real(rp),    allocatable :: centroid(:,:), volume(:), area(:), &
                                 centre(:,:), normal_a(:,:), sf(:,:), dcf(:), gc(:)
     integer(ip), allocatable :: nfaces_a(:), offsets(:), &
@@ -329,6 +336,16 @@ contains
           read(iunit) msh%halos(i)%recv_cells
         end if
       end do
+    end if
+
+    ! Trailing vertex-pair record; files written before it existed end here.
+    msh%n_vx = 0
+    read(iunit, iostat=ios) n_vx_read
+    if (ios == 0 .and. n_vx_read > 0) then
+      allocate(msh%vx_owned(n_vx_read), msh%vx_ghost(n_vx_read))
+      read(iunit) msh%vx_owned
+      read(iunit) msh%vx_ghost
+      msh%n_vx = n_vx_read
     end if
 
     close(iunit)

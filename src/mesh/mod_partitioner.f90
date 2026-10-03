@@ -12,6 +12,7 @@ module mod_partitioner
   public :: partition_mesh, build_morton_partition
   public :: pack_global_mesh, sort_and_offset_partition, build_local_partition_mesh
   public :: compute_morton_key
+  public :: build_vertex_cut_pairs
 
 contains
 
@@ -326,7 +327,7 @@ contains
                                         cell_vertices_global, cell_types_global, &
                                         face_topo_flag, face_offsets_global, face_vertices_global, &
                                         cell_order, cell_start, cell_end, face_chunk_size, face_sf, face_gc, staged_geom_unit, &
-                                        int_face_list, n_int_faces_global)
+                                        int_face_list, n_int_faces_global, vpair_a, vpair_b, n_vpair)
     type(Mesh), intent(inout) :: msh
     type(MPI_Comm), intent(in) :: comm
     integer(ip), intent(in) :: target_rank, nranks, nc, nf, np
@@ -342,6 +343,7 @@ contains
     integer(ip), intent(in), optional :: staged_geom_unit
     integer(ip), intent(in), optional :: int_face_list(:)
     integer(ip), intent(in), optional :: n_int_faces_global
+    integer(ip), intent(in), optional :: vpair_a(:), vpair_b(:), n_vpair  ! cross-cut vertex-adjacent cells
     integer(ip), intent(in) :: patch_start(np), patch_nfaces(np), patch_bcid(np)
     character(len=128), intent(in) :: patch_name(np)
     character(len=64), intent(in)  :: patch_type(np)
@@ -367,7 +369,7 @@ contains
     integer(ip), allocatable :: ghost_candidates(:), map_gid(:), map_lid(:)
     integer(ip) :: n_ghost_candidates
     integer(ip), allocatable :: vlist(:), local_face_global(:)
-    integer(ip) :: n_vlist, vpos
+    integer(ip) :: n_vlist, vpos, n_vp, k_vp, n_vx_local
     real(rp), allocatable :: staged_geom_block(:,:)
 
     if (present(face_chunk_size)) then
@@ -455,6 +457,16 @@ contains
       if (part(nb_global) == target_rank .and. part(o) /= target_rank) call append_dynamic_int(ghost_candidates, n_ghost_candidates, o)
     end do
 
+    ! Vertex-adjacent cells across a cut join the ghost layer (no face to them, so they carry no faces).
+    n_vp = 0
+    if (present(vpair_a) .and. present(vpair_b) .and. present(n_vpair)) n_vp = n_vpair
+    do k_vp = 1, n_vp
+      if (part(vpair_a(k_vp)) == target_rank .and. part(vpair_b(k_vp)) /= target_rank) &
+        call append_dynamic_int(ghost_candidates, n_ghost_candidates, vpair_b(k_vp))
+      if (part(vpair_b(k_vp)) == target_rank .and. part(vpair_a(k_vp)) /= target_rank) &
+        call append_dynamic_int(ghost_candidates, n_ghost_candidates, vpair_a(k_vp))
+    end do
+
     if (n_ghost_candidates > 0) then
       call sort_int_values(ghost_candidates, n_ghost_candidates)
       n_ghost = unique_sorted_int(ghost_candidates, n_ghost_candidates)
@@ -467,6 +479,28 @@ contains
     if (allocated(ghost_candidates)) deallocate(ghost_candidates)
 
     call build_gid_to_lid_lookup(owned_ids, n_owned, ghost_ids, n_ghost, map_gid, map_lid)
+
+    ! Local (owned, ghost) vertex-adjacent pairs for the least-squares stencil.
+    n_vx_local = 0
+    do k_vp = 1, n_vp
+      if (part(vpair_a(k_vp)) == target_rank .neqv. part(vpair_b(k_vp)) == target_rank) n_vx_local = n_vx_local + 1
+    end do
+    msh%n_vx = n_vx_local
+    if (allocated(msh%vx_owned)) deallocate(msh%vx_owned)
+    if (allocated(msh%vx_ghost)) deallocate(msh%vx_ghost)
+    allocate(msh%vx_owned(max(1_ip, n_vx_local)), msh%vx_ghost(max(1_ip, n_vx_local)))
+    n_vx_local = 0
+    do k_vp = 1, n_vp
+      if (part(vpair_a(k_vp)) == target_rank .and. part(vpair_b(k_vp)) /= target_rank) then
+        n_vx_local = n_vx_local + 1
+        msh%vx_owned(n_vx_local) = g2l_lookup_gid(vpair_a(k_vp), map_gid, map_lid)
+        msh%vx_ghost(n_vx_local) = g2l_lookup_gid(vpair_b(k_vp), map_gid, map_lid)
+      else if (part(vpair_b(k_vp)) == target_rank .and. part(vpair_a(k_vp)) /= target_rank) then
+        n_vx_local = n_vx_local + 1
+        msh%vx_owned(n_vx_local) = g2l_lookup_gid(vpair_b(k_vp), map_gid, map_lid)
+        msh%vx_ghost(n_vx_local) = g2l_lookup_gid(vpair_a(k_vp), map_gid, map_lid)
+      end if
+    end do
 
     if (present(int_face_list)) then
       n_int_local = size(int_face_list)
@@ -806,7 +840,8 @@ contains
     end do
 
     call build_halos_from_partition(msh, target_rank, nranks, nc, part, face_owner, face_nei, map_gid, map_lid, &
-                                    periodic_pair_global, n_int_global, int_face_list=int_face_list)
+                                    periodic_pair_global, n_int_global, int_face_list=int_face_list, &
+                                    vpair_a=vpair_a, vpair_b=vpair_b, n_vpair=n_vpair)
 
     call remap_periodic_neighbors_to_ghosts(msh, n_bnd_local, bnd_order, &
                                             periodic_pair_global, face_owner, &
@@ -925,15 +960,17 @@ contains
   end subroutine fetch_face_geom
 
   subroutine build_halos_from_partition(msh, rank, nranks, nc, part, face_owner, face_nei, map_gid, map_lid, &
-                                        periodic_pair_global, n_int_global, int_face_list)
+                                        periodic_pair_global, n_int_global, int_face_list, &
+                                        vpair_a, vpair_b, n_vpair)
     type(Mesh), intent(inout) :: msh
     integer(ip), intent(in) :: rank, nranks, nc
     integer(ip), intent(in) :: part(nc), face_owner(:), face_nei(:)
     integer(ip), intent(in) :: map_gid(:), map_lid(:)
     integer(ip), intent(in) :: periodic_pair_global(:), n_int_global
     integer(ip), intent(in), optional :: int_face_list(:)
+    integer(ip), intent(in), optional :: vpair_a(:), vpair_b(:), n_vpair
 
-    integer(ip) :: r, f, o, nb, nsend, nrecv, nh, ihf
+    integer(ip) :: r, f, o, nb, nsend, nrecv, nh, ihf, k_vp, n_vp
     integer(ip) :: f_bnd, pair_bnd, pair_face
     integer(ip), allocatable :: send_candidates(:), recv_candidates(:)
     integer(ip) :: nsend_candidates, nrecv_candidates
@@ -998,6 +1035,21 @@ contains
         end if
       end do
 
+      ! Vertex-adjacent pairs across the cut travel in the same halo.
+      n_vp = 0
+      if (present(vpair_a) .and. present(vpair_b) .and. present(n_vpair)) n_vp = n_vpair
+      do k_vp = 1, n_vp
+        o  = vpair_a(k_vp)
+        nb = vpair_b(k_vp)
+        if (part(o) == rank .and. part(nb) == r) then
+          call append_dynamic_int(send_candidates, nsend_candidates, o)
+          call append_dynamic_int(recv_candidates, nrecv_candidates, nb)
+        else if (part(nb) == rank .and. part(o) == r) then
+          call append_dynamic_int(send_candidates, nsend_candidates, nb)
+          call append_dynamic_int(recv_candidates, nrecv_candidates, o)
+        end if
+      end do
+
       if (nsend_candidates > 0) then
         call sort_int_values(send_candidates, nsend_candidates)
         nsend = unique_sorted_int(send_candidates, nsend_candidates)
@@ -1036,6 +1088,90 @@ contains
 
     deallocate(tmp)
   end subroutine build_halos_from_partition
+
+  !> Cell pairs that share a vertex but live in different partitions. They are the cross-cut stencil
+  !> the least-squares gradient needs on top of the face neighbours. A pair seen through several shared
+  !> vertices (or also a face neighbour) may repeat: every consumer deduplicates.
+  subroutine build_vertex_cut_pairs(nc, nv, part, cell_offsets, cell_vertices, pair_a, pair_b, n_pairs)
+    integer(ip), intent(in) :: nc, nv
+    integer(ip), intent(in) :: part(nc), cell_offsets(nc + 1), cell_vertices(:)
+    integer(ip), allocatable, intent(out) :: pair_a(:), pair_b(:)
+    integer(ip), intent(out) :: n_pairs
+
+    integer(ip), allocatable :: voff(:), vcell(:), vptr(:)
+    integer(ip) :: c, k, v, i, j, ca, cb
+    logical :: mixed
+
+    allocate(voff(nv + 2), source=0_ip)
+    do c = 1, nc
+      do k = cell_offsets(c), cell_offsets(c + 1) - 1
+        v = cell_vertices(k)
+        if (v >= 1 .and. v <= nv) voff(v + 1) = voff(v + 1) + 1
+      end do
+    end do
+    voff(1) = 1
+    do v = 1, nv
+      voff(v + 1) = voff(v + 1) + voff(v)
+    end do
+    allocate(vcell(max(1_ip, voff(nv + 1) - 1)), source=0_ip)
+    allocate(vptr(nv + 1))
+    vptr = voff(1:nv + 1)
+    do c = 1, nc
+      do k = cell_offsets(c), cell_offsets(c + 1) - 1
+        v = cell_vertices(k)
+        if (v >= 1 .and. v <= nv) then
+          vcell(vptr(v)) = c
+          vptr(v) = vptr(v) + 1
+        end if
+      end do
+    end do
+    deallocate(vptr)
+
+    n_pairs = 0
+    call init_dynamic_int_buffer(pair_a, 1024_ip)
+    call init_dynamic_int_buffer(pair_b, 1024_ip)
+    do v = 1, nv
+      if (voff(v + 1) - voff(v) < 2) cycle
+      mixed = .false.
+      do i = voff(v) + 1, voff(v + 1) - 1
+        if (part(vcell(i)) /= part(vcell(voff(v)))) then
+          mixed = .true.
+          exit
+        end if
+      end do
+      if (.not. mixed) cycle
+      do i = voff(v), voff(v + 1) - 2
+        ca = vcell(i)
+        do j = i + 1, voff(v + 1) - 1
+          cb = vcell(j)
+          if (part(ca) == part(cb)) cycle
+          if (n_pairs >= size(pair_b)) then
+            call grow_pair_buffers(pair_a, pair_b, n_pairs)
+          end if
+          n_pairs = n_pairs + 1
+          pair_a(n_pairs) = ca
+          pair_b(n_pairs) = cb
+        end do
+      end do
+    end do
+    deallocate(voff, vcell)
+  end subroutine build_vertex_cut_pairs
+
+  subroutine grow_pair_buffers(pair_a, pair_b, n)
+    integer(ip), allocatable, intent(inout) :: pair_a(:), pair_b(:)
+    integer(ip), intent(in) :: n
+    integer(ip), allocatable :: ta(:), tb(:)
+    integer(ip) :: new_cap
+
+    new_cap = max(2_ip * size(pair_a), size(pair_a) + 1024_ip)
+    allocate(ta(new_cap), tb(new_cap))
+    if (n > 0) then
+      ta(1:n) = pair_a(1:n)
+      tb(1:n) = pair_b(1:n)
+    end if
+    call move_alloc(ta, pair_a)
+    call move_alloc(tb, pair_b)
+  end subroutine grow_pair_buffers
 
   subroutine init_dynamic_int_buffer(buf, initial_capacity)
     integer(ip), allocatable, intent(inout) :: buf(:)
@@ -1344,6 +1480,8 @@ contains
     real(rp), allocatable :: vertices(:,:)
     integer(ip), allocatable :: cell_offsets(:), cell_vertices(:), cell_types(:)
     integer(ip), allocatable :: face_offsets(:), face_vertices(:)
+    integer(ip), allocatable :: vpair_a(:), vpair_b(:)
+    integer(ip) :: n_vpair
 
     call MPI_Comm_rank(comm, rank, ierr)
     call MPI_Comm_size(comm, nranks, ierr)
@@ -1485,6 +1623,11 @@ contains
       call mesh_global%destroy()
     end if
 
+    ! Cross-cut vertex-adjacent cells (needs the vertex topology, which only the LS stencil uses).
+    n_vpair = 0
+    if (topo_flag == 1) &
+      call build_vertex_cut_pairs(nc, nv, part, cell_offsets, cell_vertices, vpair_a, vpair_b, n_vpair)
+
     do r = 0, nranks - 1
       ! Skip rank if it has no cells (empty offset range)
       if (rank_offsets(r) >= rank_offsets(r + 1)) cycle
@@ -1512,7 +1655,8 @@ contains
               cell_order=cell_order, cell_start=rank_offsets(r), &
               cell_end=rank_offsets(r + 1) - 1, &
               face_centre=face_centre, face_normal=face_normal, &
-              face_sf=face_sf, face_gc=face_gc)
+              face_sf=face_sf, face_gc=face_gc, &
+              vpair_a=vpair_a, vpair_b=vpair_b, n_vpair=n_vpair)
 
       if (r == 0) then
         mesh_local = tmp_mesh
@@ -1640,6 +1784,16 @@ contains
       else
         call MPI_Send([ (msh%faces(msh%n_int_faces + i)%d_cf, i=1,nbf) ], nbf, MPI_DOUBLE_PRECISION, dest_rank, tag, comm, ierr)
       end if
+    end if
+
+    ! Vertex-adjacent owned/ghost pairs for the least-squares stencil.
+    tag = 9034
+    call MPI_Send([msh%n_vx], 1, MPI_INTEGER, dest_rank, tag, comm, ierr)
+    if (msh%n_vx > 0) then
+      tag = 9035
+      call MPI_Send(msh%vx_owned, msh%n_vx, MPI_INTEGER, dest_rank, tag, comm, ierr)
+      tag = 9036
+      call MPI_Send(msh%vx_ghost, msh%n_vx, MPI_INTEGER, dest_rank, tag, comm, ierr)
     end if
 
     ! Send global IDs
@@ -1903,6 +2057,17 @@ contains
     if (nbf > 0) then
       tag = 9033
       call MPI_Recv(msh%periodic_pair_dcf, nbf, MPI_DOUBLE_PRECISION, src_rank, tag, comm, status, ierr)
+    end if
+
+    ! Vertex-adjacent owned/ghost pairs for the least-squares stencil.
+    tag = 9034
+    call MPI_Recv(msh%n_vx, 1, MPI_INTEGER, src_rank, tag, comm, status, ierr)
+    if (msh%n_vx > 0) then
+      allocate(msh%vx_owned(msh%n_vx), msh%vx_ghost(msh%n_vx))
+      tag = 9035
+      call MPI_Recv(msh%vx_owned, msh%n_vx, MPI_INTEGER, src_rank, tag, comm, status, ierr)
+      tag = 9036
+      call MPI_Recv(msh%vx_ghost, msh%n_vx, MPI_INTEGER, src_rank, tag, comm, status, ierr)
     end if
 
     ! Receive global IDs

@@ -10,7 +10,7 @@ module mod_streaming_decompose
   use mod_bc,           only: BCConfig
   use mod_bc_setup,     only: build_bc_configs
   use mod_input_parser
-  use mod_partitioner,  only: build_morton_partition, pack_global_mesh, sort_and_offset_partition, &
+  use mod_partitioner,  only: build_vertex_cut_pairs, build_morton_partition, pack_global_mesh, sort_and_offset_partition, &
                               build_local_partition_mesh
   use mod_nonconforming, only: enforce_face_conformity
   use mpi_f08
@@ -49,6 +49,8 @@ contains
     real(rp), allocatable :: vertices(:,:)
     integer(ip), allocatable :: cell_offsets(:), cell_vertices(:), cell_types(:)
     integer(ip), allocatable :: face_offsets(:), face_vertices(:)
+    integer(ip), allocatable :: vpair_a(:), vpair_b(:)  ! cross-cut vertex-adjacent cells (LS stencil)
+    integer(ip) :: n_vpair
     integer(ip) :: nc, nf, np, nv, nintf, nbndf, topo_flag
     integer(ip) :: face_topo_flag
     integer(ip) :: r, cmd_stat, exit_status, i, face_chunk_size
@@ -261,6 +263,10 @@ contains
     call build_morton_partition(nc, nranks_target, 0, cell_centroid, part, cell_volume, &
                                  weight_by_volume=vol_weight)
 
+    n_vpair = 0
+    if (topo_flag == 1) &
+      call build_vertex_cut_pairs(nc, nv, part, cell_offsets, cell_vertices, vpair_a, vpair_b, n_vpair)
+
     ! Sort cells by partition and compute offsets
     allocate(cell_order(nc), rank_offsets(0:nranks_target))
     call sort_and_offset_partition(nc, nranks_target, part, cell_order, rank_offsets)
@@ -345,7 +351,8 @@ contains
                         cell_end=rank_offsets(r + 1) - 1, &
                         face_chunk_size=face_chunk_size, face_centre=face_centre, face_normal=face_normal, &
                         face_sf=face_sf, face_gc=face_gc, &
-                        int_face_list=rf_list(rf_ptr(r):rf_ptr(r+1)-1), n_int_faces_global=nintf)
+                        int_face_list=rf_list(rf_ptr(r):rf_ptr(r+1)-1), n_int_faces_global=nintf, &
+                        vpair_a=vpair_a, vpair_b=vpair_b, n_vpair=n_vpair)
 
         write(rank_str, '(I0)') r
         outdir = trim(output_dir)//'/processor'//trim(rank_str)
@@ -404,7 +411,8 @@ contains
                         cell_order=cell_order, cell_start=rank_offsets(r), &
                         cell_end=rank_offsets(r + 1) - 1, &
                         face_chunk_size=face_chunk_size, staged_geom_unit=staged_geom_read_unit, &
-                        int_face_list=rf_list(rf_ptr(r):rf_ptr(r+1)-1), n_int_faces_global=nintf)
+                        int_face_list=rf_list(rf_ptr(r):rf_ptr(r+1)-1), n_int_faces_global=nintf, &
+                        vpair_a=vpair_a, vpair_b=vpair_b, n_vpair=n_vpair)
 
         write(rank_str, '(I0)') r
         outdir = trim(output_dir)//'/processor'//trim(rank_str)

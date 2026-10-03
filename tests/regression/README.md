@@ -36,6 +36,12 @@ tolerance.
 The stored references come from the CPU build (gfortran, `OMP_NUM_THREADS=1`) of commit
 c6f4e6b plus the direct-read `-np > 1` deadlock fix.
 
+The np2 references were regenerated after the least-squares stencil started carrying
+vertex-adjacent cells across partition cuts: step 1 of every case now agrees with the np1
+reference to machine precision (before, `eps` in `rb` differed by 2.5% and `nu_sgs_mean` in
+`channel` by 2e-3). The `dynsmag` references were regenerated again after the test filter
+started including periodic partners on single-rank meshes.
+
 To regenerate a reference after an intentional change in results:
 
 ```sh
