@@ -603,17 +603,17 @@ contains
     end if
 
     ! Snapshot every field project_once writes, so the run continues from an untouched state.
-    U_save    = self%U
-    p_save    = self%p
-    pb_save   = self%p_bnd
-    Ub_save   = self%U_bnd
-    uf_save   = self%U_face
-    ff_save   = self%face_flux
-    pold_save = self%p_old
-    pp_save   = self%phi_prev
-    ppb_save  = self%phi_prev_bnd
-    gp_save   = self%w_gp
-    gprc_save = self%w_gp_rc
+    allocate(U_save, source=self%U)
+    allocate(p_save, source=self%p)
+    allocate(pb_save, source=self%p_bnd)
+    allocate(Ub_save, source=self%U_bnd)
+    allocate(uf_save, source=self%U_face)
+    allocate(ff_save, source=self%face_flux)
+    allocate(pold_save, source=self%p_old)
+    allocate(pp_save, source=self%phi_prev)
+    allocate(ppb_save, source=self%phi_prev_bnd)
+    allocate(gp_save, source=self%w_gp)
+    allocate(gprc_save, source=self%w_gp_rc)
 
     ! Warm-up pass so p and w_gp are both consistent with dt_use before comparing.
     call solver_project_once(self, dt_use)
@@ -1810,15 +1810,6 @@ contains
       end do
     end do
   end subroutine add_scalar_source_terms
-
-  pure function cross3(a, b) result(c)
-    real(rp), intent(in) :: a(3), b(3)
-    real(rp) :: c(3)
-
-    c(1) = a(2) * b(3) - a(3) * b(2)
-    c(2) = a(3) * b(1) - a(1) * b(3)
-    c(3) = a(1) * b(2) - a(2) * b(1)
-  end function cross3
 
   ! Shared helpers
 
