@@ -2000,9 +2000,10 @@ contains
       if (allocated(self%params%scalar_diffusivity)) has_diff = (s <= size(self%params%scalar_diffusivity))
       if (has_diff) then
         call apply_passive_scalar_bc(self%C, self%C_bnd, self%bc_configs, self%mesh, s, &
-                                     self%params%scalar_diffusivity(s), self%time)
+                                     self%params%scalar_diffusivity(s), self%nu_sgs, self%params%Pr_t, self%time)
       else
-        call apply_passive_scalar_bc(self%C, self%C_bnd, self%bc_configs, self%mesh, s, 0.0_rp, self%time)
+        call apply_passive_scalar_bc(self%C, self%C_bnd, self%bc_configs, self%mesh, s, 0.0_rp, &
+                                     self%nu_sgs, self%params%Pr_t, self%time)
       end if
     end do
   end subroutine apply_scalar_bc
@@ -2034,9 +2035,11 @@ contains
       if (allocated(self%params%scalar_diffusivity)) has_diff = (s <= size(self%params%scalar_diffusivity))
       if (has_diff) then
         call apply_passive_scalar_bc(self%C, self%C_bnd, self%bc_configs, self%mesh, s, &
-                                     self%params%scalar_diffusivity(s), self%time, periodic_only=periodic_only)
+                                     self%params%scalar_diffusivity(s), self%nu_sgs, self%params%Pr_t, self%time, &
+                                     periodic_only=periodic_only)
       else
-        call apply_passive_scalar_bc(self%C, self%C_bnd, self%bc_configs, self%mesh, s, 0.0_rp, self%time, &
+        call apply_passive_scalar_bc(self%C, self%C_bnd, self%bc_configs, self%mesh, s, 0.0_rp, &
+                                     self%nu_sgs, self%params%Pr_t, self%time, &
                                      periodic_only=periodic_only)
       end if
     end do

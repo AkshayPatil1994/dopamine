@@ -538,13 +538,15 @@ contains
   !> Neumann mode expects scalar_flux in units of scalar-flux per area.
   !> Takes the full (n_scalars, :) arrays rather than a row section so OpenACC builds can map
   !> the arrays directly (a strided section would force a host temporary).
-  subroutine apply_passive_scalar_bc(C, C_bnd, bc_configs, msh, scalar_id, alpha_mol, time, periodic_only)
+  subroutine apply_passive_scalar_bc(C, C_bnd, bc_configs, msh, scalar_id, alpha_mol, nu_sgs, Pr_t, time, periodic_only)
     real(rp), intent(inout) :: C(:,:)      ! (n_scalars, n_cells + n_ghost)
     real(rp), intent(inout) :: C_bnd(:,:)  ! (n_scalars, n_bnd_faces)
     type(BCConfig), intent(in) :: bc_configs(:)
     type(Mesh), intent(in), target :: msh
     integer(ip), intent(in) :: scalar_id
     real(rp), intent(in) :: alpha_mol
+    real(rp), intent(in) :: nu_sgs(:)   ! (n_cells + n_ghost) SGS viscosity, as used by viscous_rhs_scalar
+    real(rp), intent(in) :: Pr_t
     real(rp), intent(in) :: time
     logical, optional, intent(in) :: periodic_only
 
@@ -578,10 +580,9 @@ contains
     n_bnd = msh%n_bnd_faces
     n_patches = msh%n_patches
     n_c = size(C, 2)
-    alpha_face = max(alpha_mol, SMALL)
 
-    !$acc parallel loop default(present) copyin(C) copy(C_bnd) &
-    !$acc      private(f_global, patch_id, bc_id, o, nb, mode, flux_val, d_cf)
+    !$acc parallel loop default(present) copyin(C, nu_sgs) copy(C_bnd) &
+    !$acc      private(f_global, patch_id, bc_id, o, nb, mode, flux_val, d_cf, alpha_face)
     do f_bnd = 1, n_bnd
       f_global = n_int + f_bnd
       patch_id = fpid(f_global)
@@ -620,8 +621,14 @@ contains
               flux_val = flux_val * cos(bc_scalar_flux_omega_soa(s, patch_id) * time &
                                         + bc_scalar_flux_phase_soa(s, patch_id))
           end if
+          ! Same effective diffusivity the viscous term applies on this boundary face.
+          alpha_face = alpha_mol + nu_sgs(o) / Pr_t
           d_cf = max(fdcf(f_global), SMALL)
-          C_bnd(s, f_bnd) = C(s, o) + flux_val * d_cf / alpha_face
+          if (alpha_face > SMALL) then
+            C_bnd(s, f_bnd) = C(s, o) + flux_val * d_cf / alpha_face
+          else
+            C_bnd(s, f_bnd) = C(s, o)  ! no diffusion: a flux cannot be imposed through it
+          end if
         case default
           C_bnd(s, f_bnd) = C(s, o)
         end select
