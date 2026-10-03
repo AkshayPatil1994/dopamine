@@ -18,6 +18,7 @@ module mod_gmsh_reader
   integer(ip), parameter :: GMSH_HEX8   = 5
   integer(ip), parameter :: GMSH_PRISM6 = 6
   integer(ip), parameter :: GMSH_PYR5   = 7
+  integer(ip), parameter :: GMSH_POINT  = 15
   integer(ip), parameter :: GMSH_TET10  = 11
   integer(ip), parameter :: GMSH_HEX20  = 17
 
@@ -215,10 +216,17 @@ contains
     do ib = 1, n_entity_blocks
       read(iunit, *) entity_dim, entity_tag, etype, n_in_block
       nn = gmsh_nodes_per_element(etype)
+      ! A guessed node count would desynchronise the list-directed read of every later element.
+      if (nn < 1) then
+        write(*, '(A,I0,A)') 'ERROR: unsupported Gmsh element type ', etype, &
+          ' (supported: first-order line, tri, quad, tet, hex, prism, pyramid, point)'
+        error stop 'gmsh_read: unsupported element type; export first-order elements'
+      end if
       do i = 1, n_in_block
         elements(offset+i)%etype    = etype
+        ! Untagged entities keep phys_tag = -1: falling back to the entity tag could silently match an
+        ! unrelated physical group that happens to carry the same number.
         elements(offset+i)%phys_tag = lookup_entity_phys_tag(entity_phys, n_entity_phys, entity_dim, entity_tag)
-        if (elements(offset+i)%phys_tag <= 0) elements(offset+i)%phys_tag = entity_tag
         allocate(elements(offset+i)%nodes(nn))
         read(iunit, *) etag, elements(offset+i)%nodes(1:nn)
       end do
@@ -241,7 +249,7 @@ contains
     integer(ip), allocatable :: tag_to_local(:)
     integer(ip) :: max_tag, i, e, c
     integer(ip) :: n_vol, n_bnd
-    integer(ip) :: vol_indices(n_elem), bnd_indices(n_elem)
+    integer(ip), allocatable :: vol_indices(:), bnd_indices(:)  ! heap: n_elem can exceed the OpenMP stack
     integer(ip), allocatable :: conn(:)
     integer(ip) :: total_conn, vtk_code, nconn
 
@@ -254,6 +262,7 @@ contains
     end do
 
     ! Separate volume and boundary elements
+    allocate(vol_indices(max(n_elem, 1)), bnd_indices(max(n_elem, 1)))
     n_vol = 0; n_bnd = 0
     do e = 1, n_elem
       if (is_volume_element(elements(e)%etype)) then
@@ -313,7 +322,7 @@ contains
                                  n_vol, n_bnd, coords, tag_to_local, &
                                  groups, n_phys)
 
-    deallocate(tag_to_local)
+    deallocate(tag_to_local, vol_indices, bnd_indices)
   end subroutine build_mesh_from_gmsh
 
   !> Extract low-order volume connectivity and matching VTK cell type code.
@@ -504,6 +513,11 @@ contains
           exit
         end if
       end do
+      if (n_phys > 0 .and. face_patch(f) < 1) then
+        write(*, '(A,I0,A)') 'ERROR: boundary element with physical tag ', elements(e)%phys_tag, &
+          ' belongs to no 2-D physical group'
+        error stop 'build_faces_from_cells: boundary face without a physical surface group'
+      end if
     end do
 
     msh%n_bnd_faces = n_bnd_f
@@ -972,7 +986,8 @@ contains
     case (GMSH_PYR5);   gmsh_nodes_per_element = 5
     case (GMSH_TET10);  gmsh_nodes_per_element = 10
     case (GMSH_HEX20);  gmsh_nodes_per_element = 20
-    case default;       gmsh_nodes_per_element = 4
+    case (GMSH_POINT);  gmsh_nodes_per_element = 1
+    case default;       gmsh_nodes_per_element = -1  ! unsupported: caller must stop
     end select
   end function gmsh_nodes_per_element
 
