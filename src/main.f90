@@ -245,10 +245,10 @@ program dopamine_main
     real(rp) :: nonortho_max_deg
     integer(lp) :: n_refine_faces
     logical :: corr_is_default
-    corr_is_default = (config%params%n_nonortho_corr == 1)
+    corr_is_default = (config%params%n_nonortho_corr <= 0)  ! 0 = auto (parser default)
     call report_mesh_quality(mesh_local, nonortho_max_deg_out=nonortho_max_deg, n_refine_out=n_refine_faces)
     call report_mesh_integrity(mesh_local)
-    ! Auto-upgrade n_nonortho_corr based on mesh non-orthogonality (only when user left default=1).
+    ! Auto-upgrade n_nonortho_corr based on mesh non-orthogonality (only when the user left it at auto, 0).
     if (corr_is_default) then
       if (nonortho_max_deg > 60.0_rp) then
         config%params%n_nonortho_corr = 3
