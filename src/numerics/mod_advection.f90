@@ -2016,7 +2016,7 @@ contains
     ! only first order wherever the stencil is skewed (refinement faces, snapped cells).
     grad_up = 0.0_rp
     if (present(grad_phi)) then
-      if (up <= size(grad_phi, 2)) grad_up = grad_phi(:, up)
+      if (up <= size(grad_phi, 2) .and. up <= msh%n_cells .and. down <= msh%n_cells) grad_up = grad_phi(:, up)
     end if
 
     a11 = 0.0_rp; a12 = 0.0_rp; a22 = 0.0_rp
@@ -2038,6 +2038,7 @@ contains
     nfit = nfit + 1
 
     do fi = msh%cells(up)%face_offset, msh%cells(up)%face_offset + msh%cells(up)%n_faces - 1
+      if (up > msh%n_cells .or. down > msh%n_cells) exit  ! processor face: stencil-free on both ranks
       fj = msh%cell_faces(fi)
       nb = msh%faces(fj)%owner
       if (nb == up) nb = msh%faces(fj)%neighbour
@@ -2101,7 +2102,7 @@ contains
 
     grad_up = 0.0_rp
     if (present(grad_U)) then
-      if (up <= size(grad_U, 3)) grad_up = grad_U(:, :, up)
+      if (up <= size(grad_U, 3) .and. up <= msh%n_cells .and. down <= msh%n_cells) grad_up = grad_U(:, :, up)
     end if
 
     a11 = 0.0_rp; a12 = 0.0_rp; a22 = 0.0_rp
@@ -2125,6 +2126,7 @@ contains
     nfit = nfit + 1
 
     do fi = msh%cells(up)%face_offset, msh%cells(up)%face_offset + msh%cells(up)%n_faces - 1
+      if (up > msh%n_cells .or. down > msh%n_cells) exit  ! processor face: stencil-free on both ranks
       fj = msh%cell_faces(fi)
       nb = msh%faces(fj)%owner
       if (nb == up) nb = msh%faces(fj)%neighbour
@@ -2246,6 +2248,7 @@ contains
     best_align = -1.0_rp
     best_perp2 = huge(1.0_rp)
     do fi = msh%cells(up)%face_offset, msh%cells(up)%face_offset + msh%cells(up)%n_faces - 1
+      if (up > msh%n_cells .or. down > msh%n_cells) exit  ! processor face: stencil-free on both ranks
       fj = msh%cell_faces(fi)
       nb = msh%faces(fj)%owner
       if (nb == up) nb = msh%faces(fj)%neighbour
@@ -2538,7 +2541,9 @@ contains
     real(rp)    :: best_align, best_perp2
 
     far_up = -1
-    if (up < 1 .or. up > nc) return
+    ! Processor face: a ghost cell's face list is partial, so the stencil would differ between the two
+    ! ranks sharing the face. Both sides fall back to the stencil-free reconstruction instead.
+    if (up < 1 .or. up > nc .or. down > nc) return
     best_align = -1.0_rp
     best_perp2 = huge(1.0_rp)
     do fi = cfo_soa(up), cfo_soa(up+1) - 1
@@ -2590,7 +2595,8 @@ contains
     phi_D = phi(down)
 
     grad_up = 0.0_rp
-    if (up <= size(grad_phi, 2)) grad_up = grad_phi(:, up)
+    ! Processor faces (ghost up/down) use neither the gradient nor the stencil, so both ranks agree.
+    if (up <= size(grad_phi, 2) .and. up <= nc .and. down <= nc) grad_up = grad_phi(:, up)
 
     a11 = 0.0_rp; a12 = 0.0_rp; a22 = 0.0_rp
     b1 = 0.0_rp; b2 = 0.0_rp
@@ -2610,7 +2616,7 @@ contains
     lin_den = lin_den + weight * s_down * s_down
     nfit = nfit + 1
 
-    if (up >= 1 .and. up <= nc) then
+    if (up >= 1 .and. up <= nc .and. down <= nc) then
       do fi = cfo_soa(up), cfo_soa(up+1) - 1
         fj = cell_faces(fi)
         nb = fo_soa(fj)
