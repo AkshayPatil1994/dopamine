@@ -527,6 +527,8 @@ contains
       msh%global_id(n_owned + i)      = int(ghost_ids(i), lp)
     end do
 
+    vlocal = 0
+
     if (topo_flag == 1 .and. n_vertices_global > 0) then
       ! Gather only the vertices this rank touches, then sort-unique. Ascending global
       ! order reproduces the old dense-scan numbering exactly, at O(n_owned) not O(n_vertices_global).
