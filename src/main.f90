@@ -315,6 +315,7 @@ program dopamine_main
     if (rank == 0) write(*, '(A,I0)') ' Reading checkpoint from step ', restart_step
     call read_checkpoint(solver, mesh_local, trim(config%restart_dir), restart_step, rank)
     if (rank == 0) write(*, '(A)') ' Checkpoint restored. Continuing from previous state...'
+    call solver%refresh_after_restart()
     if (.not. solver%u_face_ready) then
       if (rank == 0) write(*, '(A)') ' Checkpoint carries no face flux; rebuilding it from the restored velocity.'
       call solver%rebuild_face_flux()

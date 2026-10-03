@@ -3,6 +3,7 @@
 !> Per-rank binary checkpoint serialization/deserialization of FVSolver state.
 module mod_checkpoint_io
   use mod_kinds
+  use iso_fortran_env, only: int64
   implicit none
   private
   public :: write_checkpoint, read_checkpoint
@@ -15,6 +16,7 @@ contains
     ! Import types locally to avoid module-level dependency issues
     use mod_mesh,    only: Mesh
     use mod_wall_model, only: wall_model_get_filter_state
+    use mod_sem_inflow, only: sem_get_rng_state
     use mod_fv_solver, only: FVSolver
     use mpi_f08
     type(FVSolver),       intent(in) :: solver
@@ -29,7 +31,7 @@ contains
     integer(ip) :: header(8)
     integer(ip) :: has_C
     real(rp), allocatable :: wm_filt(:,:)
-    logical :: wm_ready
+    logical :: wm_ready, sem_ready
     logical :: dir_exists
 
     nc = msh%n_cells
@@ -58,6 +60,9 @@ contains
     if (allocated(solver%L_bnd))     header(8) = header(8) + 4
     call wall_model_get_filter_state(wm_filt, wm_ready)
     if (wm_ready) header(8) = header(8) + 8  ! 8 = wall-stress time-filter state
+    sem_ready = solver%abl_config%use_sem .and. solver%sem_state%initialized
+    if (sem_ready) sem_ready = allocated(solver%sem_state%pos) .and. allocated(solver%sem_state%amp)
+    if (sem_ready) header(8) = header(8) + 16  ! 16 = synthetic-eddy inflow state
 
     ! Create processorR directory if needed (each rank creates its own to avoid race condition)
     write(rank_str, '(I0)') rank
@@ -113,6 +118,11 @@ contains
     if (iand(header(8), 2_ip) /= 0) write(iunit) solver%q_w_bnd
     if (iand(header(8), 4_ip) /= 0) write(iunit) solver%L_bnd
     if (iand(header(8), 8_ip) /= 0) write(iunit) wm_filt
+    if (iand(header(8), 16_ip) /= 0) then
+      write(iunit) solver%sem_state%n_eddies, sem_get_rng_state()
+      write(iunit) solver%sem_state%pos
+      write(iunit) solver%sem_state%amp
+    end if
 
     close(iunit)
 
@@ -139,6 +149,8 @@ contains
     use mod_mesh,    only: Mesh
     use mod_fv_solver, only: FVSolver
     use mod_wall_model, only: wall_model_set_filter_state
+    use mod_sem_inflow, only: sem_set_rng_state
+    use mod_fv_solver, only: update_sem_inflow
     type(FVSolver),       intent(inout) :: solver
     type(Mesh),           intent(in) :: msh
     character(len=*),     intent(in) :: checkpoint_dir
@@ -146,6 +158,9 @@ contains
     integer(ip),          intent(in) :: rank
 
     real(rp), allocatable :: wm_filt(:,:)
+    integer(ip) :: n_eddies_ckpt
+    integer(int64) :: rng_ckpt
+    real(rp), allocatable :: eddy_pos(:,:), eddy_amp(:,:)
     integer(ip) :: iunit, ios, nc, ns, nc_ckpt, ns_ckpt, step_ckpt
     character(len=512) :: filename
     character(len=16)  :: rank_str, step_str
@@ -244,6 +259,21 @@ contains
       allocate(wm_filt(3, size(solver%tau_w_bnd, 2)))
       read(iunit) wm_filt
       call wall_model_set_filter_state(wm_filt)
+    end if
+    if (iand(header(8), 16_ip) /= 0) then
+      read(iunit) n_eddies_ckpt, rng_ckpt
+      allocate(eddy_pos(3, n_eddies_ckpt), eddy_amp(3, n_eddies_ckpt))
+      read(iunit) eddy_pos
+      read(iunit) eddy_amp
+      if (solver%abl_config%use_sem .and. solver%sem_state%initialized .and. &
+          solver%sem_state%n_eddies == n_eddies_ckpt) then
+        solver%sem_state%pos = eddy_pos
+        solver%sem_state%amp = eddy_amp
+        call sem_set_rng_state(rng_ckpt)
+        call update_sem_inflow(solver)  ! inlet fluctuations for the restored eddies
+      else
+        write(*, '(A)') 'WARNING: checkpoint synthetic-eddy state does not match this run; eddies restart fresh'
+      end if
     end if
 
     ! Restore step counter

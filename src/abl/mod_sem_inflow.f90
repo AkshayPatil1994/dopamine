@@ -22,9 +22,20 @@ module mod_sem_inflow
   integer(int64), save      :: rng_state = RNG_SEED
 
   public :: sem_init, sem_advance, sem_velocity_at_face
+  public :: sem_get_rng_state, sem_set_rng_state
   public :: sem_read_profile, sem_profile_at, sem_cholesky
 
 contains
+
+  !> Random-number state, for checkpoints: the eddy field is a pure function of (pos, amp, rng_state).
+  integer(int64) function sem_get_rng_state() result(st)
+    st = rng_state
+  end function sem_get_rng_state
+
+  subroutine sem_set_rng_state(st)
+    integer(int64), intent(in) :: st
+    rng_state = st
+  end subroutine sem_set_rng_state
 
   !> Portable xorshift64 uniform in [0,1). Bit ops only, so no reliance on integer overflow.
   !> Every rank runs the identical call sequence, keeping the eddy field consistent.

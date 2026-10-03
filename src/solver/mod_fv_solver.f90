@@ -31,6 +31,7 @@ module mod_fv_solver
 
   public :: FVSolver
   public :: solver_params_t
+  public :: update_sem_inflow
   public :: snap_dt_to_write_time
 
   type, public :: solver_params_t
@@ -246,6 +247,7 @@ module mod_fv_solver
     procedure :: advance      => solver_advance
     procedure :: project_once => solver_project_once
     procedure :: rebuild_face_flux => solver_rebuild_face_flux
+    procedure :: refresh_after_restart => solver_refresh_after_restart
     procedure :: projection_idempotency => solver_projection_idempotency
     procedure :: divergence_metrics => solver_divergence_metrics
     procedure :: destroy      => solver_destroy
@@ -571,6 +573,20 @@ contains
     self%w_gp         = gp_save
     self%w_gp_rc      = gprc_save
   end subroutine solver_projection_idempotency
+
+  !> Rebuild the boundary values and gradients a restored state needs before its first step. The first
+  !> stage extrapolates inflow/outlet/slip/wall values with the gradients of the previous stage, which a
+  !> checkpoint does not hold (they would triple its size); zeros there made the first step differ from
+  !> an uninterrupted run. Recomputing them from the restored fields recovers all but the O(dt) part.
+  subroutine solver_refresh_after_restart(self)
+    class(FVSolver), intent(inout) :: self
+
+    call refresh_halos_and_bc(self)
+    call compute_all_gradients(self)
+    call compute_pressure_gradient(self)
+    call refresh_halos_and_bc(self)
+    call compute_all_gradients(self)
+  end subroutine solver_refresh_after_restart
 
   !> Rebuild U_face from the current U after a checkpoint that carries none (e.g. one written by
   !> dopamine-checkpoint-partition, whose cell layout no longer matches the old face numbering).
