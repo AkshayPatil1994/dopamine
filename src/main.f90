@@ -343,7 +343,7 @@ program dopamine_main
   if (config%stats_global_frequency > 0) then
     call stats_init(stats, trim(config%output_prefix), &
                     config%stats_global_frequency, rank, &
-                    restart=config%restart_enabled)
+                    restart=config%restart_enabled, restart_step=restart_step)
   end if
 
   call sampling_init(sampler, trim(config%output_prefix), mesh_local, rank, &

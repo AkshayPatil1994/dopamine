@@ -28,12 +28,13 @@ module mod_stats
 contains
 
   !> Initialise stats collector: open CSV on rank 0; append to existing file on restart, else write header.
-  subroutine stats_init(stats, prefix, freq, rank, restart)
+  subroutine stats_init(stats, prefix, freq, rank, restart, restart_step)
     type(StatsCollector), intent(inout) :: stats
     character(len=*),     intent(in)    :: prefix
     integer(ip),          intent(in)    :: freq
     integer(ip),          intent(in)    :: rank
     logical, optional,    intent(in)    :: restart
+    integer(ip), optional, intent(in)   :: restart_step  ! rows after this step are dropped from an existing CSV
     logical    :: do_restart
     integer(ip) :: ios
 
@@ -45,6 +46,8 @@ contains
 
     if (rank == 0) then
       if (do_restart) then
+        ! Drop the rows of the abandoned continuation and recover E0 before appending.
+        if (present(restart_step)) call stats_prepare_restart(stats, restart_step)
         ! Try to append to an existing file; fall back to creating a new one.
         open(newunit=stats%file_unit, &
              file=trim(stats%prefix)//'_stats.csv', &
@@ -86,6 +89,65 @@ contains
       stats%file_opened = .true.
     end if
   end subroutine stats_init
+
+  !> Rewrite an existing stats CSV without the rows past restart_step and recover the E0 that
+  !> E_over_E0 was normalised with (E / E_over_E0 of the first usable row).
+  subroutine stats_prepare_restart(stats, restart_step)
+    type(StatsCollector), intent(inout) :: stats
+    integer(ip),          intent(in)    :: restart_step
+
+    character(len=1024), allocatable :: lines(:), keep(:)
+    character(len=1024) :: line
+    character(len=512)  :: fname
+    integer(ip) :: iu, ios, n, nkeep, i, step_r
+    real(rp)    :: t_r, e_r, eps_r, eoe0_r
+    logical     :: exists
+
+    fname = trim(stats%prefix)//'_stats.csv'
+    inquire(file=trim(fname), exist=exists)
+    if (.not. exists) return
+    open(newunit=iu, file=trim(fname), status='old', action='read', iostat=ios)
+    if (ios /= 0) return
+
+    allocate(lines(1024))
+    n = 0
+    do
+      read(iu, '(A)', iostat=ios) line
+      if (ios /= 0) exit
+      if (n == size(lines)) then
+        allocate(keep(2 * n))
+        keep(1:n) = lines
+        call move_alloc(keep, lines)
+      end if
+      n = n + 1
+      lines(n) = line
+    end do
+    close(iu)
+    if (n < 1) return
+
+    allocate(keep(n))
+    nkeep = 1
+    keep(1) = lines(1)  ! header
+    do i = 2, n
+      read(lines(i), *, iostat=ios) step_r, t_r, e_r, eps_r, eoe0_r
+      if (ios /= 0) cycle
+      if (step_r > restart_step) cycle
+      nkeep = nkeep + 1
+      keep(nkeep) = lines(i)
+      if (stats%E0_ref <= SMALL .and. eoe0_r > SMALL .and. e_r > SMALL) stats%E0_ref = e_r / eoe0_r
+    end do
+
+    if (nkeep < n) then
+      write(*, '(A,I0,A,I0,A)') ' Stats: dropping ', n - nkeep, ' row(s) after restart step ', restart_step, '.'
+      open(newunit=iu, file=trim(fname), status='replace', action='write', iostat=ios)
+      if (ios == 0) then
+        do i = 1, nkeep
+          write(iu, '(A)') trim(keep(i))
+        end do
+        close(iu)
+      end if
+    end if
+  end subroutine stats_prepare_restart
 
   !> Sample statistics and write to screen + CSV.
   subroutine stats_sample(stats, solver, time, step, rank, E0, dt, output_written)
