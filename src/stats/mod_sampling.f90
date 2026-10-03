@@ -53,7 +53,7 @@ module mod_sampling
 
 contains
 
-  subroutine sampling_init(sampler, prefix, msh, rank, n_planes, planes, n_lines, lines, n_curves, curves, n_surfaces, surfaces)
+  subroutine sampling_init(sampler, prefix, msh, rank, n_planes, planes, n_lines, lines, n_curves, curves, n_surfaces, surfaces, restart_time)
     type(SamplingCollector), intent(inout) :: sampler
     character(len=*),        intent(in)    :: prefix
     type(Mesh),              intent(in)    :: msh
@@ -63,6 +63,7 @@ contains
     type(LineSampleDef),     intent(in)    :: lines(:)
     type(CurveSampleDef),    intent(in)    :: curves(:)
     type(SurfaceSampleDef),  intent(in)    :: surfaces(:)
+    real(rp), optional,      intent(in)    :: restart_time  ! continue existing sample files, dropping later records
 
     integer(ip) :: total, idx, i, j
 
@@ -132,7 +133,7 @@ contains
 
     if (sampler%rank == 0) then
       do i = 1, sampler%n_objects
-        call open_object_netcdf(sampler, sampler%objects(i))
+        call open_object_netcdf(sampler, sampler%objects(i), restart_time)
       end do
     end if
   end subroutine sampling_init
@@ -376,14 +377,21 @@ contains
     deallocate(points)
   end subroutine init_surface_plane_intersection_object
 
-  subroutine open_object_netcdf(sampler, obj)
+  subroutine open_object_netcdf(sampler, obj, restart_time)
     type(SamplingCollector),   intent(in)    :: sampler
     type(SampleObjectRuntime), intent(inout) :: obj
+    real(rp), optional,        intent(in)    :: restart_time
 
     character(len=512) :: fname
 
     if (.not. obj%active) return
     fname = trim(sampler%prefix)//'_sample_'//trim(obj%kind)//'_'//trim(obj%name)//'.nc'
+
+    if (present(restart_time)) then
+      if (restart_time >= 0.0_rp) then  ! negative = fresh run
+        if (reopen_object_netcdf(obj, trim(fname), restart_time)) return
+      end if
+    end if
 
     call check_nc(nf90_create(trim(fname), nf90_clobber, obj%ncid), 'nf90_create('//trim(fname)//')')
     call check_nc(nf90_def_dim(obj%ncid, 'time', nf90_unlimited, obj%dim_time), 'nf90_def_dim(time)')
@@ -404,6 +412,58 @@ contains
     call check_nc(nf90_enddef(obj%ncid), 'nf90_enddef')
     call check_nc(nf90_put_var(obj%ncid, obj%var_coords, obj%points), 'nf90_put_var(coords)')
   end subroutine open_object_netcdf
+
+  !> Continue an existing sample file after a restart: keep the records up to restart_time and let the
+  !> next samples overwrite the rest. Returns .false. (caller creates a fresh file) when the file is
+  !> missing or was written for a different point set.
+  logical function reopen_object_netcdf(obj, fname, restart_time) result(ok)
+    type(SampleObjectRuntime), intent(inout) :: obj
+    character(len=*),          intent(in)    :: fname
+    real(rp),                  intent(in)    :: restart_time
+
+    integer(ip) :: ncid, dim_time, dim_point, n_rec, n_pts, keep, stat
+    real(rp), allocatable :: times(:)
+    logical :: exists
+
+    ok = .false.
+    inquire(file=fname, exist=exists)
+    if (.not. exists) return
+    if (nf90_open(fname, nf90_write, ncid) /= nf90_noerr) return
+
+    stat = nf90_inq_dimid(ncid, 'time', dim_time)
+    if (stat == nf90_noerr) stat = nf90_inq_dimid(ncid, 'point', dim_point)
+    if (stat == nf90_noerr) stat = nf90_inquire_dimension(ncid, dim_point, len=n_pts)
+    if (stat == nf90_noerr) stat = nf90_inquire_dimension(ncid, dim_time, len=n_rec)
+    if (stat == nf90_noerr) stat = nf90_inq_varid(ncid, 'time', obj%var_time)
+    if (stat == nf90_noerr) stat = nf90_inq_varid(ncid, 'U', obj%var_u)
+    if (stat == nf90_noerr) stat = nf90_inq_varid(ncid, 'p', obj%var_p)
+    if (stat == nf90_noerr) stat = nf90_inq_varid(ncid, 'T', obj%var_t)
+    if (stat == nf90_noerr) stat = nf90_inq_varid(ncid, 'nu_sgs', obj%var_nu_sgs)
+    if (stat /= nf90_noerr .or. n_pts /= obj%n_points) then
+      write(*, '(A)') ' Sampling: cannot continue '//fname//' (different layout); starting a new file.'
+      stat = nf90_close(ncid)
+      return
+    end if
+
+    keep = n_rec
+    if (n_rec > 0) then
+      allocate(times(n_rec))
+      call check_nc(nf90_get_var(ncid, obj%var_time, times, start=(/1/), count=(/n_rec/)), 'nf90_get_var(time)')
+      ! Records are in time order; the tolerance absorbs the sample written exactly at the checkpoint.
+      do while (keep > 0)
+        if (times(keep) <= restart_time + 1.0e-9_rp * max(abs(restart_time), 1.0_rp)) exit
+        keep = keep - 1
+      end do
+      deallocate(times)
+    end if
+    if (keep < n_rec) write(*, '(A,I0,A)') ' Sampling: dropping ', n_rec - keep, ' record(s) after the restart in '//fname
+
+    obj%ncid = ncid
+    obj%dim_time = dim_time
+    obj%dim_point = dim_point
+    obj%samples_written = keep
+    ok = .true.
+  end function reopen_object_netcdf
 
   subroutine write_object_sample(obj, time, u, p, t, nu_sgs)
     type(SampleObjectRuntime), intent(inout) :: obj

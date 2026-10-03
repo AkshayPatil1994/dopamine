@@ -335,7 +335,7 @@ program dopamine_main
 
   ! Initialise output writer
   call output_writer_init(writer, trim(config%output_prefix), mesh_local, solver, &
-                          restart=config%restart_enabled)
+                          restart=config%restart_enabled, restart_step=restart_step)
   if (config%stats_global_frequency > 0) then
     call stats_init(stats, trim(config%output_prefix), &
                     config%stats_global_frequency, rank, &
@@ -346,7 +346,8 @@ program dopamine_main
                      config%n_planes, config%planes, &
                      config%n_lines, config%lines, &
                      config%n_curves, config%curves, &
-                     config%n_surfaces, config%surfaces)
+                     config%n_surfaces, config%surfaces, &
+                     restart_time=merge(solver%time, -1.0_rp, config%restart_enabled))
 
   ! Time loop
   call warn_log_set_step_start(restart_step + 1_ip)

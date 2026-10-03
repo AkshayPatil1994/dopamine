@@ -77,12 +77,13 @@ contains
 
   ! Public interface
 
-  subroutine output_writer_init(writer, prefix, msh, solver, restart)
+  subroutine output_writer_init(writer, prefix, msh, solver, restart, restart_step)
     type(OutputWriter), intent(inout) :: writer
     character(len=*),   intent(in)    :: prefix
     type(Mesh), target, intent(in)    :: msh
     type(FVSolver),     intent(in), optional :: solver
     logical,            intent(in), optional :: restart
+    integer(ip),        intent(in), optional :: restart_step  ! snapshots written after this step are discarded
 
     integer(ip) :: ierr, nc_local, nv_local, conn_local
     integer(ip) :: n_cells_total, n_verts_total, n_conn_total, n_topo_total
@@ -278,7 +279,11 @@ contains
 
       fname = trim(prefix)//'.nc'
       if (do_restart) then
-        call reopen_netcdf_file(writer, trim(fname))
+        if (present(restart_step)) then
+          call reopen_netcdf_file(writer, trim(fname), restart_step)
+        else
+          call reopen_netcdf_file(writer, trim(fname))
+        end if
       else
         call create_netcdf_file(writer, trim(fname), n_cells_total, n_verts_total, n_conn_total, &
                                 geom_global, conn_global, offsets_global, ct_global, topo_global)
@@ -564,11 +569,12 @@ contains
 
   !> Re-open an existing NetCDF output file for appending after a restart.
   !> Queries all dimension/variable IDs and restores the times/steps arrays.
-  subroutine reopen_netcdf_file(writer, fname)
+  subroutine reopen_netcdf_file(writer, fname, restart_step)
     type(OutputWriter), intent(inout) :: writer
     character(len=*),   intent(in)    :: fname
+    integer(ip),        intent(in), optional :: restart_step
 
-    integer(ip) :: existing_snaps, s
+    integer(ip) :: existing_snaps, s, keep
     character(len=64) :: vname
 
     ! Open existing file for read/write access
@@ -638,6 +644,22 @@ contains
                     start=(/1/), count=(/existing_snaps/)), 'get:time_history')
       call nc_check(nf90_get_var(writer%ncid, writer%var_step, writer%steps(1:existing_snaps), &
                     start=(/1/), count=(/existing_snaps/)), 'get:step_history')
+
+      ! Snapshots past the checkpoint belong to the abandoned continuation; the next write overwrites
+      ! them in place (the unlimited dimension cannot shrink, so a shorter rerun leaves a stale tail
+      ! that the XDMF index, which only lists snap_count entries, does not reference).
+      if (present(restart_step)) then
+        keep = existing_snaps
+        do while (keep > 0)
+          if (writer%steps(keep) <= restart_step) exit
+          keep = keep - 1
+        end do
+        if (keep < existing_snaps) then
+          write(*, '(A,I0,A,I0,A)') ' Output: dropping ', existing_snaps - keep, &
+            ' snapshot(s) written after restart step ', restart_step, '.'
+          writer%snap_count = keep
+        end if
+      end if
     end if
   end subroutine reopen_netcdf_file
 
