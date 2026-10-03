@@ -15,6 +15,7 @@ being restructured (e.g. the GPU port); they are not validation cases.
 | `pdrop` | skewed 12^3 box (`mk_box_mesh.py`, no gmsh) | outlets at p = 1 and 0 with no body force: Umax must grow as t; Dirichlet outlets with non-orthogonal correctors |
 | `hydro` | same mesh | outlets at p = 1 and 0 balancing `fz = -1`: the fluid must stay at rest |
 | `hydrowall` | same mesh, all six faces no-slip walls | closed box under `fz = -1`: the wall pressure gradient `dp/dn = f.n`; Umax stays O(dt g) |
+| `inflow` | same mesh | SEM `ablInlet` at x0, outlet at xL, periodic y, slip z, CDS: eddies wrap across the periodic seam; the result must not depend on the rank count (np 1, 2, 3 agree to 1e-14) |
 
 Run everything through CTest from a build tree (meshes are generated with gmsh on first use):
 
@@ -45,6 +46,8 @@ vertex-adjacent cells across partition cuts: step 1 of every case now agrees wit
 reference to machine precision (before, `eps` in `rb` differed by 2.5% and `nu_sgs_mean` in
 `channel` by 2e-3). The `dynsmag` references were regenerated again after the test filter
 started including periodic partners on single-rank meshes.
+
+The `pdrop` and `hydro` references were regenerated after the periodic seam stopped using the owner-only gradient in the deferred non-orthogonal flux (the np1 and np2 results now coincide); `inflow` is new.
 
 To regenerate a reference after an intentional change in results:
 

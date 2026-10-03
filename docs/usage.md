@@ -771,13 +771,14 @@ When `use_sem = .true.`:
 - SEM generates $$N_e$$ eddies (default 500) in a recycle box upstream of inlet
 - Eddies are convected downstream and create anisotropic turbulent fluctuations
 - Target Reynolds stress anisotropy matches ABL log-layer profiles
-- Eddy length scale $$\sigma$$ defaults to $$0.1 \times$$ `z_ref` (override with `sem_sigma`)
+- Eddy length scale $$\sigma$$ defaults to $$0.1 \times$$ the smaller in-plane extent of the inlet (override with `sem_sigma`); resolve it with at least 4-6 cells
 
 **Usage notes:**
 - Apply SEM only to inlet patches; other BCs are unaffected
 - SEM injects velocity fluctuations only; it does not require `boussinesq = .true.`
 - Recycle box depth is estimated from mesh bounds automatically
-- Eddy recycling is not enabled in the current SEM path
+- Eddies leaving the box are re-seeded upstream; across a periodic in-plane direction they wrap, so the fluctuation is periodic there (`sem_sigma` must then be below half the periodic width)
+- The fluctuation is not divergence-free: expect a pressure fluctuation of about twice the downstream level in the first cells at the inlet
 
 #### Prescribed Inflow Profiles
 

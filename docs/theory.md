@@ -439,21 +439,28 @@ Stanton number, $$\mathrm{k}B^{-1} = \ln(z_{0m}/z_{0h}) \approx 2$$.
 
 ### Synthetic Eddy Method (SEM) for Turbulent Inflow
 
-The SEM [@poletto2013] generates divergence-free turbulent fluctuations with
-anisotropic Reynolds stress matching the ABL log-layer spectrum:
+The SEM [@jarrin2006] builds the inlet fluctuation from a superposition of eddies:
 
 $$
 \mathbf{u}'(\mathbf{x}) = \sqrt{\frac{V_{box}}{N_e}}\, \sum_{e=1}^{N_e} \mathbf{a}_e \, f\left(\frac{|\mathbf{x} - \mathbf{x}_e|}{\sigma}\right)
 $$
 
-where $$\mathbf{a}_e$$ are eddy amplitude vectors, $$\mathbf{x}_e$$ eddy positions,
-and $$f(r) = \max(0, 1-r)$$ is a tent kernel. Amplitudes are rotated via Cholesky
-decomposition of the target Reynolds stress tensor to achieve realistic
-anisotropy: $$\sigma_u/u_* \approx 2.4$$, $$\sigma_v/u_* \approx 1.9$$, $$\sigma_w/u_* \approx 1.25$$.
+where $$\mathbf{a}_e$$ are eddy amplitude vectors (random signs), $$\mathbf{x}_e$$ eddy positions,
+and $$f(r) = \sqrt{15/2\pi}\,\max(0, 1-r)$$ is a tent kernel. Amplitudes are mapped through the Cholesky
+factor of the target Reynolds stress tensor to achieve anisotropy: $$\sigma_u/u_* \approx 2.4$$,
+$$\sigma_v/u_* \approx 1.9$$, $$\sigma_w/u_* \approx 1.25$$.
 
-Eddies are initialized in a recycle box upstream of the inlet and convected
-with a prescribed bulk velocity. The implementation supports incremental
-recycling of eddies exiting the upstream boundary (stub in current release).
+The fluctuation is **not divergence-free**: the kernel is scalar and the amplitude a random vector, so
+$$\nabla\cdot\mathbf{u}'\neq 0$$ (measured: the divergence is as large as the full velocity gradient). The
+inlet fluctuation is given zero net flux, so the projection stays consistent and the face-flux divergence is
+still zero to round-off, but the pressure responds to the non-solenoidal inflow with a localised
+fluctuation in the first cells (about twice the downstream level). Resolve $$\sigma$$ with at least
+4-6 cells. A divergence-free variant (Poletto et al. 2013) is not implemented.
+
+Eddies are placed in a box of depth $$2\sigma$$ about the inlet plane and convected with the bulk velocity;
+an eddy leaving the box is re-seeded upstream (amplitudes are kept, so the zero-mean balance survives). Where
+the inlet plane is periodic (a periodic patch pair normal to an in-plane direction) the box spans exactly one
+period and eddies are wrapped, so the fluctuation is periodic across the seam.
 
 ### Davies Relaxation (Nudging)
 
