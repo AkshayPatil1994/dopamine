@@ -287,6 +287,16 @@ contains
         end if
       end if
       if (do_restart) then
+        ! The file stores the cells in rank order; after a repartition (or a different mesh) the same
+        ! cells sit elsewhere, so appending would mix two orderings. Keep the old file under .old.
+        if (.not. nc_layout_matches(trim(fname), conn_global, n_conn_total)) then
+          write(*, '(A)') ' Output: '//trim(fname)//' has a different cell layout; moving it to '// &
+                          trim(fname)//'.old and starting a new file.'
+          call execute_command_line('mv -f "'//trim(fname)//'" "'//trim(fname)//'.old"', wait=.true.)
+          do_restart = .false.
+        end if
+      end if
+      if (do_restart) then
         if (present(restart_step)) then
           call reopen_netcdf_file(writer, trim(fname), restart_step)
         else
@@ -574,6 +584,29 @@ contains
       vert_off = vert_off + recv_nverts(r)
     end do
   end subroutine remap_connectivity_vertex_offsets
+
+  !> True when the file's connectivity record equals the freshly built one, i.e. the same cells in the same order.
+  logical function nc_layout_matches(fname, conn_global, n_conn) result(same)
+    character(len=*), intent(in) :: fname
+    integer(ip),      intent(in) :: conn_global(:)
+    integer(ip),      intent(in) :: n_conn
+
+    integer :: ncid, dimid, varid, stat, n_file
+    integer(ip), allocatable :: conn_file(:)
+
+    same = .false.
+    if (nf90_open(trim(fname), nf90_nowrite, ncid) /= nf90_noerr) return
+    stat = nf90_inq_dimid(ncid, 'connectivity_size', dimid)
+    if (stat == nf90_noerr) stat = nf90_inquire_dimension(ncid, dimid, len=n_file)
+    if (stat == nf90_noerr) stat = nf90_inq_varid(ncid, 'connectivity', varid)
+    if (stat == nf90_noerr .and. n_file == n_conn) then
+      allocate(conn_file(n_file))
+      stat = nf90_get_var(ncid, varid, conn_file)
+      if (stat == nf90_noerr) same = all(conn_file == conn_global(1:n_conn))
+      deallocate(conn_file)
+    end if
+    stat = nf90_close(ncid)
+  end function nc_layout_matches
 
   !> Re-open an existing NetCDF output file for appending after a restart.
   !> Queries all dimension/variable IDs and restores the times/steps arrays.
