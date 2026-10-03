@@ -262,7 +262,7 @@ contains
   logical function soa_is_finite(x) result(ok)
     !$acc routine seq
     real(rp), intent(in) :: x
-    ok = (x == x) .and. (abs(x) <= huge(x))
+    ok = abs(x) <= huge(x)  ! false for NaN (unordered) and Inf
   end function soa_is_finite
 
   !> CDS fast path via the flat SoA mesh mirror, for scheme=SCHEME_CDS with grad_phi and a
