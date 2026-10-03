@@ -1355,6 +1355,9 @@ contains
           else if (f_bnd >= 1 .and. f_bnd <= nbnd) then
             nb_simple = pneigh_soa(f_bnd)
           end if
+          ! periodic_neighbor is not populated on a single rank; the partner was resolved above
+          ! through the periodic pair. Without it the seam would see the owner's value on both sides.
+          if (nb_simple < 1) nb_simple = nb_per
         end if
 
         do k = 1, 3
@@ -1374,6 +1377,9 @@ contains
               end if
               grad_mean = gc * grad_U(:, k, o) + (1.0_rp - gc) * grad_U(:, k, nb_simple)
               phi_f = phi_f_plain + dot_product(grad_mean, epsilon)
+              ! d_on above is the raw centroid difference, a whole domain length across a periodic seam,
+              ! so eps is meaningless there; plain interpolation, as in the scalar path.
+              if (f > n_int) phi_f = phi_f_plain
               ! Fade the eps-correction out toward refinement interfaces; see refine_blend_weight.
               if (f <= n_int) then
                 w_blend = refine_blend_weight(skew_soa(f))
