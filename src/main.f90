@@ -332,7 +332,7 @@ program dopamine_main
 
     call apply_initial_conditions(solver, trim(config%ic_type), &
                                   config%ic_uref, config%ic_lref, config%ic_noise_level, &
-                                  config%wall_normal_direction)
+                                  config%wall_normal_direction, noise_seed=config%ic_noise_seed)
   end if
 
   ! A consistent projection is idempotent; a large change here is a discretisation defect.

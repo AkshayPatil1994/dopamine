@@ -36,13 +36,14 @@ contains
     end if
   end subroutine report_u_bounds
 
-  subroutine apply_initial_conditions(slv, ic_type, ic_uref, ic_lref, noise_level, wall_normal_dir)
+  subroutine apply_initial_conditions(slv, ic_type, ic_uref, ic_lref, noise_level, wall_normal_dir, noise_seed)
     type(FVSolver),    intent(inout) :: slv
     character(len=*),  intent(in)    :: ic_type
     real(rp),          intent(in)    :: ic_uref
     real(rp),          intent(in)    :: ic_lref
     real(rp),          intent(in)    :: noise_level
     integer(ip),       intent(in)    :: wall_normal_dir
+    integer(ip), optional, intent(in) :: noise_seed  ! > 0: reproducible noise; 0/absent: clock
 
     real(rp) :: uref, lref_eff
     integer(ip) :: wnd
@@ -89,7 +90,7 @@ contains
     call report_u_bounds(slv, 'after profile')
 
     if (noise_level > 0.0_rp) then
-      call add_random_velocity_noise(slv, noise_level)
+      call add_random_velocity_noise(slv, noise_level, noise_seed)
       call report_u_bounds(slv, 'after noise')
       ! Extra projection pass: multiplicative noise perturbs dU_1/dx, making
       ! the Poisson RHS O(noisexuref/dx). With rtol=1e-8 the first pass leaves
@@ -196,9 +197,10 @@ contains
 
   ! Multiplicative relative noise: each velocity component is perturbed by
   ! +/-noise_frac of its own local value. Components that are zero (e.g.
-  subroutine add_random_velocity_noise(slv, noise_frac)
+  subroutine add_random_velocity_noise(slv, noise_frac, noise_seed)
     type(FVSolver), intent(inout) :: slv
     real(rp),       intent(in)    :: noise_frac  ! fraction of local |U_k| to perturb
+    integer(ip), optional, intent(in) :: noise_seed
 
     integer(ip) :: c, k, seed_size, ierr_local
     integer, allocatable :: seed(:)
@@ -215,6 +217,9 @@ contains
         base_seed = modulo(1664525 * base_seed + seed_values(k) + 1013904223, huge(1) - 1)
       end do
       if (base_seed <= 0) base_seed = 13579
+      if (present(noise_seed)) then
+        if (noise_seed > 0) base_seed = noise_seed
+      end if
     end if
     call MPI_Bcast(base_seed, 1, MPI_INTEGER, 0, slv%mesh%comm, ierr_local)
 

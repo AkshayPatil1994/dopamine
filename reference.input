@@ -562,6 +562,8 @@
 
   ! Random perturbation amplitude added in IC setup when applicable.
   noise_level = 0.0
+  ! > 0 makes the noise reproducible (same seed, same rank count); 0 seeds from the clock.
+  noise_seed = 0
 
   ! Wall-normal direction index for wall-bounded IC logic (1=x, 2=y, 3=z).
   wall_normal_direction = 3

@@ -31,6 +31,7 @@ module mod_input_parser
     real(rp)               :: ic_uref = 0.0_rp
     real(rp)               :: ic_lref = 0.0_rp
     real(rp)               :: ic_noise_level = 0.0_rp
+    integer(ip)            :: ic_noise_seed = 0  ! 0 = seed from the clock (not reproducible)
     integer(ip)            :: wall_normal_direction = 3
     character(32)          :: output_prefix = 'dopamine'
     character(16)          :: gradient_scheme = 'LEAST_SQUARES'
@@ -746,10 +747,11 @@ contains
     real(rp)      :: ic_uref = 1.0_rp
     real(rp)      :: ic_lref = 0.0_rp
     real(rp)      :: noise_level = 0.0_rp
+    integer(ip)   :: noise_seed = 0
     integer(ip)   :: wall_normal_direction = 3
     integer(ip)   :: ios
 
-    namelist /dopamine_initial_condition/ ic_type, ic_uref, ic_lref, noise_level, wall_normal_direction
+    namelist /dopamine_initial_condition/ ic_type, ic_uref, ic_lref, noise_level, noise_seed, wall_normal_direction
 
     read(iunit, nml=dopamine_initial_condition, iostat=ios)
     if (ios /= 0 .and. ios /= -1) then
@@ -761,6 +763,7 @@ contains
     config%ic_uref = ic_uref
     config%ic_lref = ic_lref
     config%ic_noise_level = noise_level
+    config%ic_noise_seed = noise_seed
     config%wall_normal_direction = max(1, min(3, wall_normal_direction))
   end subroutine read_initial_condition
 
