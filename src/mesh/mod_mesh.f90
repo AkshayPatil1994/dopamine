@@ -1177,6 +1177,32 @@ contains
     if (allocated(self%halo_recv_idx))       deallocate(self%halo_recv_idx)
     if (allocated(self%halo_sbuf))           deallocate(self%halo_sbuf)
     if (allocated(self%halo_rbuf))           deallocate(self%halo_rbuf)
+    ! The SoA mirrors and face colouring are rebuilt by build_soa_mirror. Not touched in OpenACC builds,
+    ! where main stages them on the device and a host deallocate would have to be paired with an exit data.
+#ifndef _OPENACC
+    if (allocated(self%color_offsets)) deallocate(self%color_offsets)
+    if (allocated(self%face_color_perm)) deallocate(self%face_color_perm)
+    if (allocated(self%face_owner_soa)) deallocate(self%face_owner_soa)
+    if (allocated(self%face_neighbour_soa)) deallocate(self%face_neighbour_soa)
+    if (allocated(self%face_sf_soa)) deallocate(self%face_sf_soa)
+    if (allocated(self%face_gc_soa)) deallocate(self%face_gc_soa)
+    if (allocated(self%face_eps_soa)) deallocate(self%face_eps_soa)
+    if (allocated(self%face_skew_soa)) deallocate(self%face_skew_soa)
+    if (allocated(self%cell_volume_soa)) deallocate(self%cell_volume_soa)
+    if (allocated(self%cell_centroid_soa)) deallocate(self%cell_centroid_soa)
+    if (allocated(self%face_normal_soa)) deallocate(self%face_normal_soa)
+    if (allocated(self%face_area_soa)) deallocate(self%face_area_soa)
+    if (allocated(self%face_centre_soa)) deallocate(self%face_centre_soa)
+    if (allocated(self%face_dcf_soa)) deallocate(self%face_dcf_soa)
+    if (allocated(self%face_patch_id_soa)) deallocate(self%face_patch_id_soa)
+    if (allocated(self%patch_bc_id_soa)) deallocate(self%patch_bc_id_soa)
+    if (allocated(self%periodic_neighbor_soa)) deallocate(self%periodic_neighbor_soa)
+    if (allocated(self%periodic_pair_soa)) deallocate(self%periodic_pair_soa)
+    if (allocated(self%periodic_pair_dcf_soa)) deallocate(self%periodic_pair_dcf_soa)
+    if (allocated(self%periodic_gc_soa)) deallocate(self%periodic_gc_soa)
+    if (allocated(self%cell_face_offset_soa)) deallocate(self%cell_face_offset_soa)
+    self%soa_ready = .false.
+#endif
     self%halo_layout_ready = .false.
     self%halo_exchange_active = .false.
     self%halo_send_cells_total = 0
