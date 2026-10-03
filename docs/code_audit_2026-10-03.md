@@ -4,6 +4,19 @@ Scope: all of `src/` read file-by-file, except `mod_cgns_reader.F90` and the sec
 
 Status legend: **[confirmed]** = traced in code (and/or evidence); **[suspected]** = needs a test.
 
+## Status on `dev`
+
+| # | Status | Commit subject |
+|---|---|---|
+| 1 | fixed (symmetric `d_cf(own)+d_cf(partner)` coefficient on every periodic edge) | Make periodic pressure-matrix coefficients identical on both sides of a seam |
+| 2 | fixed as symmetry only (processor faces use the stencil-free reconstruction on both ranks; accuracy at partition seams is first-order-like, a deeper halo would restore it) | Use a stencil-free TVD/QUICK reconstruction on both sides of a processor face |
+| 4 | fixed | Apply the n_nonortho_corr auto-upgrades when the input leaves it at auto |
+| 5 | fixed (also zero-gradient when the effective diffusivity is 0) | Impose Neumann scalar fluxes through the effective diffusivity |
+| 7 | fixed (collective finite check every 10 steps and before output; abort path not yet exercised) | Abort the run when velocity or pressure turn non-finite |
+| 6 | investigated, **not fixed** (see #6) | |
+| 3, 8-12, 14 | open | |
+| 13 | resolved by removing the readers | |
+
 ## Suggested fix order
 
 1. #1 periodic pressure coefficients, 2. #2 ghost-upwind TVD/QUICK, 4. #4 `n_nonortho_corr` auto, 5. #5 Neumann scalar BC, 6. #6 outlet `p_val`, 7. #7 NaN abort; then the rest.
@@ -44,6 +57,7 @@ Status legend: **[confirmed]** = traced in code (and/or evidence); **[suspected]
 Dirichlet `c_b*p_val` is added to the φ-solve (`mod_pressure_solver.f90:403`, `solve` ~727) but `p = p_old + φ` accumulates (`mod_fv_solver.f90:1544-1548`); `correct_face_fluxes` uses `pval - p(o)` with p=φ (2667); `anchor_pressure_to_outlet` shifts to mean outlet p.
 - Experiment (periodic x,y box, z0 outlet p=1, zL outlet p=0, `fz=-1`): Umax = g·t (free fall) on orth mesh → pressure drop did nothing.
 - Fix idea: use `p_val - p_old_bnd` as the φ Dirichlet value (and matching flux/velocity corrections).
+- Follow-up experiment: setting the φ outlet value to 0 (`p_bnd` already equals `p_val`, so the increment is 0) changed nothing: Umax stays g·t. Pressure at t=0.12 is flat ≈0.6 with ≈0.5 in the end cells, i.e. both outlets are pinned to the *mean* of the two `p_val`s by `anchor_pressure_to_outlet` and no drop is built. The outlet face flux is `Ub·Sf` (extrapolated velocity, no pressure term) and the solve never sees the imposed difference, so the fix needs a derivation of the outlet term in the predictor/correction pair, not a value swap. With a single `p_val` (all outlets equal, the `duct` case) the current code is consistent.
 
 ### 7. No NaN/divergence abort [confirmed]
 NaN RHS/solution silently zeroed (`pressure_backend_petsc.c:773-775,792-793`; `mod_pressure_solver.f90:708-709`); `solver_compute_dt` falls back to `params%dt` on NaN. A blown-up run writes NaN until `t_end`.
