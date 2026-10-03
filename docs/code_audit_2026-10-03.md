@@ -14,12 +14,13 @@ Status legend: **[confirmed]** = traced in code (and/or evidence); **[suspected]
 | 5 | fixed (also zero-gradient when the effective diffusivity is 0) | Impose Neumann scalar fluxes through the effective diffusivity |
 | 7 | fixed (collective finite check every 10 steps and before output; abort path not yet exercised) | Abort the run when velocity or pressure turn non-finite |
 | 6 | investigated, **not fixed** (see #6) | |
-| 11 | partly fixed: unknown `patch_type` (now case-insensitive), >32 patches, >32 PETSc options and `write_interval = 0` are rejected/handled; unlisted mesh patches, unknown `sgs_model`/`pressure_solver`/`gradient_scheme` and the rank-0-only `bc_setup` stop remain | Reject unknown patch types, oversized patch/PETSc lists and write_interval = 0 crashes |
+| 11 | fixed: unknown `patch_type`, scheme/SGS-model/pressure-solver/gradient-scheme names (now case-insensitive), >32 patches, >32 PETSc options and `write_interval = 0` stop with a message; a missing BC patch aborts every rank. Unlisted mesh patches still warn and default to open | Reject unknown patch types...; Match scheme names case-insensitively...; Abort every rank when an input BC patch is missing |
 | 14 | fixed (cell-count sum check on read) | Abort when a preprocessed mesh is run on fewer ranks than it was decomposed for |
-| 9 | partly fixed: restarts continue/truncate the output and sample files (checked bit-identical on a 2-rank restart), a missing `.nc` starts a new file, and a repartitioned restart rebuilds `U_face`. Still open: SEM eddy state, wall-model time filter and `L_bnd` are not checkpointed, stats `E0_ref` is re-latched, a shorter rerun leaves a stale tail in the unlimited time dimension, and an old `.nc` reused after repartitioning keeps the old cell ordering | Continue output and sample files on restart...; Rebuild the face flux after a repartitioned restart... |
+| 9 | mostly fixed: output/sample files continue and truncate at the restart (bit-identical on a 2-rank restart), missing `.nc` starts a new file, repartitioned restart rebuilds `U_face`, stats CSV is trimmed and `E0` kept, the wall-stress time filter is checkpointed (restart error 1e-4 -> 0 on the channel case). Still open: SEM eddy state is not checkpointed, a shorter rerun leaves a stale tail in the unlimited time dimension, an old `.nc` reused after repartitioning keeps the old cell ordering | Continue output and sample files...; Rebuild the face flux...; Trim the stats CSV...; Checkpoint the wall-stress time filter... |
 | 10 | fixed (no skew correction on periodic faces, as in the SoA kernels; latent path, not exercised by the regression cases) | Skip the skewness correction on periodic faces in the host face interpolation |
 | 12 | partly fixed: unsupported element types and untagged boundary faces now stop with a message, large arrays moved to the heap. Still open: only the first physical tag per entity, vertex-mean face centres, tet-split volumes | Make the Gmsh reader reject unsupported element types and untagged boundary faces |
-| 3, 8 | open | |
+| 3 | open, not fixable locally: needs the halo to carry vertex-adjacent cells (the vertex extension only sees owned cells, so cut cells lose neighbours that np=1 has) | |
+| 8 | open: root cause is not the BC (see #8 follow-up) | |
 | 13 | resolved by removing the readers | |
 
 ## Suggested fix order
