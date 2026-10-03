@@ -24,6 +24,7 @@ contains
     logical :: matched
     logical, allocatable :: bc_used(:)
 
+    n_missing = 0
     allocate(bc_configs_out(msh%n_patches))
     allocate(bc_used(config%n_bcs), source=.false.)
 
@@ -94,9 +95,18 @@ contains
         end if
       end do
       if (n_missing > 0) then
-        error stop 'build_bc_configs: one or more input BC patch names do not exist in the mesh'
+        write(*, '(A)') 'ERROR: one or more input BC patch names do not exist in the mesh'
       end if
     end if
+    ! Decide collectively: a stop on rank 0 alone leaves the others waiting in the next collective.
+    block
+      use mpi_f08
+      integer :: n_miss_loc, n_miss_glob, ierr_m
+      n_miss_loc = merge(1, 0, msh%rank == 0 .and. n_missing > 0)
+      n_miss_glob = n_miss_loc
+      if (msh%nranks > 1) call MPI_Allreduce(n_miss_loc, n_miss_glob, 1, MPI_INTEGER, MPI_MAX, msh%comm, ierr_m)
+      if (n_miss_glob > 0) call MPI_Abort(msh%comm, 1, ierr_m)
+    end block
 
     call build_periodic_pairs(msh, bc_configs_out)
     block
