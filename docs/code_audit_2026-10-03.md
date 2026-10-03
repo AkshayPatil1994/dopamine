@@ -72,6 +72,8 @@ NaN RHS/solution silently zeroed (`pressure_backend_petsc.c:773-775,792-793`; `m
 ### 8. Body force / buoyancy at walls is unbalanced [confirmed experimentally]
 Wall pressure BC ignores the body-force normal component (`mod_bc.f90:423-430`, `a_wall` unused). Hydrostatic closed box, `fz=-1`, no-slip, orth mesh: Umax ≈ 6e-3 at t=0.12 (should be ~0). Affects Boussinesq/ABL near ground.
 
+**Follow-up (attempted fix, reverted).** Adding `dp/dn = f.n` (constant force plus Boussinesq buoyancy) to the total-pressure wall BC left the orthogonal box at exactly 6.249e-3 (that mesh sets `skip_grad_p`, so `p_bnd` never enters a gradient) and made the skewed box worse (3.0e-2 -> 3.5e-2). The BC is therefore not the cause. Likely cause: `correct_velocity_psolver_dual` builds the cell correction from face differences only and gives walls no contribution, while the wall face flux is fixed at 0, so a wall cell keeps the `dt*f` its predicted velocity gained but its wall face never carries. A fix needs that wall-face term designed together with the predictor (not a BC value); left open.
+
 ### 9. Restart gaps [confirmed]
 - Sampling files always `nf90_clobber` (`mod_sampling.f90:388`) → restart destroys earlier samples.
 - Output writer appends after existing records, no truncation to restart time (`reopen_netcdf_file`); restart without an existing `.nc` aborts.
@@ -117,6 +119,7 @@ The CGNS and ICEM/Fluent readers (the only reason the parser accepted `icem|flue
 
 ## Unverified suspicions (need tests)
 - **Double-counted non-orthogonal cross term in the projection.** After pre-correction + Rhie-Chow, `F_pred = F(u*) − dt(ḡprc·k + coeff·Δp_old)` already removes the old cross part; `correct_face_fluxes` then removes `cross(grad p_total)` (jno=1: `grad p_old`) instead of `cross(grad φ)`. Affects `compute_face_fluxes_and_rhs` / `correct_face_fluxes` (`mod_fv_solver.f90:2259-2270, 2415, 2635-2643`). Hydrostatic experiments were confounded by #6/#8. Test: manufactured linear/harmonic-pressure case on a skewed mesh (curvilinear hex generator used: `scratchpad/hs/mk.py`, perturbation `amp*sin(πX)sin(2πY)sin(πZ)` etc., 12³, 32.5° non-orth) checking φ≈0 at steady state.
+- Idempotency probe (`debug_diagnostics`, Taylor-Green IC on the 12^3 box, 1 step): relative L2 change 2.0000e-3 on the orthogonal mesh and 2.0014e-3 on the 32.5-degree skewed mesh, for `n_nonortho_corr` 1 and 4. A skew-specific double-counted cross term would show up as a difference between the two; none is visible at this sensitivity, so the suspicion is not supported (nor ruled out). The same probe with a noise IC gives 0.326 vs 0.324, which only shows the collocated projection is not idempotent for non-smooth fields.
 - Rotational pressure correction uses full Poisson RHS (incl. RC + cross terms) rather than ∇·u* (`mod_fv_solver.f90:1533`).
 
 ## Experiment notes
