@@ -635,7 +635,7 @@ contains
     integer(ip) :: nc, o, idx, nd
     integer(c_int) :: empty_rows(1)
     real(c_double) :: empty_vals(1)
-    logical :: dev, host_sync
+    logical :: dev, host_sync, dev_io_ok
     real(c_double), pointer :: rw(:), pw(:), dvals(:)
     integer(c_int), pointer :: drows(:)
 
@@ -673,7 +673,9 @@ contains
     if (present(on_device)) dev = on_device
     ! Backend without CUDA-runtime copies: fall back to host arrays with explicit updates.
     host_sync = .false.
-    if (dev .and. fvm_petsc_device_io_supported() == 0_c_int) then
+    dev_io_ok = .true.
+    if (dev) dev_io_ok = (fvm_petsc_device_io_supported() /= 0_c_int)
+    if (dev .and. .not. dev_io_ok) then
       dev = .false.
       host_sync = .true.
       !$acc update host(rhs, p)
