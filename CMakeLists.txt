@@ -34,7 +34,6 @@ option(DOPAMINE_ENABLE_OPENACC   "Enable OpenACC GPU offload (requires NVHPC/nvf
 option(DOPAMINE_ENABLE_NVTX      "NVTX profiler ranges for Nsight Systems (needs nvtx3 headers from a CUDA toolkit)" ${DOPAMINE_ENABLE_OPENACC})
 set(DOPAMINE_OPENACC_GPU_ARCH "" CACHE STRING "Optional -gpu= target for OpenACC (e.g. cc86); empty lets nvfortran pick defaults")
 option(DOPAMINE_FETCH_NETCDF      "Auto-build NetCDF C/Fortran when missing"  ON)
-option(DOPAMINE_FETCH_CGNS        "Auto-build CGNS (Fortran+HDF5) when missing" ON)
 option(DOPAMINE_BUILD_TESTS       "Build unit tests"                          ON)
 option(DOPAMINE_ENABLE_LTO        "Enable interprocedural/link-time optimization (GNU: -flto, Intel: -ipo)" OFF)
 
@@ -288,8 +287,8 @@ set(EXT_INSTALL "${DOPAMINE_EXTERNAL_DIR}/install")
 file(MAKE_DIRECTORY "${EXT_INSTALL}/include" "${EXT_INSTALL}/lib")
 list(PREPEND CMAKE_PREFIX_PATH "${EXT_INSTALL}")
 
-# A non-system HDF5 (HDF5_ROOT) has to be forwarded to the NetCDF/CGNS auto-builds explicitly:
-# they are separate CMake projects and don't see this project's cache.
+# A non-system HDF5 (HDF5_ROOT) has to be forwarded to the NetCDF auto-build explicitly:
+# it is a separate CMake project and doesn't see this project's cache.
 set(_dopamine_hdf5_args)
 if(HDF5_ROOT)
   list(APPEND _dopamine_hdf5_args -DHDF5_ROOT=${HDF5_ROOT})
@@ -404,83 +403,6 @@ if(NOT DOPAMINE_HAVE_SYSTEM_NETCDF)
     message(FATAL_ERROR
       "NetCDF Fortran not found (pkg-config: netcdf-fortran). "
       "Install netcdf-fortran or enable DOPAMINE_FETCH_NETCDF=ON.")
-  endif()
-endif()
-
-# ============================================================================
-# CGNS (optional, for mesh_type='cgns'): system package first, auto-build fallback
-# ============================================================================
-set(DOPAMINE_HAVE_SYSTEM_CGNS FALSE)
-set(DOPAMINE_CGNS_TARGET "")
-set(DOPAMINE_CGNS_INCLUDE_DIRS "")
-
-# Same Fortran .mod compatibility caveat as NetCDF above: only trust a system
-# cgns-fortran package under GNU Fortran.
-if(PkgConfig_FOUND AND CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
-  pkg_check_modules(CGNS_PKG QUIET IMPORTED_TARGET cgns)
-  if(TARGET PkgConfig::CGNS_PKG)
-    set(DOPAMINE_HAVE_SYSTEM_CGNS TRUE)
-    set(DOPAMINE_CGNS_TARGET PkgConfig::CGNS_PKG)
-    if(DEFINED CGNS_PKG_INCLUDE_DIRS)
-      list(APPEND DOPAMINE_CGNS_INCLUDE_DIRS ${CGNS_PKG_INCLUDE_DIRS})
-    endif()
-    find_path(CGNS_FORTRAN_MOD_DIR cgns.mod
-      HINTS ${DOPAMINE_CGNS_INCLUDE_DIRS} /usr/include /usr/local/include)
-    if(CGNS_FORTRAN_MOD_DIR)
-      list(APPEND DOPAMINE_CGNS_INCLUDE_DIRS "${CGNS_FORTRAN_MOD_DIR}")
-    endif()
-    message(STATUS "dopamine: using system CGNS (pkg-config)")
-  endif()
-endif()
-
-if(NOT DOPAMINE_HAVE_SYSTEM_CGNS)
-  if(DOPAMINE_FETCH_CGNS)
-    message(STATUS "dopamine: CGNS not found; auto-building CGNS (Fortran+HDF5) in ${EXT_INSTALL}")
-
-    # CGNS's HDF5 backend needs the same HDF5 dev libraries NetCDF-4 already requires above.
-    find_package(HDF5 QUIET COMPONENTS C)
-    if(NOT HDF5_FOUND)
-      message(FATAL_ERROR
-        "CGNS auto-build requires HDF5 development libraries (HDF5 C). "
-        "Install HDF5 dev packages or provide a system CGNS installation.")
-    endif()
-
-    ExternalProject_Add(ext_cgns
-      PREFIX                  "${DOPAMINE_EXTERNAL_DIR}/cgns"
-      URL                     "https://github.com/CGNS/CGNS/archive/refs/tags/v4.4.0.tar.gz"
-      DOWNLOAD_NO_PROGRESS    ON
-      CMAKE_ARGS
-        -DCMAKE_INSTALL_PREFIX=${EXT_INSTALL}
-        -DCMAKE_PREFIX_PATH=${EXT_INSTALL}
-        -DCMAKE_BUILD_TYPE=Release
-        -DCMAKE_Fortran_COMPILER=${CMAKE_Fortran_COMPILER}
-        -DCMAKE_C_COMPILER=${MPI_C_COMPILER}
-        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-        -DCGNS_ENABLE_FORTRAN=ON
-        -DCGNS_ENABLE_HDF5=ON
-        -DCGNS_BUILD_SHARED=ON
-        -DCGNS_ENABLE_TESTS=OFF
-        -DCGNS_BUILD_CGNSTOOLS=OFF
-        ${_dopamine_hdf5_args}
-      BUILD_BYPRODUCTS
-        "${EXT_INSTALL}/lib/libcgns${CMAKE_SHARED_LIBRARY_SUFFIX}"
-        "${EXT_INSTALL}/include/cgns.mod"
-      LOG_DOWNLOAD ON LOG_CONFIGURE ON LOG_BUILD ON LOG_INSTALL ON
-      UPDATE_DISCONNECTED ON
-    )
-
-    add_library(CGNS::Fortran UNKNOWN IMPORTED GLOBAL)
-    set_target_properties(CGNS::Fortran PROPERTIES
-      IMPORTED_LOCATION "${EXT_INSTALL}/lib/libcgns${CMAKE_SHARED_LIBRARY_SUFFIX}"
-      INTERFACE_INCLUDE_DIRECTORIES "${EXT_INSTALL}/include")
-    add_dependencies(CGNS::Fortran ext_cgns)
-
-    set(DOPAMINE_CGNS_TARGET CGNS::Fortran)
-    list(APPEND DOPAMINE_CGNS_INCLUDE_DIRS "${EXT_INSTALL}/include")
-  else()
-    message(FATAL_ERROR
-      "CGNS not found (pkg-config: cgns). "
-      "Install a CGNS Fortran package or enable DOPAMINE_FETCH_CGNS=ON.")
   endif()
 endif()
 
@@ -634,8 +556,6 @@ set(DOPAMINE_FORTRAN_SOURCES
   src/mesh/mod_mesh.f90
   src/mesh/mod_gmsh_reader.f90
   src/mesh/mod_foam_reader.f90
-  src/mesh/mod_icem_reader.f90
-  src/mesh/mod_cgns_reader.F90
   src/mesh/mod_partitioner.f90
   src/mesh/mod_mesh_io.f90
   src/mesh/mod_mesh_validate.f90
@@ -686,8 +606,7 @@ target_include_directories(dopamine_lib PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/src"
   "${CMAKE_BINARY_DIR}/mod"
   "${EXT_INSTALL}/include"
-  ${DOPAMINE_NETCDF_INCLUDE_DIRS}
-  ${DOPAMINE_CGNS_INCLUDE_DIRS})
+  ${DOPAMINE_NETCDF_INCLUDE_DIRS})
 
 target_link_libraries(dopamine_lib PUBLIC
   MPI::MPI_Fortran
@@ -749,7 +668,6 @@ if(DOPAMINE_HAVE_PETSC)
 endif()
 
 target_link_libraries(dopamine_lib PUBLIC ${DOPAMINE_NETCDF_TARGET})
-target_link_libraries(dopamine_lib PUBLIC ${DOPAMINE_CGNS_TARGET})
 
 if(OpenMP_Fortran_FOUND AND DOPAMINE_ENABLE_OPENMP)
   target_link_libraries(dopamine_lib PUBLIC OpenMP::OpenMP_Fortran)

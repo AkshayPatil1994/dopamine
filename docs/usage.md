@@ -474,7 +474,7 @@ packed buffers).
 about where the global mesh has to fit, not about accuracy — both produce the
 same partitions.
 
-| | Direct read (`gmsh`, `openfoam`, `icem`, `cgns`) | Preprocessed |
+| | Direct read (`gmsh`, `openfoam`) | Preprocessed |
 |---|---|---|
 | Preparation | none | one offline `dopamine-decompose` run |
 | Global mesh held by | rank 0, entirely | nobody at solver time |
@@ -490,38 +490,6 @@ prepare and you can vary `-np` between runs.
 &dopamine_domain
   mesh_file = 'channel.msh'
   mesh_type = 'gmsh'
-/
-```
-
-`mesh_type = 'icem'` (alias `'fluent'`) reads a Fluent-format `.msh` file, as
-exported by Ansys ICEM CFD — including polyhedral meshes. Both ASCII and
-binary variants are supported. Boundary patch names/types come from the
-mesh's own named zones (or a numeric Fluent BC-type fallback if unnamed) and
-are matched against `&dopamine_bc` patch names exactly as with `gmsh`/
-`openfoam`.
-
-```fortran
-&dopamine_domain
-  mesh_file = 'channel.msh'
-  mesh_type = 'icem'
-/
-```
-
-`mesh_type = 'cgns'` reads a CGNS (CFD General Notation System) file via the
-CGNS reference library (HDF5 and legacy ADF files). Two layouts are supported,
-both single-zone: polyhedral `NGON_n`/`NFACE_n` sections with named
-`ZoneBC_t`/`BC_t` patches at `FaceCenter` grid location, and standard
-`TETRA_4`/`HEXA_8`/`PENTA_6`/`PYRA_5` volume sections with `TRI_3`/`QUAD_4`
-boundary sections (patches take the boundary section names, BC types come from
-the matching `BC_t`). `Family_t`-based boundary naming is not yet supported.
-Requires the CGNS library, which is fetched and built automatically
-(`DOPAMINE_FETCH_CGNS=ON`, the default) alongside the HDF5 dependency the
-output writer already requires.
-
-```fortran
-&dopamine_domain
-  mesh_file = 'channel.cgns'
-  mesh_type = 'cgns'
 /
 ```
 

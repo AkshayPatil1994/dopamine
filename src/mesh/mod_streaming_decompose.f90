@@ -6,8 +6,6 @@ module mod_streaming_decompose
   use mod_mesh
   use mod_gmsh_reader
   use mod_foam_reader
-  use mod_icem_reader
-  use mod_cgns_reader
   use mod_mesh_io
   use mod_bc,           only: BCConfig
   use mod_bc_setup,     only: build_bc_configs
@@ -105,10 +103,6 @@ contains
       call gmsh_read(trim(mesh_path), mesh_global)
     case ('openfoam', 'foam')
       call foam_read(trim(mesh_path), mesh_global)
-    case ('icem', 'fluent')
-      call icem_read(trim(mesh_path), mesh_global)
-    case ('cgns')
-      call cgns_read(trim(mesh_path), mesh_global)
     case default
       write(*, '(A)') 'ERROR: unknown mesh_type '//trim(config%mesh_type)
       error stop 'decompose_streaming: unknown mesh_type'
