@@ -1642,7 +1642,8 @@ contains
 
     ! Wall-model traction/heat flux enter H so RK3 weights them like every other term.
     call add_wall_stress_to_rhs(self, H_U)
-    if (self%abl_config%wall_model_id == WM_MOST) call add_wall_heat_flux_to_rhs(self, H_T)
+    ! The wall heat flux only matters when T is solved (Boussinesq); otherwise it just drifts an unused field.
+    if (self%abl_config%wall_model_id == WM_MOST .and. self%solve_temperature) call add_wall_heat_flux_to_rhs(self, H_T)
 
     if (self%params%n_scalars > 0) then
       cC => self%w_conv_C;  vC => self%w_visc_C;  Cf => self%C;  Cb => self%C_bnd
