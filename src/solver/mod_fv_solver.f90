@@ -3844,7 +3844,7 @@ contains
     class(FVSolver), intent(inout) :: self
 
     integer(ip) :: nc, c, ic_max, f, o, nb
-    real(rp)    :: div_u(self%mesh%n_cells)
+    real(rp), allocatable :: div_u(:)  ! heap: n_cells can exceed the OpenMP stack
     real(rp)    :: val_local, in2(2), out2(2)
     logical, allocatable :: cell_touches_refine(:)
     integer(ip) :: ic_max_rf
@@ -3852,6 +3852,7 @@ contains
     integer     :: ierr, owner_rank, owner_rank_rf
 
     nc = self%mesh%n_cells
+    allocate(div_u(nc))
     call cell_velocity_divergence(self, div_u(1:nc))
 
     ! Flag every cell that has at least one refinement-interface face, to separate

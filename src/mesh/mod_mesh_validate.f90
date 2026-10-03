@@ -343,18 +343,25 @@ contains
     integer(lp) :: n_refine_local, n_refine, n_int_local, n_int_total
     real(rp)    :: refine_frac
     integer     :: ierr
+    logical     :: count_face
 
     nonortho_max_local = 0.0_rp
     skew_max_local     = 0.0_rp
     n_refine_local     = 0_lp
     skew_mid_local     = 0.0_rp
-    n_int_local        = int(msh%n_int_faces, lp)
+    n_int_local        = 0_lp
 
     do f = 1, msh%n_int_faces
       o  = msh%faces(f)%owner
       nb = msh%faces(f)%neighbour
       if (o < 1 .or. o > size(msh%cells)) cycle
       if (nb < 1 .or. nb > size(msh%cells)) cycle
+      ! A processor face exists on both ranks; count it once, on the rank owning the lower global id.
+      count_face = .true.
+      if (nb > msh%n_cells .or. o > msh%n_cells) then
+        if (allocated(msh%global_id)) count_face = (msh%global_id(o) < msh%global_id(nb))
+      end if
+      if (count_face) n_int_local = n_int_local + 1_lp
 
       d_on  = msh%cells(nb)%centroid - msh%cells(o)%centroid
       h_ref = sqrt(sum(d_on**2))
@@ -370,7 +377,7 @@ contains
       skew_mag = sqrt(sum(d_mid**2)) / max(msh%cells(o)%volume**(1.0_rp/3.0_rp), 1.0e-30_rp)
       skew_max_local = max(skew_max_local, skew_mag)
 
-      if (msh%faces(f)%is_refine) n_refine_local = n_refine_local + 1_lp
+      if (msh%faces(f)%is_refine .and. count_face) n_refine_local = n_refine_local + 1_lp
       skew_mid_local = max(skew_mid_local, msh%faces(f)%skew)
     end do
 
