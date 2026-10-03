@@ -211,6 +211,29 @@ contains
       error stop 'input namelist parse error (check variable names and syntax)'
     end if
 
+    ! Names are matched case-insensitively and an unknown one stops the run: each used to fall back to a
+    ! default without a word (or with a warning that scrolls past), so a typo silently changed the physics.
+    advection_scheme   = upper_case(adjustl(advection_scheme))
+    temperature_scheme = upper_case(adjustl(temperature_scheme))
+    gradient_scheme    = upper_case(adjustl(gradient_scheme))
+    sgs_model          = upper_case(adjustl(sgs_model))
+    pressure_solver    = lower_case(adjustl(pressure_solver))
+    select case (trim(gradient_scheme))
+    case ('LEAST_SQUARES', 'GREEN_GAUSS')
+    case default
+      call input_fatal('gradient_scheme', gradient_scheme, 'LEAST_SQUARES, GREEN_GAUSS')
+    end select
+    select case (trim(sgs_model))
+    case ('VREMAN', 'SMAGORINSKY', 'DYNAMIC_SMAG')
+    case default
+      call input_fatal('sgs_model', sgs_model, 'VREMAN, SMAGORINSKY, DYNAMIC_SMAG')
+    end select
+    select case (trim(pressure_solver))
+    case ('boomeramg', 'gamg')
+    case default
+      call input_fatal('pressure_solver', pressure_solver, 'boomeramg, gamg')
+    end select
+
     associate(p => config%params)
       select case (trim(advection_scheme))
       case ('KOREN_TVD', 'KOREN')
@@ -222,8 +245,7 @@ contains
       case ('KEP', 'SKEW');    p%scheme = SCHEME_KEP
       case ('CDS', 'CENTRAL'); p%scheme = SCHEME_CDS
       case default
-        write(*,'(A,A)') 'WARNING: unknown advection_scheme=', trim(advection_scheme)
-        p%scheme = SCHEME_CDS
+        call input_fatal('advection_scheme', advection_scheme, 'KOREN_TVD, VANLEER_TVD, QUICK, KEP, CDS')
       end select
 
       select case (trim(temperature_scheme))
@@ -236,8 +258,7 @@ contains
       case ('CDS', 'CENTRAL')
         p%temperature_scheme = SCHEME_CDS
       case default
-        p%temperature_scheme = SCHEME_VANLEER_TVD
-        write(*,'(A,A,A)') 'WARNING: unsupported temperature_scheme=', trim(temperature_scheme), '; using VANLEER_TVD'
+        call input_fatal('temperature_scheme', temperature_scheme, 'KOREN_TVD, VANLEER_TVD, QUICK, CDS')
       end select
 
       p%dt             = dt
@@ -1049,6 +1070,23 @@ contains
       id = WM_LOGLAW
     end select
   end function resolve_wall_model
+
+  subroutine input_fatal(name, value, allowed)
+    character(len=*), intent(in) :: name, value, allowed
+    write(*, '(A)') 'ERROR: unknown '//name//' = '''//trim(value)//''' (allowed: '//allowed//')'
+    error stop 'input: unknown option value'
+  end subroutine input_fatal
+
+  pure function upper_case(s) result(t)
+    character(len=*), intent(in) :: s
+    character(len=len(s)) :: t
+    integer :: i, c
+    t = s
+    do i = 1, len(s)
+      c = iachar(t(i:i))
+      if (c >= 97 .and. c <= 122) t(i:i) = achar(c - 32)
+    end do
+  end function upper_case
 
   pure function lower_case(s) result(t)
     character(len=*), intent(in) :: s
