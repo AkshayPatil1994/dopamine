@@ -573,6 +573,7 @@ contains
 
     open(newunit=unit_id, file=trim(filename), status='old', action='read', iostat=ios)
     if (ios /= 0) then
+      write(*, '(A)') ' WARNING: cannot open sampling/source file: '//trim(filename)
       deallocate(tmp)
       allocate(points(3,0))
       return
@@ -632,6 +633,7 @@ contains
 
     open(newunit=unit_id, file=trim(filename), status='old', action='read', iostat=ios)
     if (ios /= 0) then
+      write(*, '(A)') ' WARNING: cannot open sampling/source file: '//trim(filename)
       n_tris = 0
       allocate(tris(3,3,0))
       deallocate(verts, tri_conn)
@@ -701,6 +703,7 @@ contains
 
     open(newunit=unit_id, file=trim(filename), status='old', action='read', iostat=ios)
     if (ios /= 0) then
+      write(*, '(A)') ' WARNING: cannot open sampling/source file: '//trim(filename)
       n_tris = 0
       allocate(tris(3,3,0))
       deallocate(tmp)

@@ -724,6 +724,12 @@ contains
       config%scalar_sources(i)%box_min = source_box_min(i,:)
       config%scalar_sources(i)%box_max = source_box_max(i,:)
       config%scalar_sources(i)%tag_radius = max(0.0_rp, source_tag_radius(i))
+      ! A sphere source with radius 0 selects no cell at all; say so instead of silently doing nothing.
+      if (config%scalar_sources(i)%shape == SCALAR_SHAPE_SPHERE .and. config%scalar_sources(i)%radius <= 0.0_rp &
+          .and. (config%scalar_sources(i)%src_kind == SCALAR_SRC_POINT .or. &
+                 config%scalar_sources(i)%src_kind == SCALAR_SRC_LINE .or. &
+                 config%scalar_sources(i)%src_kind == SCALAR_SRC_VOLUME)) &
+        write(*, '(A,I0,A)') ' WARNING: scalar source ', i, ' has source_radius = 0 and will match no cells'
       config%params%scalar_sources(i) = config%scalar_sources(i)
     end do
   end subroutine read_scalar_sources
