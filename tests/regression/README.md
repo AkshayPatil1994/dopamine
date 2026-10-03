@@ -14,6 +14,7 @@ being restructured (e.g. the GPU port); they are not validation cases.
 | `graded` | 32x16x16, wall bump 0.01 | as `channel`, but the grading creates refinement-interface faces (interface diagnostics on); KEP advection must stay on the device path |
 | `pdrop` | skewed 12^3 box (`mk_box_mesh.py`, no gmsh) | outlets at p = 1 and 0 with no body force: Umax must grow as t; Dirichlet outlets with non-orthogonal correctors |
 | `hydro` | same mesh | outlets at p = 1 and 0 balancing `fz = -1`: the fluid must stay at rest |
+| `hydrowall` | same mesh, all six faces no-slip walls | closed box under `fz = -1`: the wall pressure gradient `dp/dn = f.n`; Umax stays O(dt g) |
 
 Run everything through CTest from a build tree (meshes are generated with gmsh on first use):
 
@@ -39,7 +40,7 @@ The stored references come from the CPU build (gfortran, `OMP_NUM_THREADS=1`) of
 c6f4e6b plus the direct-read `-np > 1` deadlock fix.
 
 The `duct` references were regenerated when the outlet pressure treatment changed (the increment is 0 on
-the outlet and the mean-p anchor is gone); `pdrop` and `hydro` are new. The np2 references were regenerated after the least-squares stencil started carrying
+the outlet and the mean-p anchor is gone); `pdrop`, `hydro` and `hydrowall` are new, and `rb` was regenerated when the wall pressure gradient started carrying the body force and buoyancy (the old reference grew spuriously, E 5e-5 -> 1.2e-4 in 20 steps, from a flow that should stay at rest). The np2 references were regenerated after the least-squares stencil started carrying
 vertex-adjacent cells across partition cuts: step 1 of every case now agrees with the np1
 reference to machine precision (before, `eps` in `rb` differed by 2.5% and `nu_sgs_mean` in
 `channel` by 2e-3). The `dynsmag` references were regenerated again after the test filter

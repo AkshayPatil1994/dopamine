@@ -1,0 +1,49 @@
+! Regression case: hydrostatic column in a closed no-slip skewed box under fz = -1. The wall pressure
+! gradient dp/dn = f.n (pre-correction wall term) keeps Umax at O(dt g); without it the wall cells accelerate.
+&dopamine_domain
+  mesh_file = 'mesh.msh'
+  mesh_type = 'gmsh'
+/
+&dopamine_numerics
+  advection_scheme = 'CDS'
+  time_integrator  = 'RK3W'
+  use_sgs          = .false.
+  dt               = 2.0e-3
+  t_end            = 100.0
+  nstep_max        = 20
+  adapt_dt         = .false.
+  cfl_max          = 0.5
+  p_tol            = 1.0e-12
+  p_max_iter       = 1000
+  n_nonortho_corr  = 4
+/
+&dopamine_physics
+  nu = 1.0e-2
+  fz = -1.0
+/
+&dopamine_bc
+  n_patches = 6
+  patch_name(1) = 'x0'
+  patch_type(1) = 'noSlip'
+  patch_name(2) = 'xL'
+  patch_type(2) = 'noSlip'
+  patch_name(3) = 'y0'
+  patch_type(3) = 'noSlip'
+  patch_name(4) = 'yL'
+  patch_type(4) = 'noSlip'
+  patch_name(5) = 'z0'
+  patch_type(5) = 'noSlip'
+  patch_name(6) = 'zL'
+  patch_type(6) = 'noSlip'
+/
+&dopamine_initial_condition
+  ic_type = 'uniform'
+  ic_uref = 0.0
+/
+&dopamine_output
+  prefix         = 'case'
+  write_interval = 100000
+/
+&dopamine_stats
+  solver_stats_frequency = 10
+/

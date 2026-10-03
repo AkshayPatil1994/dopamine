@@ -2760,6 +2760,29 @@ contains
     !$acc end data
   end subroutine correct_face_fluxes
 
+  !> Spatially uniform part of the momentum body force at the current time: constant (or mass-flux)
+  !> forcing plus the harmonic forcing, as assembled in compute_explicit_rhs.
+  function body_force_now(self) result(f)
+    class(FVSolver), intent(in) :: self
+    real(rp) :: f(3), dir_n, hdir(3), hscale
+
+    if (self%params%constant_mass_flux_forcing) then
+      f = self%mass_flux_force
+    else
+      f = self%params%f_const
+    end if
+    if (self%params%use_harmonic_forcing) then
+      dir_n = sqrt(sum(self%params%forcing_dir**2))
+      if (dir_n > SMALL) then
+        hdir = self%params%forcing_dir / dir_n
+      else
+        hdir = [1.0_rp, 0.0_rp, 0.0_rp]
+      end if
+      hscale = self%params%forcing_amp * cos(self%params%forcing_omega * self%time + self%params%forcing_phase)
+      f = f + hscale * hdir
+    end if
+  end function body_force_now
+
   !> Correct cell velocities: u = u - dt * T^-1 . sum_f n_f g_f, g_f the jump the flux correction removes.
   ! with_cross = .false. for the pre-correction: Rhie-Chow replaces only the orthogonal part at the face.
   subroutine correct_velocity_psolver_dual(self, dt, with_cross, p_is_total)
@@ -2768,6 +2791,8 @@ contains
     logical,         intent(in)    :: with_cross
     logical, optional, intent(in)  :: p_is_total  ! see correct_face_fluxes
     logical :: ptot
+    real(rp) :: fb(3), gvec_b(3), bous_beta, t_ref_b, fn_wall
+    real(rp), pointer :: Tcell(:)
 
     integer(ip) :: nc, ntot, c, idx, o, nb, f_mesh, nf, n_int, n_faces, n_patches, n_nper
     integer(ip) :: ib, f_bnd, f_glob, q
@@ -2925,6 +2950,44 @@ contains
       !$acc atomic update
       gpc(3, o) = gpc(3, o) + g3
     end do
+
+    ! Pre-correction of the total pressure only: a wall, slip, symmetry or inlet face carries
+    ! dp/dn = f.n (the body force the face flux cannot balance). Without that face term a wall
+    ! cell sees only the interior half of the gradient and a fluid at rest is accelerated there
+    ! (hydrostatic closed box: Umax 6e-3). The increment phi has zero flux and needs no term.
+    if (.not. do_cross) then
+      fb = body_force_now(self)
+      bous_beta = 0.0_rp
+      if (self%params%boussinesq) bous_beta = self%params%beta
+      gvec_b = self%params%g
+      t_ref_b = self%params%T_ref
+      Tcell => self%T
+      !$acc parallel loop default(present) copyin(fb, gvec_b) &
+      !$acc      private(f_bnd, f_glob, o, q, fn_wall, g1, g2, g3, d1, d2, d3)
+      do ib = 1, n_nper
+        f_bnd  = nper(ib)
+        f_glob = n_int + f_bnd
+        if (f_glob < 1 .or. f_glob > n_faces) cycle
+        o = fown(f_glob)
+        if (o < 1 .or. o > nc) cycle
+        q = fpid(f_glob)
+        if (q < 1 .or. q > n_patches) cycle
+        if (pbc(q) == BC_OUTLET) cycle
+        d1 = fb(1) - bous_beta * (Tcell(o) - t_ref_b) * gvec_b(1)
+        d2 = fb(2) - bous_beta * (Tcell(o) - t_ref_b) * gvec_b(2)
+        d3 = fb(3) - bous_beta * (Tcell(o) - t_ref_b) * gvec_b(3)
+        fn_wall = (d1*fnrm(1, f_glob) + d2*fnrm(2, f_glob) + d3*fnrm(3, f_glob)) * farea(f_glob)
+        g1 = fn_wall * fnrm(1, f_glob)
+        g2 = fn_wall * fnrm(2, f_glob)
+        g3 = fn_wall * fnrm(3, f_glob)
+        !$acc atomic update
+        gpc(1, o) = gpc(1, o) + g1
+        !$acc atomic update
+        gpc(2, o) = gpc(2, o) + g2
+        !$acc atomic update
+        gpc(3, o) = gpc(3, o) + g3
+      end do
+    end if
 
 #ifdef _OPENACC
     !$acc parallel loop default(present) private(g1, g2, g3)
