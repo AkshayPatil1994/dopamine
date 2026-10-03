@@ -109,7 +109,7 @@ contains
     integer(ip) :: n_skip_int, n_skip_per, n_used_per, n_dortho_fallback
     integer(ip) :: ref_local, ref_global, ierr_local, i_opt
     real(rp) :: coeff, area_f, d_per, d_perp_b, c_b
-    real(rp) :: d_proj_o, d_proj_pair
+    real(rp) :: pair_dcf
     real(rp) :: d_on_vec(3), d_ortho
     integer(ip) :: rank, nranks
 
@@ -284,31 +284,26 @@ contains
           else
             handle%face_neighbor_global(idx) = int(nb, c_int)
           end if
-          if (pair_face >= 1 .and. pair_face <= size(msh%faces)) then
-            area_f = 0.5_rp * (msh%faces(f_glob)%area + msh%faces(pair_face)%area)
-            ! use orthogonal projection distance on periodic edges so the
-            ! discrete Laplacian uses the same metric as internal faces.
-            d_proj_o    = abs(dot_product(msh%faces(f_glob)%centre   - msh%cells(o)%centroid,  &
-                                          msh%faces(f_glob)%normal))
-            d_proj_pair = abs(dot_product(msh%faces(pair_face)%centre - msh%cells(nb)%centroid, &
-                                          msh%faces(pair_face)%normal))
-            d_per       = d_proj_o + d_proj_pair
-            if (d_per <= SMALL) d_per = msh%faces(f_glob)%d_cf + msh%faces(pair_face)%d_cf
-          else
-            ! Cross-rank periodic: partner face unavailable locally; mirror owner half.
-            area_f = msh%faces(f_glob)%area
-            d_proj_o = abs(dot_product(msh%faces(f_glob)%centre - msh%cells(o)%centroid, &
-                                       msh%faces(f_glob)%normal))
-            if (d_proj_o <= SMALL) d_proj_o = msh%faces(f_glob)%d_cf
-            ! Split into nested ifs: .and. does not short-circuit in Fortran, so size()/
-            ! the array element must never be evaluated in the same expression as allocated().
-            d_per = 2.0_rp * d_proj_o
-            if (allocated(msh%periodic_pair_dcf)) then
-              if (f_bnd >= 1 .and. f_bnd <= size(msh%periodic_pair_dcf)) then
-                if (msh%periodic_pair_dcf(f_bnd) > SMALL) d_per = d_proj_o + msh%periodic_pair_dcf(f_bnd)
-              end if
-            end if
+          ! Both sides of a periodic edge must see the identical coefficient: same-rank pairs
+          ! contribute one edge, cross-rank pairs one edge per rank, and the flux correction
+          ! reuses this coefficient. Use the un-projected centroid-to-face distances d_cf(own)
+          ! + d_cf(partner), the metric the periodic gradient/viscous/advection operators use.
+          pair_dcf = 0.0_rp
+          if (allocated(msh%periodic_pair_dcf)) then
+            if (f_bnd >= 1 .and. f_bnd <= size(msh%periodic_pair_dcf)) pair_dcf = msh%periodic_pair_dcf(f_bnd)
           end if
+          if (allocated(msh%periodic_pair)) then
+            if (f_bnd >= 1 .and. f_bnd <= size(msh%periodic_pair)) pair_bnd = msh%periodic_pair(f_bnd)
+          end if
+          pair_face = 0
+          if (pair_bnd > 0) pair_face = msh%n_int_faces + pair_bnd
+          if (pair_dcf <= SMALL .and. pair_face >= 1 .and. pair_face <= size(msh%faces)) &
+            pair_dcf = msh%faces(pair_face)%d_cf
+          if (pair_dcf <= SMALL) pair_dcf = msh%faces(f_glob)%d_cf
+          d_per = msh%faces(f_glob)%d_cf + pair_dcf
+          area_f = msh%faces(f_glob)%area
+          if (pair_face >= 1 .and. pair_face <= size(msh%faces)) &
+            area_f = 0.5_rp * (area_f + msh%faces(pair_face)%area)
           if (.not. ieee_is_finite(area_f) .or. .not. ieee_is_finite(d_per)) then
             handle%skip_face(idx) = 1_c_int
             cycle
