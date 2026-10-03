@@ -3,7 +3,7 @@
 !> Synthetic Eddy Method (SEM) for correlated turbulent inflow generation
 module mod_sem_inflow
   use mod_kinds
-  use mod_parameters, only: BC_ABL_INLET
+  use mod_parameters, only: BC_ABL_INLET, BC_PERIODIC
   use mod_abl_types
   use mod_abl_profiles
   use mod_mesh
@@ -114,7 +114,47 @@ contains
 
     state%t1_min = glo(1); state%t1_max = ghi(1)
     state%t2_min = glo(2); state%t2_max = ghi(2)
+
+    call sem_detect_periodic(msh, state)
   end subroutine sem_inlet_frame
+
+  !> A periodic patch pair whose faces are normal to t1 (or t2) makes the inlet plane periodic along it.
+  !> The period is the distance between the two planes of periodic faces, reduced across ranks.
+  subroutine sem_detect_periodic(msh, state)
+    type(Mesh),     intent(in)    :: msh
+    type(SEMState), intent(inout) :: state
+
+    integer(ip) :: p, f, f_global, ierr, k
+    real(rp)    :: s, tk(3), lo(2), hi(2), glo(2), ghi(2)
+
+    state%per1 = .false.; state%per2 = .false.
+    state%period1 = 0.0_rp; state%period2 = 0.0_rp
+    lo =  huge(1.0_rp)
+    hi = -huge(1.0_rp)
+    do k = 1, 2
+      tk = merge(state%t1, state%t2, k == 1)
+      do p = 1, msh%n_patches
+        if (msh%patches(p)%bc_id /= BC_PERIODIC) cycle
+        do f = 1, msh%patches(p)%n_faces
+          f_global = msh%n_int_faces + msh%patches(p)%start_face + f - 1
+          if (f_global < 1 .or. f_global > size(msh%faces)) cycle
+          if (abs(dot_product(msh%faces(f_global)%normal, tk)) < 0.99_rp) cycle
+          s = dot_product(msh%faces(f_global)%centre - state%x_inlet, tk)
+          lo(k) = min(lo(k), s); hi(k) = max(hi(k), s)
+        end do
+      end do
+    end do
+    call MPI_Allreduce(lo, glo, 2, MPI_DOUBLE_PRECISION, MPI_MIN, msh%comm, ierr)
+    call MPI_Allreduce(hi, ghi, 2, MPI_DOUBLE_PRECISION, MPI_MAX, msh%comm, ierr)
+
+    ! Both planes must exist and enclose the inlet; a lone periodic patch is not a pair.
+    if (ghi(1) - glo(1) > SMALL .and. glo(1) <= state%t1_min + SMALL .and. ghi(1) >= state%t1_max - SMALL) then
+      state%per1 = .true.; state%period1 = ghi(1) - glo(1); state%per1_lo = glo(1)
+    end if
+    if (ghi(2) - glo(2) > SMALL .and. glo(2) <= state%t2_min + SMALL .and. ghi(2) >= state%t2_max - SMALL) then
+      state%per2 = .true.; state%period2 = ghi(2) - glo(2); state%per2_lo = glo(2)
+    end if
+  end subroutine sem_detect_periodic
 
   pure function cross3(a, b) result(c)
     real(rp), intent(in) :: a(3), b(3)
@@ -161,9 +201,24 @@ contains
     end if
     if (state%sigma <= SMALL) state%sigma = 0.1_rp * abl_cfg%z_ref
 
-    ! Pad the box by sigma so eddies straddling the edges are represented.
-    state%t1_min = state%t1_min - state%sigma; state%t1_max = state%t1_max + state%sigma
-    state%t2_min = state%t2_min - state%sigma; state%t2_max = state%t2_max + state%sigma
+    ! A periodic direction needs exactly one period of eddies (they are wrapped when evaluated, so
+    ! the fluctuation is periodic across the seam) and a kernel that fits inside half of it.
+    if ((state%per1 .and. state%sigma >= 0.5_rp * state%period1) .or. &
+        (state%per2 .and. state%sigma >= 0.5_rp * state%period2)) then
+      if (msh%rank == 0) write(*,'(A)') 'ERROR: sem_sigma must be below half the periodic width of the inlet plane'
+      error stop 'sem_init: eddy scale too large for the periodic inlet'
+    end if
+    ! Otherwise pad the box by sigma so eddies straddling the edges are represented.
+    if (state%per1) then
+      state%t1_min = state%per1_lo; state%t1_max = state%per1_lo + state%period1
+    else
+      state%t1_min = state%t1_min - state%sigma; state%t1_max = state%t1_max + state%sigma
+    end if
+    if (state%per2) then
+      state%t2_min = state%per2_lo; state%t2_max = state%per2_lo + state%period2
+    else
+      state%t2_min = state%t2_min - state%sigma; state%t2_max = state%t2_max + state%sigma
+    end if
     ! Box spans -sigma to +sigma about the plane so a face there sees full kernel support.
     state%box_volume = 2.0_rp * state%sigma &
                      * (state%t1_max - state%t1_min) * (state%t2_max - state%t2_min)
@@ -428,6 +483,8 @@ contains
     do i = 1, state%n_eddies
       ! Compact support: reject on the bounding box before taking the square root.
       d_vec = face_centre - state%pos(:, i)
+      if (state%per1) d_vec = d_vec - state%period1 * anint(dot_product(d_vec, state%t1) / state%period1) * state%t1
+      if (state%per2) d_vec = d_vec - state%period2 * anint(dot_product(d_vec, state%t2) / state%period2) * state%t2
       if (abs(d_vec(1)) >= sig .or. abs(d_vec(2)) >= sig .or. abs(d_vec(3)) >= sig) cycle
 
       r_dist = sqrt(sum(d_vec**2)) / sig

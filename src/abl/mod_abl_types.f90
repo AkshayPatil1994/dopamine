@@ -56,6 +56,14 @@ module mod_abl_types
     real(rp)    :: t2_min          = 0.0_rp  ! eddy box bounds along t2 [m]
     real(rp)    :: t2_max          = 0.0_rp
     real(rp)    :: box_volume      = 0.0_rp  ! recycle box volume [m^3]
+    ! Periodic in-plane directions (periodic patches parallel to the inlet normal): the eddy box spans
+    ! exactly one period there and eddies are wrapped, so the fluctuation is periodic across the seam.
+    logical     :: per1            = .false.
+    logical     :: per2            = .false.
+    real(rp)    :: period1         = 0.0_rp  ! period along t1 [m]
+    real(rp)    :: period2         = 0.0_rp  ! period along t2 [m]
+    real(rp)    :: per1_lo         = 0.0_rp  ! t1 of the lower periodic plane, relative to x_inlet [m]
+    real(rp)    :: per2_lo         = 0.0_rp
     ! Prescribed inflow profiles; empty means the analytic MOST/Panofsky defaults.
     logical     :: has_profile     = .false.
     logical     :: prof_global_axes = .false.  ! 10-column files give U and R in x,y,z
