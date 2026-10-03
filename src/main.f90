@@ -150,6 +150,19 @@ program dopamine_main
     mesh_local%comm   = MPI_COMM_WORLD
     mesh_local%rank   = rank
     mesh_local%nranks = nranks
+    ! The file header carries no rank count: running on fewer ranks than the decomposition would
+    ! silently drop the cells of the unread processor directories.
+    block
+      integer(lp) :: nc_sum, nc_loc
+      nc_loc = int(mesh_local%n_cells, lp)
+      call MPI_Allreduce(nc_loc, nc_sum, 1, MPI_INTEGER8, MPI_SUM, MPI_COMM_WORLD, ierr)
+      if (nc_sum /= mesh_local%n_cells_global) then
+        if (rank == 0) write(*, '(A,I0,A,I0,A,I0,A)') &
+          ' ERROR: preprocessed mesh holds ', mesh_local%n_cells_global, ' cells but the ', nranks, &
+          ' ranks read ', nc_sum, '; run with the rank count used by dopamine-decompose.'
+        call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
+      end if
+    end block
     ! Decomposer already computed geometry; build connectivity for cell_faces and halo operators.
     call mesh_local%build_connectivity()
     ! skew/is_refine are derived, not serialised, so they must be rebuilt after a preprocessed read.
