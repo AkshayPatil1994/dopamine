@@ -618,7 +618,7 @@ contains
     end if
   end subroutine audit_periodic_consistency
 
-  subroutine pressure_solver_solve(handle, rhs, p, tol, max_iter, n_iter, residual, atol_in, on_device)
+  subroutine pressure_solver_solve(handle, rhs, p, tol, max_iter, n_iter, residual, atol_in, on_device, p_is_total)
     type(pressure_solver_handle_t), intent(inout), target :: handle
     real(rp),                       intent(in)    :: rhs(:)
     real(rp),                       intent(inout) :: p(:)
@@ -629,17 +629,22 @@ contains
     integer(ip),          optional, intent(out)   :: n_iter
     real(rp),             optional, intent(out)   :: residual
     real(rp),             optional, intent(in)    :: atol_in  ! absolute floor; when present, used alongside rtol (not instead of it)
+    !> p is the whole pressure (initial projection): outlet faces then carry p_val. Default: p is the
+    !> increment phi, which is zero on the outlet because the boundary pressure already equals p_val.
+    logical,              optional, intent(in)    :: p_is_total
 
     real(c_double) :: c_tol, c_atol, c_residual
     integer(c_int) :: c_max_iter, c_n_iter, status
     integer(ip) :: nc, o, idx, nd
     integer(c_int) :: empty_rows(1)
     real(c_double) :: empty_vals(1)
-    logical :: dev, host_sync, dev_io_ok
+    logical :: dev, host_sync, dev_io_ok, use_outlet_val
     real(c_double), pointer :: rw(:), pw(:), dvals(:)
     integer(c_int), pointer :: drows(:)
 
     nc = handle%n_cells
+    use_outlet_val = .false.
+    if (present(p_is_total)) use_outlet_val = p_is_total
     ! rtol: primary convergence criterion; atol_in: dimensional floor for near-zero RHS only.
     c_tol = real(1.0e-8_rp, c_double)
     if (present(tol)) c_tol = real(tol, c_double)
@@ -687,7 +692,7 @@ contains
       ! Device path: build the work vectors on the device (with the NaN scrub the host path does
       ! in the backend) and hand device pointers to PETSc below.
       nd = 0
-      if (handle%n_dirichlet_rows > 0 .and. allocated(handle%dirichlet_rows)) nd = handle%n_dirichlet_rows
+      if (use_outlet_val .and. handle%n_dirichlet_rows > 0 .and. allocated(handle%dirichlet_rows)) nd = handle%n_dirichlet_rows
       if (nd > 0) then
         drows => handle%dirichlet_rows
         dvals => handle%dirichlet_values
@@ -719,7 +724,7 @@ contains
       handle%p_work(1:nc) = real(p(1:nc), c_double)
 
       ! Outlet Dirichlet rhs increments: rhs(o) += c_b * p_val per outlet face.
-      if (handle%n_dirichlet_rows > 0 .and. allocated(handle%dirichlet_rows)) then
+      if (use_outlet_val .and. handle%n_dirichlet_rows > 0 .and. allocated(handle%dirichlet_rows)) then
         do idx = 1, handle%n_dirichlet_rows
           o = int(handle%dirichlet_rows(idx), ip)
           if (o >= 1 .and. o <= nc) then

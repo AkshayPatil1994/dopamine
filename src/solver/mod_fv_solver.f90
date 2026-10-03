@@ -942,20 +942,20 @@ contains
         call pressure_solver_solve(self%psolver, self%w_rhs_p(1:nc), self%p(1:nc), &
                                    tol=self%params%p_tol, &
                                    max_iter=self%params%p_max_iter, &
-                                   atol_in=atol_dynamic)
+                                   atol_in=atol_dynamic, p_is_total=.true.)
       end block
     end if
 
     call anchor_pressure_to_outlet(self%p(1:nc), self%mesh, self%w_outlet_cell, self%w_outlet_pval, self%on_device)
     call self%mesh%exchange_halos_scalar(self%p)
-    call correct_face_fluxes(self, dt_use)  ! uses phi -> divergence-free
+    call correct_face_fluxes(self, dt_use, p_is_total=.true.)  ! phi is the whole pressure here
     self%U_face(:) = self%face_flux(:)  ! persist divergence-free flux for advection
     self%u_face_ready = .true.
 #ifdef _OPENACC
     !$acc update device(self%U_face)
 #endif
     call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh)
-    call correct_velocity_psolver_dual(self, dt_use, with_cross=.true.)  ! uses phi
+    call correct_velocity_psolver_dual(self, dt_use, with_cross=.true., p_is_total=.true.)  ! uses phi
     call apply_velocity_bc(self%U, self%U_bnd, &
                            self%bc_configs, self%mesh, u_fluc_bnd=self%sem_fluc_bnd, u_mean_bnd=self%abl_mean_bnd)
 
@@ -1424,7 +1424,7 @@ contains
       do c = 1, nc
         p_old(c) = p(c)
       end do
-      call correct_velocity_psolver_dual(self, gk_dt, with_cross=.false.)
+      call correct_velocity_psolver_dual(self, gk_dt, with_cross=.false., p_is_total=.true.)  ! p = p^{k-1/2}, whole pressure
       ! Rhie-Chow must add back exactly the gradient just removed, so record it here.
       !$acc parallel loop default(present)
       do c = 1, nc
@@ -1524,10 +1524,10 @@ contains
           call self%mesh%begin_halos_scalar(self%p)
           if (self%skip_grad_p) then
             call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, &
-                                   periodic_only=.false.)
+                                   periodic_only=.false., increment=.true.)
           else
             call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, &
-                                   periodic_only=.false., grad_p=self%w_gp)
+                                   periodic_only=.false., grad_p=self%w_gp, increment=.true.)
           end if
           call self%mesh%end_halos_scalar(self%p)
           call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, periodic_only=.true.)
@@ -1586,7 +1586,7 @@ contains
         !$omp end parallel do
 #endif
         call self%mesh%begin_halos_scalar(self%p)
-        call apply_pressure_bc_o2(self)
+        call apply_pressure_bc_o2(self, increment=.true.)
         call self%mesh%end_halos_scalar(self%p)
         call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, periodic_only=.true.)
       end if
@@ -2216,14 +2216,18 @@ contains
   end subroutine compute_pressure_gradient
 
   !> Non-periodic pressure BCs with the O(h^2) Neumann extrapolation whenever w_gp is a real gradient.
-  subroutine apply_pressure_bc_o2(self)
+  subroutine apply_pressure_bc_o2(self, increment)
     class(FVSolver), intent(inout) :: self
+    logical, optional, intent(in) :: increment  ! self%p is phi (see apply_pressure_bc)
+    logical :: incr
 
+    incr = .false.
+    if (present(increment)) incr = increment
     if (self%skip_grad_p) then
-      call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, periodic_only=.false.)
+      call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, periodic_only=.false., increment=incr)
     else
       call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, &
-                             periodic_only=.false., grad_p=self%w_gp)
+                             periodic_only=.false., grad_p=self%w_gp, increment=incr)
     end if
   end subroutine apply_pressure_bc_o2
 
@@ -2615,9 +2619,13 @@ contains
 
   !> Correct previously assembled face fluxes by pressure jump using the
   !> same coefficients used in the pressure operator.
-  subroutine correct_face_fluxes(self, dt)
+  subroutine correct_face_fluxes(self, dt, p_is_total)
     class(FVSolver), intent(inout), target :: self
     real(rp),        intent(in)    :: dt
+    !> .true.: self%p is the whole pressure (initial projection), so outlet faces see p_val;
+    !> default: self%p is the increment phi, whose outlet value is 0 (p_bnd already equals p_val).
+    logical, optional, intent(in)  :: p_is_total
+    logical :: ptot
 
     integer(ip) :: idx, o, nb, f_mesh, nc, ntot, nf, n_int, n_faces, n_patches, n_nper, n_per
     integer(ip) :: ib, f_bnd, f_glob, pair_bnd, pair_face, o_self, o_pair, q
@@ -2633,6 +2641,8 @@ contains
 
     if (.not. allocated(self%face_flux)) return
 
+    ptot = .false.
+    if (present(p_is_total)) ptot = p_is_total
     nc = self%mesh%n_cells
     ntot = nc + self%mesh%n_ghost
     nf = self%psolver%n_faces
@@ -2717,7 +2727,7 @@ contains
       sn = abs(d1*fnrm(1, f_glob) + d2*fnrm(2, f_glob) + d3*fnrm(3, f_glob))
       d_orth = max(sn, SMALL)
       coeff = farea(f_glob) / d_orth
-      ff(f_glob) = ff(f_glob) - dt * coeff * (pval(q) - p(o))
+      ff(f_glob) = ff(f_glob) - dt * coeff * (merge(pval(q), 0.0_rp, ptot) - p(o))
       ! Cross-diffusion correction for Dirichlet p BC (outlet); owner-side gradient only (no off-cell info).
       if (act_bnd(ib)) then
         ff(f_glob) = ff(f_glob) - dt * (gp(1, o)*k_bnd(1, ib) + gp(2, o)*k_bnd(2, ib) + gp(3, o)*k_bnd(3, ib))
@@ -2752,10 +2762,12 @@ contains
 
   !> Correct cell velocities: u = u - dt * T^-1 . sum_f n_f g_f, g_f the jump the flux correction removes.
   ! with_cross = .false. for the pre-correction: Rhie-Chow replaces only the orthogonal part at the face.
-  subroutine correct_velocity_psolver_dual(self, dt, with_cross)
+  subroutine correct_velocity_psolver_dual(self, dt, with_cross, p_is_total)
     class(FVSolver), intent(inout), target :: self
     real(rp),        intent(in)    :: dt
     logical,         intent(in)    :: with_cross
+    logical, optional, intent(in)  :: p_is_total  ! see correct_face_fluxes
+    logical :: ptot
 
     integer(ip) :: nc, ntot, c, idx, o, nb, f_mesh, nf, n_int, n_faces, n_patches, n_nper
     integer(ip) :: ib, f_bnd, f_glob, q
@@ -2771,6 +2783,8 @@ contains
     real(rp),       pointer :: pval(:), fctr(:,:), fnrm(:,:), farea(:), cctr(:,:)
 
     do_cross = with_cross .and. (.not. self%skip_nonortho)
+    ptot = .false.
+    if (present(p_is_total)) ptot = p_is_total
     nc = self%mesh%n_cells
     ntot = nc + self%mesh%n_ghost
     nf = self%psolver%n_faces
@@ -2897,7 +2911,7 @@ contains
       sn     = abs(d1*fnrm(1, f_glob) + d2*fnrm(2, f_glob) + d3*fnrm(3, f_glob))
       d_orth = max(sn, SMALL)
       coeff  = farea(f_glob) / d_orth
-      g_f    = coeff * (pval(q) - p(o))
+      g_f    = coeff * (merge(pval(q), 0.0_rp, ptot) - p(o))
       if (do_cross) then
         if (act_bnd(ib)) g_f = g_f + gp(1, o)*k_bnd(1, ib) + gp(2, o)*k_bnd(2, ib) + gp(3, o)*k_bnd(3, ib)
       end if
@@ -3299,8 +3313,10 @@ contains
     n_ref = n_out
 
     if (n_out > 0 .and. n_ref > 0) then
+      ! A Dirichlet outlet fixes the level through the phi = 0 boundary rows; re-anchoring the mean
+      ! outlet-cell pressure to the mean p_val would erase any difference between outlet patches.
       p_ref = p_ref_sum / real(n_ref, rp)
-      p_shift = p_sum / real(n_out, rp) - p_ref
+      p_shift = 0.0_rp
     else
       ! pure-Neumann case (no outlet anywhere) - pressure is determined
       ! only up to a constant. Anchor by subtracting the global volume-weighted mean.

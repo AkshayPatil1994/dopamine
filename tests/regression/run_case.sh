@@ -39,8 +39,13 @@ mesh_cache="$(cd "$mesh_cache" && pwd)"
 source "$case_dir/case.env"
 mesh="$mesh_cache/$case_name.msh"
 if [[ ! -f "$mesh" ]]; then
-  sed -e "$GEO_SED" "$root/$GEO_SRC" > "$mesh_cache/$case_name.geo"
-  "$gmsh" -3 -format msh4 -o "$mesh" "$mesh_cache/$case_name.geo" > "$mesh_cache/$case_name.gmsh.log" 2>&1
+  if [[ -n "${MESH_CMD:-}" ]]; then
+    # Cases whose mesh is not a Gmsh geometry (e.g. the skewed box) name their own generator.
+    (cd "$root" && eval "$MESH_CMD") > "$mesh_cache/$case_name.mesh.log" 2>&1
+  else
+    sed -e "$GEO_SED" "$root/$GEO_SRC" > "$mesh_cache/$case_name.geo"
+    "$gmsh" -3 -format msh4 -o "$mesh" "$mesh_cache/$case_name.geo" > "$mesh_cache/$case_name.gmsh.log" 2>&1
+  fi
 fi
 
 cp "$case_dir/case.input" "$workdir/case.input"

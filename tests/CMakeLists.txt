@@ -5,7 +5,7 @@ find_program(DOPAMINE_GMSH gmsh)
 set(_regression_dir "${CMAKE_CURRENT_SOURCE_DIR}/regression")
 set(_regression_work "${CMAKE_BINARY_DIR}/regression")
 
-foreach(_case tgv channel rb duct dynsmag graded)
+foreach(_case tgv channel rb duct dynsmag graded pdrop hydro)
   foreach(_np 1 2)
     add_test(NAME regression_${_case}_np${_np}
              COMMAND "${_regression_dir}/check_case.sh" ${_case} ${_np} "${_regression_work}")

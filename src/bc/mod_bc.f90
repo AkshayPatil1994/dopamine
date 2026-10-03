@@ -351,15 +351,19 @@ contains
 
   !> Apply pressure BC: OUTLET Dirichlet, others Neumann with O(h^2) extrapolation if grad_p provided.
   !> OpenACC builds run on the device, like apply_velocity_bc.
-  subroutine apply_pressure_bc(p, p_bnd, bc_configs, msh, periodic_only, grad_p)
+  subroutine apply_pressure_bc(p, p_bnd, bc_configs, msh, periodic_only, grad_p, increment)
     real(rp),      intent(inout) :: p(:)  ! (n_cells + n_ghost)
     real(rp),      intent(inout) :: p_bnd(:)  ! (n_bnd_faces)
     type(BCConfig), intent(in)   :: bc_configs(:)
     type(Mesh),    intent(in), target :: msh
     logical, optional, intent(in) :: periodic_only
     real(rp), optional, intent(in), target :: grad_p(:,:)  ! (3, n_cells+n_ghost)
+    !> p holds the pressure increment phi: its Dirichlet outlet value is 0 (the old pressure already
+    !> equals p_val there), not p_val. Summing old + increment boundary values would otherwise give 2 p_val.
+    logical, optional, intent(in) :: increment
 
     integer(ip) :: f_bnd, f_global, o, nb, patch_id, bc_id, n_int, n_bnd, n_patches, n_grad, n_p
+    real(rp) :: outlet_scale
     real(rp) :: an, d_ortho, d_cf(3), n_hat(3)
     logical :: have_grad, filter_periodic, filter_nonperiodic
     real(rp),    pointer :: gp(:,:)
@@ -370,6 +374,10 @@ contains
     call ensure_bc_config_soa(bc_configs, msh)
 
     have_grad = present(grad_p)
+    outlet_scale = 1.0_rp
+    if (present(increment)) then
+      if (increment) outlet_scale = 0.0_rp
+    end if
     filter_periodic    = .false.
     filter_nonperiodic = .false.
     if (present(periodic_only)) then
@@ -412,7 +420,7 @@ contains
 
       select case (bc_id)
       case (BC_OUTLET)
-        p_bnd(f_bnd) = bc_p_val_soa(patch_id)  ! fixed (usually 0)
+        p_bnd(f_bnd) = outlet_scale * bc_p_val_soa(patch_id)  ! fixed p_val (0 for an increment)
       case (BC_PERIODIC)
         nb = periodic_nb_cache(f_bnd)
         if (nb >= 1 .and. nb <= n_p) then

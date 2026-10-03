@@ -12,6 +12,8 @@ being restructured (e.g. the GPU port); they are not validation cases.
 | `duct` | 32x16x16 (4 x 1 x 1) | velocity inlet, fixed-pressure outlet, no-slip walls, CDS; the Dirichlet-pressure terms of the projection |
 | `dynsmag` | 32x16x16 (as `channel`) | Germano-Lilly dynamic Smagorinsky: test filter and the halo exchanges of its packed fields |
 | `graded` | 32x16x16, wall bump 0.01 | as `channel`, but the grading creates refinement-interface faces (interface diagnostics on); KEP advection must stay on the device path |
+| `pdrop` | skewed 12^3 box (`mk_box_mesh.py`, no gmsh) | outlets at p = 1 and 0 with no body force: Umax must grow as t; Dirichlet outlets with non-orthogonal correctors |
+| `hydro` | same mesh | outlets at p = 1 and 0 balancing `fz = -1`: the fluid must stay at rest |
 
 Run everything through CTest from a build tree (meshes are generated with gmsh on first use):
 
@@ -36,7 +38,8 @@ tolerance.
 The stored references come from the CPU build (gfortran, `OMP_NUM_THREADS=1`) of commit
 c6f4e6b plus the direct-read `-np > 1` deadlock fix.
 
-The np2 references were regenerated after the least-squares stencil started carrying
+The `duct` references were regenerated when the outlet pressure treatment changed (the increment is 0 on
+the outlet and the mean-p anchor is gone); `pdrop` and `hydro` are new. The np2 references were regenerated after the least-squares stencil started carrying
 vertex-adjacent cells across partition cuts: step 1 of every case now agrees with the np1
 reference to machine precision (before, `eps` in `rb` differed by 2.5% and `nu_sgs_mean` in
 `channel` by 2e-3). The `dynsmag` references were regenerated again after the test filter
