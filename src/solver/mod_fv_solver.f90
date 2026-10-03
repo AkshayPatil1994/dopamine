@@ -2202,6 +2202,21 @@ contains
   end subroutine build_total_pressure
 
   !> Assemble predictor face fluxes and Poisson RHS: rhs(c) = -(1/dt)*sum_f q*_f.
+  !> Owner weight of the interpolation across a face for the deferred non-orthogonal flux. A periodic face
+  !> carries gc = 1 (it is a boundary face), which would use only the owner's gradient on both sides of the seam
+  !> and break the antisymmetry of the pair's flux; use the periodic-pair weight instead.
+  pure function cross_owner_weight(f_mesh, n_int, gcs, pgcs) result(g)
+    !$acc routine seq
+    integer(ip), intent(in) :: f_mesh, n_int
+    real(rp),    intent(in) :: gcs(:), pgcs(:)
+    real(rp) :: g
+    if (f_mesh > n_int) then
+      g = pgcs(f_mesh - n_int)
+    else
+      g = gcs(f_mesh)
+    end if
+  end function cross_owner_weight
+
   subroutine compute_face_fluxes_and_rhs(self, dt, rhs_p, p_is_increment)
     class(FVSolver), intent(inout), target :: self
     real(rp),        intent(in)    :: dt
@@ -2220,7 +2235,7 @@ contains
     integer(ip),    pointer :: ppair(:), pnb(:)
     real(c_double), pointer :: fcoef(:)
     logical,        pointer :: act_int(:), act_bnd(:), built(:)
-    real(rp),       pointer :: k_int(:,:), k_bnd(:,:), gcs(:), eps(:,:), skew(:), fsf(:,:), fdcf(:), pdcf(:)
+    real(rp),       pointer :: k_int(:,:), k_bnd(:,:), gcs(:), pgcs(:), eps(:,:), skew(:), fsf(:,:), fdcf(:), pdcf(:)
     real(rp),       pointer :: fctr(:,:), cctr(:,:), U(:,:), gU(:,:,:), Ub(:,:), gprc(:,:), phi(:), gp(:,:), ff(:)
 
     nc = self%mesh%n_cells
@@ -2259,6 +2274,7 @@ contains
     nper => self%nonperiodic_bfaces
     per => self%periodic_bfaces
     gcs => self%mesh%face_gc_soa
+    pgcs => self%mesh%periodic_gc_soa
     eps => self%mesh%face_eps_soa
     skew => self%mesh%face_skew_soa
     fsf => self%mesh%face_sf_soa
@@ -2507,7 +2523,7 @@ contains
           if (.not. act_int(idx)) cycle
 
           ! Use mesh-precomputed gc (consistent with gradient and viscous operators).
-          cross = nonortho_cross_flux(gp(:, o), gp(:, nb), gcs(f_mesh), k_int(:, idx))
+          cross = nonortho_cross_flux(gp(:, o), gp(:, nb), cross_owner_weight(f_mesh, n_int, gcs, pgcs), k_int(:, idx))
           rhs_p(o)  = rhs_p(o)  + cross
           if (nb <= nc) rhs_p(nb) = rhs_p(nb) - cross
         end do
@@ -2557,7 +2573,7 @@ contains
     real(c_double), pointer :: fcoef(:)
     logical,        pointer :: act_int(:), act_bnd(:)
     integer(lp),    pointer :: gid(:)
-    real(rp),       pointer :: k_int(:,:), k_bnd(:,:), gcs(:), ff(:), p(:), gp(:,:), pval(:)
+    real(rp),       pointer :: k_int(:,:), k_bnd(:,:), gcs(:), pgcs(:), ff(:), p(:), gp(:,:), pval(:)
     real(rp),       pointer :: fctr(:,:), fnrm(:,:), farea(:), cctr(:,:)
 
     if (.not. allocated(self%face_flux)) return
@@ -2585,6 +2601,7 @@ contains
     per => self%periodic_bfaces
     pval => self%patch_p_val
     gcs => self%mesh%face_gc_soa
+    pgcs => self%mesh%periodic_gc_soa
     fown => self%mesh%face_owner_soa
     fpid => self%mesh%face_patch_id_soa
     pbc => self%mesh%patch_bc_id_soa
@@ -2622,7 +2639,7 @@ contains
       if (act_int(idx)) then
         ! Use precomputed projection-based gc (FPS Sect. 7.2) - consistent with
         ! the gradient, advection, and viscous operators.
-        gc = gcs(f_mesh)
+        gc = cross_owner_weight(f_mesh, n_int, gcs, pgcs)
         cross = nonortho_cross_flux(gp(:, o), gp(:, nb), gc, k_int(:, idx))
         ff(f_mesh) = ff(f_mesh) - dt * cross
       end if
@@ -2725,7 +2742,7 @@ contains
     integer(ip),    pointer :: fnb_p(:), fmi(:), perm(:), nper(:), fown(:), fpid(:), pbc(:)
     real(c_double), pointer :: fcoef(:)
     logical,        pointer :: act_int(:), act_bnd(:)
-    real(rp),       pointer :: k_int(:,:), k_bnd(:,:), gcs(:), p(:), gp(:,:), gpc(:,:), U(:,:), Tinv(:,:,:)
+    real(rp),       pointer :: k_int(:,:), k_bnd(:,:), gcs(:), pgcs(:), p(:), gp(:,:), gpc(:,:), U(:,:), Tinv(:,:,:)
     real(rp),       pointer :: pval(:), fctr(:,:), fnrm(:,:), farea(:), cctr(:,:)
 
     do_cross = with_cross .and. (.not. self%skip_nonortho)
@@ -2751,6 +2768,7 @@ contains
     pval => self%patch_p_val
     Tinv => self%recon_Tinv
     gcs => self%mesh%face_gc_soa
+    pgcs => self%mesh%periodic_gc_soa
     fown => self%mesh%face_owner_soa
     fpid => self%mesh%face_patch_id_soa
     pbc => self%mesh%patch_bc_id_soa
@@ -2814,7 +2832,7 @@ contains
         g_f   = coeff * (p(nb) - p(o))
         if (do_cross) then
           if (act_int(idx)) then
-            gc  = gcs(f_mesh)
+            gc  = cross_owner_weight(f_mesh, n_int, gcs, pgcs)
             g_f = g_f + nonortho_cross_flux(gp(:, o), gp(:, nb), gc, k_int(:, idx))
           end if
         end if
