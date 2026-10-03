@@ -572,7 +572,7 @@ contains
 
     integer(ip) :: o, nb, f_bnd
     real(rp)    :: gc, phi_linear
-    real(rp)    :: d_on(3), epsilon(3), grad_mean(3)
+    real(rp)    :: epsilon(3), grad_mean(3)
 
     f_bnd = 0
     o  = msh%faces(f)%owner
@@ -605,10 +605,9 @@ contains
           ! Genuine interior face: nb above is msh%faces(f)%neighbour, matching the cache.
           epsilon = msh%faces(f)%eps
         else
-          ! Periodic face: nb was resolved via periodic_neighbor above, so the cache
-          ! (built from msh%faces(f)%neighbour only) does not apply; recompute directly.
-          d_on = msh%cells(nb)%centroid - msh%cells(o)%centroid
-          epsilon = msh%faces(f)%centre - (msh%cells(o)%centroid + (1.0_rp - gc) * d_on)
+          ! Periodic face: the partner centroid sits a domain length away, so the centroid difference
+          ! is not an in-cell offset. No skewness correction, as in the SoA kernels (phi_f_plain).
+          epsilon = 0.0_rp
         end if
         grad_mean = gc * grad_phi(:, o) + (1.0_rp - gc) * grad_phi(:, nb)
         phi_f = phi_linear + dot_product(grad_mean, epsilon)
@@ -630,7 +629,7 @@ contains
     real(rp)    :: Uf(3)
     integer(ip) :: o, nb, j, f_bnd
     real(rp)    :: gc
-    real(rp)    :: d_on(3), epsilon(3), grad_mean(3)
+    real(rp)    :: epsilon(3), grad_mean(3)
 
     f_bnd = 0
 
@@ -664,10 +663,9 @@ contains
           ! Genuine interior face: nb above is msh%faces(f)%neighbour, matching the cache.
           epsilon = msh%faces(f)%eps
         else
-          ! Periodic face: nb was resolved via periodic_neighbor above, so the cache
-          ! (built from msh%faces(f)%neighbour only) does not apply; recompute directly.
-          d_on = msh%cells(nb)%centroid - msh%cells(o)%centroid
-          epsilon = msh%faces(f)%centre - (msh%cells(o)%centroid + (1.0_rp - gc) * d_on)
+          ! Periodic face: the partner centroid sits a domain length away, so the centroid difference
+          ! is not an in-cell offset. No skewness correction, as in the SoA kernels (phi_f_plain).
+          epsilon = 0.0_rp
         end if
         do j = 1, 3
           grad_mean = gc * grad_U(:, j, o) + (1.0_rp - gc) * grad_U(:, j, nb)
