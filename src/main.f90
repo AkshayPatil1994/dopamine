@@ -15,6 +15,7 @@ program dopamine_main
   use mod_bc, only: BCConfig
   use mod_bc_setup, only: build_bc_configs
   use mod_fv_solver
+  use mod_inflow_record
   use mod_input_parser
   use mod_runtime_env
   use mod_warn_log
@@ -38,6 +39,7 @@ program dopamine_main
   type(OutputWriter)   :: writer
   type(StatsCollector) :: stats
   type(SamplingCollector) :: sampler
+  type(InflowRecorder) :: inflow_rec
   type(BCConfig), allocatable :: bc_configs(:)
   type(BCConfig), allocatable :: bc_configs_global(:)
 
@@ -284,7 +286,7 @@ program dopamine_main
 
   ! Initialise solver
   if (rank == 0) write(*, '(A)') ' Initializing solver...'
-  call solver%init(mesh_local, config%params, bc_configs, config%abl_config)
+  call solver%init(mesh_local, config%params, bc_configs, config%abl_config, config%inflow)
   if (rank == 0) write(*, '(A)') ' Solver initialization complete.'
 
   ! Handle restart or initial conditions
@@ -315,6 +317,7 @@ program dopamine_main
     if (rank == 0) write(*, '(A,I0)') ' Reading checkpoint from step ', restart_step
     call read_checkpoint(solver, mesh_local, trim(config%restart_dir), restart_step, rank)
     if (rank == 0) write(*, '(A)') ' Checkpoint restored. Continuing from previous state...'
+    call solver%refresh_inflow()
     call solver%refresh_after_restart()
     if (.not. solver%u_face_ready) then
       if (rank == 0) write(*, '(A)') ' Checkpoint carries no face flux; rebuilding it from the restored velocity.'
@@ -366,6 +369,7 @@ program dopamine_main
   call MPI_Barrier(MPI_COMM_WORLD, ierr)  ! Synchronize all ranks before time loop
 
   dt = config%params%dt
+  if (config%inflow_rec%enabled) call inflow_record_init(inflow_rec, solver, config%inflow_rec)
 
   do step = restart_step + 1, huge(1_ip) - 1_ip
     if (config%params%nstep_max > 0 .and. step > config%params%nstep_max) then
@@ -398,6 +402,7 @@ program dopamine_main
     ! Advance one step
     t_target = solver%time + dt
     call solver%advance(dt)
+    call inflow_record_step(inflow_rec, solver, dt)
     ! advance() clamps a fixed dt to the CFL limit, which can leave the step short of the write time:
     ! then the next step snaps to the same boundary again, so do not write (or count) it twice.
     if (write_time_hit .and. solver%time < t_target - 1.0e-9_rp * config%params%write_time) write_time_hit = .false.
@@ -450,6 +455,7 @@ program dopamine_main
   end do
 
   if (rank == 0) write(*, '(A)') ' Time loop complete.....'
+  if (inflow_rec%active .and. .not. inflow_rec%done) call inflow_record_finalize(inflow_rec)
 
   call warn_log_finalize(step, solver%time)
   if (rank == 0 .and. warn_log_total() > 0) &

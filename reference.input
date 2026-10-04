@@ -421,10 +421,13 @@
   wind_dir_deg = 270.0
 
   ! - Synthetic Eddy Method (SEM) for turbulent inflow ----------------------
+  ! Divergence-free eddies: each is the curl of a vector potential, so div(u') = 0
+  ! holds exactly. Mean profile and intensities are given wind-tunnel style.
   ! Enable SEM inflow turbulence generation
   use_sem = .true.
 
-  ! Number of synthetic eddies to place in recycle box
+  ! Total number of eddies in the recycle box. Statistics are unbiased for any
+  ! count; too few makes the field intermittent (a warning prints n_sigma).
   n_eddies = 500
 
   ! Eddy length scale (longest half-extent) [m]. If 0, estimated as 0.1*min inlet-plane span.
@@ -435,21 +438,38 @@
   ! tensor; 'jarrin' original tent-kernel SEM (not divergence-free).
   sem_type = 'dfsem'
 
-  ! Prescribed inflow profiles. Empty = analytic neutral log law with
-  ! Panofsky-Dutton stress ratios. Otherwise a CSV, '#' comments allowed,
-  ! one row per height, in either of two layouts (detected from the column count):
+  ! Random seed; 0 = built-in. Identical on every rank.
+  sem_seed = 0
+
+  ! Mean profile when no table is given: 'log' (neutral log law from u_ref, z_ref,
+  ! z0_m) or 'power' (u_ref * (z/z_ref)**sem_alpha).
+  sem_mean_law = 'log'
+  sem_alpha = 0.2
+
+  ! Turbulence intensities when no table is given. sem_Iu_ref > 0 selects them;
+  ! sem_Iu_ref = 0 uses Panofsky-Dutton neutral-surface-layer stresses
+  ! (sigma_u,v,w / u* = 2.4, 1.9, 1.25, u'w' = -u*^2).
+  !   Iu(z) = sem_Iu_ref * ln(z_ref/z0_m) / ln(z/z0_m)   (z >= 10 z0_m)
+  !   Iv = sem_Iv_ratio * Iu,  Iw = sem_Iw_ratio * Iu,  u'w' = sem_rho_uw sigma_u sigma_w
+  sem_Iu_ref = 0.0
+  sem_Iv_ratio = 0.75
+  sem_Iw_ratio = 0.5
+  sem_rho_uw = -0.3
+
+  ! Prescribed inflow table. Empty = laws above. Otherwise a CSV, '#' comments
+  ! allowed, one row per height, columns chosen by sem_profile_format:
   !
-  !   6 columns, wind-aligned:  z  U  uu  vv  ww  uw
-  !     U is a speed along wind_dir_deg; stresses are streamwise/lateral/vertical
-  !     and are rotated into the wind direction with the mean.
+  !   'ti'     z  U  Iu  Iv  Iw  [rho_uw]      wind-aligned
+  !              Iu = sigma_u/U etc.; rho_uw = u'w'/(sigma_u sigma_w)
+  !   'stress' 6 columns, wind-aligned:  z  U  uu  vv  ww  uw
+  !            10 columns, global axes:  z  U  V  W  uu  vv  ww  uv  uw  vw
+  !              stresses in m2/s2 (kinematic); wind_dir_deg is not applied
+  !              to the 10-column layout.
   !
-  !   10 columns, global axes:  z  U  V  W  uu  vv  ww  uv  uw  vw
-  !     Everything is in x,y,z; wind_dir_deg is not applied. Use this for
-  !     measured or WRF-derived data already in domain coordinates.
-  !
-  ! Heights need not be sorted. Values are linearly interpolated in z and
-  ! clamped outside the table range, so extend it past the domain top.
-  ! Stresses are in m2/s2 (kinematic).
+  ! Eddy sizes follow sem_sigma and the principal stresses, not a length column. Heights need not
+  ! be sorted; values are linearly interpolated in z and clamped outside the
+  ! table, so extend it past the domain top.
+  sem_profile_format = 'stress'
   sem_profile_file = ''
 
   ! - Davies Relaxation (Nudging) to large-scale profiles ------------------
@@ -475,6 +495,66 @@
   ! Leave the vertical component unforced. Nudging w damps resolved vertical motion,
   ! so keep this .true. unless you deliberately want the full vector relaxed.
   nudging_horizontal_only = .true.
+/
+
+&dopamine_inflow
+  ! Source of the inlet fluctuation at ablInlet patches.
+  !   'sem'    - online divergence-free eddies (&dopamine_abl)
+  !   'planes' - replay a database of pre-computed planes (dopamine-inflow-gen or a precursor run).
+  !              Needs a spanwise-periodic domain; the database holds the fluctuation only, the
+  !              mean comes from the sem_mean_law / sem_profile_file options in &dopamine_abl.
+  inflow_source = 'sem'
+  inflow_file = ''
+  ! Seeds the random segment order and the spanwise shifts (the replay is a function of time and
+  ! this seed, so restarts reproduce it).
+  inflow_seed = 1
+  ! Start offset into the replay sequence [s]
+  inflow_t_offset = 0.0
+  ! Cross-fade between replayed segments [s]; 0 = 10% of a segment
+  inflow_crossfade_time = 0.0
+  ! Write the inlet plane grid (uniform spanwise nodes, heights) for dopamine-inflow-gen and stop.
+  ! Generating on this lattice means the solver copies values instead of interpolating them.
+  inflow_export_grid = ''
+/
+
+&dopamine_inflow_gen
+  ! Used by dopamine-inflow-gen only. The eddy description is read from &dopamine_abl.
+  gen_file = 'inflow_planes.nc'
+  ! Plane grid exported by the solver (inflow_export_grid), or specify it here:
+  gen_grid_file = ''
+  gen_W = 0.0            ! spanwise period [m]
+  gen_y0 = 0.0           ! spanwise coordinate of the first node [m]
+  gen_ny = 0             ! spanwise nodes (uniform over the period)
+  gen_nz = 0             ! heights (uniform in [gen_z_min, gen_z_max])
+  gen_z_min = 0.0
+  gen_z_max = 0.0
+  ! Frame spacing [s]; 0 = 6 frames across the shortest streamwise eddy passage
+  gen_dt = 0.0
+  ! Segment length in eddy turnover times, T_e = Lx(z_ref) / sigma_u(z_ref) (or gen_T_turnover)
+  gen_n_turnovers = 2.0
+  gen_T_turnover = 0.0
+  ! Independent realisations replayed in random order; use >= 4
+  gen_n_segments = 4
+  ! Eddies per kernel volume; sets the eddy count (>= 1; 3 is smooth)
+  gen_n_sigma = 3.0
+  gen_seed = 1
+  ! Remove the segment-mean spanwise-mean waveform (no spectral line at the replay period)
+  gen_decorrelate = .true.
+  ! Re-read the file and compare the statistics with the targets
+  gen_verify = .true.
+/
+
+&dopamine_inflow_record
+  ! Precursor run: record a plane of cell centres into an inflow database.
+  ! The plane must form a regular lattice across a spanwise-periodic domain.
+  record_enabled = .false.
+  record_file = 'inflow_record.nc'
+  record_point = 0.0 0.0 0.0     ! a point on the plane
+  record_normal = 1.0 0.0 0.0    ! flow direction through the plane (horizontal)
+  record_dt = 0.0                ! frame spacing [s]
+  record_t_start = 0.0           ! skip the spin-up before this time [s]
+  record_segment_time = 0.0      ! length of one segment [s]
+  record_n_segments = 1          ! use >= 4
 /
 
 &dopamine_bc

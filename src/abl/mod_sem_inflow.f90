@@ -31,6 +31,7 @@ module mod_sem_inflow
   public :: sem_get_rng_state, sem_set_rng_state
   public :: sem_read_profile, sem_profile_at, sem_cholesky
   public :: sem_prepare, sem_eigen3, sem_dfsem_eddy_velocity, sem_reference_scales, sem_stress_at
+  public :: sem_init_targets, sem_setup, sem_target_at, sem_mean_at
 
 contains
 
@@ -177,18 +178,48 @@ contains
     type(ABLConfig),  intent(in)    :: abl_cfg
     type(Mesh),       intent(in)    :: msh
 
-    integer(ip) :: i, n_e
-    real(rp)    :: span1, span2
-    logical     :: found
+    logical :: found
 
-    if (len_trim(abl_cfg%sem_profile_file) > 0) &
-      call sem_read_profile(abl_cfg%sem_profile_file, state, verbose=(msh%rank == 0))
-
-    call sem_inlet_frame(msh, state, found)
+    call sem_init_targets(state, abl_cfg, msh, found)
     if (.not. found) then
       state%initialized = .false.
       return
     end if
+
+    call sem_setup(state, abl_cfg, verbose=(msh%rank == 0))
+    if (state%dfsem) call sem_check_resolution(state, msh)
+  end subroutine sem_init
+
+  !> Profile table (if any) and inlet frame, no eddies: for a source that supplies its own fluctuation
+  !> (the inflow-plane database) but still takes the mean profile from the SEM laws and tables.
+  subroutine sem_init_targets(state, abl_cfg, msh, found)
+    type(SEMState),   intent(inout) :: state
+    type(ABLConfig),  intent(in)    :: abl_cfg
+    type(Mesh),       intent(in)    :: msh
+    logical,          intent(out)   :: found
+
+    if (len_trim(abl_cfg%sem_profile_file) > 0 .and. .not. state%has_profile) &
+      call sem_read_profile(abl_cfg%sem_profile_file, state, verbose=(msh%rank == 0), &
+                            fmt=abl_cfg%sem_profile_format, rho_uw=abl_cfg%sem_rho_uw)
+    call sem_inlet_frame(msh, state, found)
+    if (.not. found) return
+    state%override_mean = state%has_profile .or. trim(abl_cfg%sem_mean_law) == 'power'
+  end subroutine sem_init_targets
+
+  !> Everything after the inlet frame is known: eddy scale, box, seeding. Needs state%{x_inlet,n_in,t1,t2,
+  !> t1_min..t2_max, per1/per2 with period and lower plane} and, for tabulated inflow, the profile.
+  subroutine sem_setup(state, abl_cfg, verbose)
+    type(SEMState),   intent(inout) :: state
+    type(ABLConfig),  intent(in)    :: abl_cfg
+    logical, intent(in), optional   :: verbose
+
+    integer(ip) :: i, n_e
+    real(rp)    :: span1, span2, r
+    logical     :: talk
+
+    talk = .false.
+    if (present(verbose)) talk = verbose
+    state%override_mean = state%has_profile .or. trim(abl_cfg%sem_mean_law) == 'power'
 
     state%n_eddies = max(1_ip, abl_cfg%n_eddies)
     n_e = state%n_eddies
@@ -220,16 +251,15 @@ contains
       allocate(state%sig(3, n_e),   source=0.0_rp)
       allocate(state%ampl(3, n_e),  source=0.0_rp)
       call sem_reference_scales(state, abl_cfg)
-      call sem_check_resolution(state, msh)
     end if
 
     ! A periodic direction needs exactly one period of eddies (they are wrapped when evaluated, so
     ! the fluctuation is periodic across the seam) and a kernel that fits inside half of it.
     if ((state%per1 .and. state%rsup >= 0.5_rp * state%period1) .or. &
         (state%per2 .and. state%rsup >= 0.5_rp * state%period2)) then
-      if (msh%rank == 0) write(*,'(A,ES10.3,A)') 'ERROR: the SEM eddy support (', state%rsup, &
+      if (talk) write(*,'(A,ES10.3,A)') 'ERROR: the SEM eddy support (', state%rsup, &
         ' m) must be below half the periodic width of the inlet plane; reduce sem_sigma'
-      error stop 'sem_init: eddy scale too large for the periodic inlet'
+      error stop 'sem_setup: eddy scale too large for the periodic inlet'
     end if
     ! Otherwise pad the box by the support so eddies straddling the edges are represented.
     if (state%per1) then
@@ -249,6 +279,13 @@ contains
     state%u_convect = max(abl_cfg%u_ref, SMALL)
 
     rng_state = RNG_SEED
+    if (abl_cfg%sem_seed /= 0) then
+      rng_state = ieor(RNG_SEED, int(abl_cfg%sem_seed, int64) * 2654435761_int64)
+      if (rng_state == 0_int64) rng_state = RNG_SEED
+      do i = 1, 8
+        r = sem_rand()  ! warm up so nearby seeds decorrelate
+      end do
+    end if
     do i = 1, n_e
       call sem_place_eddy(state, i, state%rsup * (2.0_rp * sem_rand() - 1.0_rp), .true.)
     end do
@@ -256,7 +293,7 @@ contains
     if (state%dfsem) call sem_prepare(state, abl_cfg)
 
     state%initialized = .true.
-  end subroutine sem_init
+  end subroutine sem_setup
 
   !> Force each amplitude component to sum to zero so the eddies add no mean velocity.
   subroutine sem_balance_amplitudes(state)
@@ -318,16 +355,48 @@ contains
     end do
   end subroutine sem_advance
 
-  !> Read prescribed inflow profiles: 6 columns z,U,uu,vv,ww,uw (wind-aligned)
-  !> or 10 columns z,U,V,W,uu,vv,ww,uv,uw,vw (global axes).
-  subroutine sem_read_profile(filename, state, verbose)
+  !> Count whitespace/comma separated tokens on a line.
+  integer(ip) function count_tokens(line) result(n)
+    character(len=*), intent(in) :: line
+    integer(ip) :: i
+    logical :: in_tok
+    character :: ch
+
+    n = 0
+    in_tok = .false.
+    do i = 1, len_trim(line)
+      ch = line(i:i)
+      if (ch == ' ' .or. ch == ',' .or. ch == achar(9) .or. ch == ';') then
+        in_tok = .false.
+      else if (.not. in_tok) then
+        in_tok = .true.
+        n = n + 1
+      end if
+    end do
+  end function count_tokens
+
+  !> Read prescribed inflow profiles (heights need not be sorted; '#' comments allowed).
+  !>
+  !> fmt = 'stress' (default):  z U uu vv ww uw            6 columns, wind-aligned
+  !>                            z U V W uu vv ww uv uw vw  10 columns, global axes
+  !> fmt = 'ti':                z U Iu Iv Iw [rho_uw]      5-6 columns, wind-aligned; I = sigma/U
+  !> Length-scale columns are not used: the eddy sizes follow from sem_sigma and the principal stresses.
+  subroutine sem_read_profile(filename, state, verbose, fmt, rho_uw)
     character(len=*), intent(in)    :: filename
     type(SEMState),   intent(inout) :: state
-    logical, intent(in), optional   :: verbose  ! rank-0 only in parallel runs
+    logical,          intent(in), optional :: verbose  ! rank-0 only in parallel runs
+    character(len=*), intent(in), optional :: fmt
+    real(rp),         intent(in), optional :: rho_uw   ! correlation used when a 'ti' table has none
 
     integer(ip) :: iunit, ios, k, n, ncol
     character(len=512) :: line
-    real(rp) :: v10(10), v6(6)
+    real(rp) :: v(10), tmp, rho_def, su, sv, sw, rho
+    logical  :: is_ti, ok
+
+    is_ti = .false.
+    if (present(fmt)) is_ti = (trim(fmt) == 'ti')
+    rho_def = -0.3_rp
+    if (present(rho_uw)) rho_def = rho_uw
 
     open(newunit=iunit, file=trim(filename), status='old', action='read', iostat=ios)
     if (ios /= 0) then
@@ -335,7 +404,7 @@ contains
       error stop 'sem_read_profile: open failed'
     end if
 
-    ! First pass: count valid rows and settle the column count from the first one.
+    ! First pass: settle the column count from the first numeric row, then count valid rows.
     n = 0
     ncol = 0
     do
@@ -343,20 +412,21 @@ contains
       if (ios /= 0) exit
       if (len_trim(line) == 0 .or. line(1:1) == '#') cycle
       if (ncol == 0) then
-        read(line, *, iostat=ios) v10
-        if (ios == 0) then
-          ncol = 10
+        read(line, *, iostat=ios) tmp
+        if (ios /= 0) cycle  ! header row
+        ncol = count_tokens(line)
+        if (is_ti) then
+          ok = (ncol == 5 .or. ncol == 6)
         else
-          read(line, *, iostat=ios) v6
-          if (ios /= 0) cycle
-          ncol = 6
+          ok = (ncol == 6 .or. ncol == 10)
+        end if
+        if (.not. ok) then
+          write(*,'(A,I0,A)') 'ERROR: SEM profile has ', ncol, ' columns, not valid for sem_profile_format = ' &
+            //merge("'ti'    ", "'stress'", is_ti)//' in '//trim(filename)
+          error stop 'sem_read_profile: bad column count'
         end if
       end if
-      if (ncol == 10) then
-        read(line, *, iostat=ios) v10
-      else
-        read(line, *, iostat=ios) v6
-      end if
+      read(line, *, iostat=ios) v(1:ncol)
       if (ios == 0) n = n + 1
     end do
 
@@ -366,7 +436,8 @@ contains
     end if
 
     state%n_levels = n
-    state%prof_global_axes = (ncol == 10)
+    state%prof_global_axes = (.not. is_ti) .and. (ncol == 10)
+    if (allocated(state%prof_z)) deallocate(state%prof_z, state%prof_U, state%prof_R)
     allocate(state%prof_z(n), source=0.0_rp)
     allocate(state%prof_U(3, n), source=0.0_rp)
     allocate(state%prof_R(6, n), source=0.0_rp)
@@ -377,23 +448,25 @@ contains
       read(iunit, '(A)', iostat=ios) line
       if (ios /= 0) exit
       if (len_trim(line) == 0 .or. line(1:1) == '#') cycle
-      if (ncol == 10) then
-        read(line, *, iostat=ios) v10
-        if (ios /= 0) cycle
-        k = k + 1
-        if (k > n) exit
-        state%prof_z(k)    = v10(1)
-        state%prof_U(:, k) = v10(2:4)
-        state%prof_R(:, k) = v10(5:10)
+      read(line, *, iostat=ios) v(1:ncol)
+      if (ios /= 0) cycle
+      k = k + 1
+      if (k > n) exit
+      state%prof_z(k) = v(1)
+      if (is_ti) then
+        state%prof_U(1, k) = v(2)
+        su = v(3) * v(2); sv = v(4) * v(2); sw = v(5) * v(2)
+        rho = rho_def
+        if (ncol >= 6) rho = v(6)
+        state%prof_R(1, k) = su**2; state%prof_R(2, k) = sv**2; state%prof_R(3, k) = sw**2
+        state%prof_R(5, k) = rho * su * sw
+      else if (ncol == 6) then
+        state%prof_U(1, k)   = v(2)  ! streamwise magnitude, rotated later
+        state%prof_R(1:3, k) = v(3:5)
+        state%prof_R(5, k)   = v(6)  ! uw
       else
-        read(line, *, iostat=ios) v6
-        if (ios /= 0) cycle
-        k = k + 1
-        if (k > n) exit
-        state%prof_z(k)      = v6(1)
-        state%prof_U(1, k)   = v6(2)  ! streamwise magnitude, rotated later
-        state%prof_R(1:3, k) = v6(3:5)
-        state%prof_R(5, k)   = v6(6)  ! uw
+        state%prof_U(:, k) = v(2:4)
+        state%prof_R(:, k) = v(5:10)
       end if
     end do
     close(iunit)
@@ -401,9 +474,9 @@ contains
     call sem_sort_profile(state)
     state%has_profile = .true.
     if (present(verbose)) then
-      if (verbose) write(*,'(A,I0,A,I0,A,ES10.3,A,ES10.3,A)') &
-        ' SEM inflow profiles: ', n, ' levels, ', ncol, ' columns, z = ', &
-        state%prof_z(1), ' to ', state%prof_z(n)
+      if (verbose) write(*,'(A,I0,A,A,A,I0,A,ES10.3,A,ES10.3,A)') &
+        ' SEM inflow profiles: ', n, ' levels, format ', merge('ti    ', 'stress', is_ti), ', ', ncol, &
+        ' columns, z = ', state%prof_z(1), ' to ', state%prof_z(n), ' m'
     end if
   end subroutine sem_read_profile
 
@@ -468,24 +541,69 @@ contains
     L(3,3) = sqrt(max(R(3) - L(3,1)**2 - L(3,2)**2, SMALL))
   end function sem_cholesky
 
-  !> Mean velocity at height z: the prescribed profile, else the neutral MOST log law.
+  !> Target mean velocity (global axes) and stresses R = [uu,vv,ww,uv,uw,vw] at height z. R is in the
+  !> mean-wind frame (e_s, e_n, e_z), except for 10-column tables, which are already global.
+  subroutine sem_target_at(state, cfg, z, u_mean, R)
+    type(SEMState),  intent(in)  :: state
+    type(ABLConfig), intent(in)  :: cfg
+    real(rp),        intent(in)  :: z
+    real(rp),        intent(out) :: u_mean(3), R(6)
+
+    real(rp) :: u_star, umag, zz, zi, Iu, su, sv, sw, z_floor
+
+    if (state%has_profile) then
+      call sem_profile_at(state, z, u_mean, R)
+      ! 6/5-column tables give a streamwise speed; 10-column ones are already global.
+      if (.not. state%prof_global_axes) u_mean = abl_wind_vector(u_mean(1), cfg%wind_dir_deg)
+      return
+    end if
+
+    z_floor = max(cfg%z0_m, 1.0e-6_rp)
+    zz      = max(z, z_floor)
+    u_star  = abl_ustar_from_ref(cfg%u_ref, cfg%z_ref, cfg%z0_m)
+    if (trim(cfg%sem_mean_law) == 'power') then
+      umag = cfg%u_ref * (zz / max(cfg%z_ref, SMALL)) ** cfg%sem_alpha
+    else
+      umag = abl_u_profile(z, u_star, cfg%z0_m, 0.0_rp)
+    end if
+    u_mean = abl_wind_vector(umag, cfg%wind_dir_deg)
+
+    R = 0.0_rp
+    if (cfg%sem_Iu_ref > 0.0_rp) then
+      ! Wind-tunnel style: intensity decays like the log law, Iu = Iu_ref ln(z_ref/z0)/ln(z/z0),
+      ! evaluated no lower than 10 z0 where the log law stops being meaningful.
+      zi = max(z, 10.0_rp * cfg%z0_m)
+      Iu = cfg%sem_Iu_ref * log(max(cfg%z_ref, 1.0001_rp * cfg%z0_m) / cfg%z0_m) / log(zi / cfg%z0_m)
+      if (trim(cfg%sem_mean_law) == 'power') then
+        umag = cfg%u_ref * (max(zi, z_floor) / max(cfg%z_ref, SMALL)) ** cfg%sem_alpha
+      else
+        umag = abl_u_profile(zi, u_star, cfg%z0_m, 0.0_rp)
+      end if
+      su = Iu * umag
+      sv = cfg%sem_Iv_ratio * su
+      sw = cfg%sem_Iw_ratio * su
+      R(1) = su**2; R(2) = sv**2; R(3) = sw**2
+      R(5) = cfg%sem_rho_uw * su * sw
+    else
+      ! Panofsky & Dutton neutral surface layer: sigma_u,v,w / u* = 2.4, 1.9, 1.25 and a constant
+      ! momentum flux <u'w'> = -u*^2.
+      R(1) = (2.4_rp * u_star)**2
+      R(2) = (1.9_rp * u_star)**2
+      R(3) = (1.25_rp * u_star)**2
+      R(5) = -u_star**2
+    end if
+  end subroutine sem_target_at
+
+  !> Mean velocity at height z (global axes).
   subroutine sem_mean_at(state, abl_cfg, z, u_mean)
     type(SEMState),  intent(in)  :: state
     type(ABLConfig), intent(in)  :: abl_cfg
     real(rp),        intent(in)  :: z
     real(rp),        intent(out) :: u_mean(3)
 
-    real(rp) :: R_prof(6), u_star, u_mag
+    real(rp) :: R6(6)
 
-    if (state%has_profile) then
-      call sem_profile_at(state, z, u_mean, R_prof)
-      ! 6-column tables give a streamwise magnitude; 10-column ones are already global.
-      if (.not. state%prof_global_axes) u_mean = abl_wind_vector(u_mean(1), abl_cfg%wind_dir_deg)
-    else
-      u_star = abl_ustar_from_ref(abl_cfg%u_ref, abl_cfg%z_ref, abl_cfg%z0_m)
-      u_mag  = abl_u_profile(z, u_star, abl_cfg%z0_m, 0.0_rp)
-      u_mean = abl_wind_vector(u_mag, abl_cfg%wind_dir_deg)
-    end if
+    call sem_target_at(state, abl_cfg, z, u_mean, R6)
   end subroutine sem_mean_at
 
   !> Target Reynolds tensor at height z as a symmetric matrix Rm in the stress frame, and the matrix Wr
@@ -497,16 +615,9 @@ contains
     real(rp),        intent(in)  :: z
     real(rp),        intent(out) :: Rm(3,3), Wr(3,3)
 
-    real(rp) :: R6(6), u_mean(3), u_star, wind_rad
+    real(rp) :: R6(6), u_mean(3), wind_rad
 
-    if (state%has_profile) then
-      call sem_profile_at(state, z, u_mean, R6)
-    else
-      u_star = abl_ustar_from_ref(abl_cfg%u_ref, abl_cfg%z_ref, abl_cfg%z0_m)
-      ! Panofsky & Dutton surface-layer ratios, as in the Jarrin path.
-      R6 = [(2.4_rp * u_star)**2, (1.9_rp * u_star)**2, (1.25_rp * u_star)**2, &
-            -0.1_rp * u_star**2, 0.0_rp, 0.0_rp]
-    end if
+    call sem_target_at(state, abl_cfg, z, u_mean, R6)
     Rm(1,1) = R6(1); Rm(2,2) = R6(2); Rm(3,3) = R6(3)
     Rm(1,2) = R6(4); Rm(2,1) = R6(4)
     Rm(1,3) = R6(5); Rm(3,1) = R6(5)
@@ -576,16 +687,24 @@ contains
     type(ABLConfig), intent(in)    :: abl_cfg
 
     integer(ip) :: k, nl
-    real(rp)    :: Rm(3,3), Wr(3,3), lam(3), V(3,3), lmax, fmin
+    real(rp)    :: Rm(3,3), Wr(3,3), lam(3), V(3,3), lmax, fmin, zlo, zhi
     real(rp), allocatable :: zl(:)
 
-    nl = 1
-    if (state%has_profile) nl = state%n_levels
-    allocate(zl(nl))
+    ! Heights to scan: the table levels, or (analytic laws) the inlet height range, where the intensity law can
+    ! vary by a large factor; the largest principal stress over all of them must set sigma_i <= sigma.
     if (state%has_profile) then
+      nl = state%n_levels
+      allocate(zl(nl))
       zl = state%prof_z(1:nl)
     else
-      zl = abl_cfg%z_ref
+      nl = 65
+      allocate(zl(nl))
+      zlo = state%x_inlet(3) + state%t2_min
+      zhi = state%x_inlet(3) + state%t2_max
+      do k = 1, nl - 1
+        zl(k) = zlo + (zhi - zlo) * real(k - 1, rp) / real(nl - 2, rp)
+      end do
+      zl(nl) = abl_cfg%z_ref
     end if
 
     lmax = SMALL
@@ -739,26 +858,13 @@ contains
     real(rp),        intent(out) :: u_mean(3)
     real(rp),        intent(out) :: u_fluc_out(3)
 
-    real(rp)    :: z, wind_rad, u_mag
-    real(rp)    :: u_star, u_fluc_iso(3), R_iso(3,3), L_chol(3,3)
-    real(rp)    :: u_fluc_aniso(3), R_prof(6)
+    real(rp)    :: wind_rad, u_fluc_iso(3), L_chol(3,3), u_fluc_aniso(3), R6(6)
     integer(ip) :: i
     real(rp)    :: r_dist, tent_func, eddy_contrib(3), d_vec(3), sig, norm
 
-    ! Height above ground
-    z = face_orig(3)
-
+    ! Mean and target stresses at the face height, shared with the divergence-free path.
+    call sem_target_at(state, abl_cfg, face_orig(3), u_mean, R6)
     wind_rad = abl_cfg%wind_dir_deg * PI / 180.0_rp
-    if (state%has_profile) then
-      call sem_profile_at(state, z, u_mean, R_prof)
-      ! 6-column tables give a streamwise magnitude; 10-column ones are already global.
-      if (.not. state%prof_global_axes) u_mean = abl_wind_vector(u_mean(1), abl_cfg%wind_dir_deg)
-    else
-      ! Mean velocity: neutral MOST log-law, same helpers as the ABL inlet BC.
-      u_star = abl_ustar_from_ref(abl_cfg%u_ref, abl_cfg%z_ref, abl_cfg%z0_m)
-      u_mag  = abl_u_profile(z, u_star, abl_cfg%z0_m, 0.0_rp)
-      u_mean = abl_wind_vector(u_mag, abl_cfg%wind_dir_deg)
-    end if
 
     ! Isotropic unit-variance fluctuation from the eddy superposition (Jarrin et al. 2006).
     u_fluc_iso = 0.0_rp
@@ -780,53 +886,20 @@ contains
       u_fluc_iso = u_fluc_iso + eddy_contrib
     end do
 
-    ! Prescribed tensor path: full Cholesky, and 10-column tables need no rotation.
-    if (state%has_profile) then
-      L_chol = sem_cholesky(R_prof)
-      u_fluc_aniso(1) = L_chol(1,1) * u_fluc_iso(1)
-      u_fluc_aniso(2) = L_chol(2,1) * u_fluc_iso(1) + L_chol(2,2) * u_fluc_iso(2)
-      u_fluc_aniso(3) = L_chol(3,1) * u_fluc_iso(1) + L_chol(3,2) * u_fluc_iso(2) &
-                      + L_chol(3,3) * u_fluc_iso(3)
-      if (state%prof_global_axes) then
-        u_fluc_out = u_fluc_aniso
-      else
-        u_fluc_out(1) = -u_fluc_aniso(1) * sin(wind_rad) + u_fluc_aniso(2) * cos(wind_rad)
-        u_fluc_out(2) = -u_fluc_aniso(1) * cos(wind_rad) - u_fluc_aniso(2) * sin(wind_rad)
-        u_fluc_out(3) =  u_fluc_aniso(3)
-      end if
-      return
+    ! Full Cholesky of the target tensor; 10-column tables are already in global axes.
+    L_chol = sem_cholesky(R6)
+    u_fluc_aniso(1) = L_chol(1,1) * u_fluc_iso(1)
+    u_fluc_aniso(2) = L_chol(2,1) * u_fluc_iso(1) + L_chol(2,2) * u_fluc_iso(2)
+    u_fluc_aniso(3) = L_chol(3,1) * u_fluc_iso(1) + L_chol(3,2) * u_fluc_iso(2) &
+                    + L_chol(3,3) * u_fluc_iso(3)
+    if (state%has_profile .and. state%prof_global_axes) then
+      u_fluc_out = u_fluc_aniso
+    else
+      ! Rotate into the mean-wind frame: e_s along the mean, e_n horizontal and normal to it.
+      u_fluc_out(1) = -u_fluc_aniso(1) * sin(wind_rad) + u_fluc_aniso(2) * cos(wind_rad)
+      u_fluc_out(2) = -u_fluc_aniso(1) * cos(wind_rad) - u_fluc_aniso(2) * sin(wind_rad)
+      u_fluc_out(3) =  u_fluc_aniso(3)
     end if
-
-    ! Target Reynolds stresses (Panofsky & Dutton profiles for surface layer)
-    ! sigma_u/u_star ~= 2.4, sigma_v/u_star ~= 1.9, sigma_w/u_star ~= 1.25
-    R_iso(1, 1) = (2.4_rp * u_star) ** 2
-    R_iso(2, 2) = (1.9_rp * u_star) ** 2
-    R_iso(3, 3) = (1.25_rp * u_star) ** 2
-    R_iso(1, 2) = -0.1_rp * u_star**2  ! small negative correlation
-    R_iso(2, 1) = R_iso(1, 2)
-    R_iso(1, 3) = 0.0_rp
-    R_iso(3, 1) = 0.0_rp
-    R_iso(2, 3) = 0.0_rp
-    R_iso(3, 2) = 0.0_rp
-
-    ! Cholesky decomposition of R: R = L * L^T
-    ! (simplified: here we just apply diagonal scaling)
-    L_chol = 0.0_rp
-    L_chol(1, 1) = sqrt(max(R_iso(1, 1), SMALL))
-    L_chol(2, 1) = R_iso(2, 1) / max(L_chol(1, 1), SMALL)
-    L_chol(2, 2) = sqrt(max(R_iso(2, 2) - L_chol(2, 1)**2, SMALL))
-    L_chol(3, 3) = sqrt(max(R_iso(3, 3), SMALL))
-
-    ! Apply to isotropic fluctuations
-    u_fluc_aniso(1) = L_chol(1, 1) * u_fluc_iso(1)
-    u_fluc_aniso(2) = L_chol(2, 1) * u_fluc_iso(1) + L_chol(2, 2) * u_fluc_iso(2)
-    u_fluc_aniso(3) = L_chol(3, 3) * u_fluc_iso(3)
-
-    ! Rotate into the mean-wind frame: e_s along the mean, e_n horizontal and normal to it.
-    u_fluc_out(1) = -u_fluc_aniso(1) * sin(wind_rad) + u_fluc_aniso(2) * cos(wind_rad)
-    u_fluc_out(2) = -u_fluc_aniso(1) * cos(wind_rad) - u_fluc_aniso(2) * sin(wind_rad)
-    u_fluc_out(3) =  u_fluc_aniso(3)
-
   end subroutine sem_velocity_jarrin
 
 end module mod_sem_inflow

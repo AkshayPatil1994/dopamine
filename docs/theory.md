@@ -543,6 +543,42 @@ velocity-gradient scale (Jarrin: about 100%), and from the second cell on the in
 of $$\partial_t u + U\partial_x u$$ about 12% for all components). Poletto et al. also report a residual, much reduced but not zero,
 pressure elevation next to the inlet (their Fig. 8).
 
+**Inputs.** Targets (mean velocity and stresses) come from, in order of precedence: a table (`sem_profile_file`,
+stresses or intensities), the wind-tunnel style laws in the namelist (`sem_mean_law`, `sem_Iu_ref` and the
+intensity ratios), or the Panofsky–Dutton neutral surface layer ($$\sigma_{u,v,w}/u_*=2.4,1.9,1.25$$,
+$$\overline{u'w'}=-u_*^2$$). The same targets feed both kernels.
+
+#### Pre-computed inflow planes
+
+For a pre-computed database the field is sampled on a spanwise-periodic $$(y,z)$$ grid at frame
+spacing $$\Delta t_p$$ and replayed with Taylor's hypothesis, i.e. the plane is the inlet. Replay
+period $$m$$ uses a randomly chosen stored segment $$k_m$$ shifted by $$s_m$$ nodes,
+
+$$
+\mathbf{u}'(y,z,t) = \sin\theta\;\mathbf{u}_{k_m}(y+s_m\Delta y,\,z,\,t-mP) + \cos\theta\;\mathbf{u}_{k_{m-1}}(y+s_{m-1}\Delta y,\,z,\,t-mP+P),
+\quad \theta=\frac{\pi}{2}\frac{t-mP}{T_x}\ (t-mP<T_x),
+$$
+
+with $$P = T_{seg}-T_x$$ and $$s_m=\lfloor \mathrm{frac}(\varphi_0 + m/\phi)\,N_y\rfloor$$ ($$\phi$$ the golden ratio).
+The shifts spread structures over the span; they cannot move the spanwise-mean part. If segment $$k$$
+has spanwise-mean waveform $$\bar u_k(z,\tau)$$, the replay contains the periodic part
+$$\frac1K\sum_k \bar u_k(z,\tau)$$, whose power is about $$1/K$$ of that of a single segment and is
+concentrated at $$1/P$$. Removing it by $$\bar u_k \to \sqrt{K/(K-1)}\,(\bar u_k - \frac1K\sum_j\bar u_j)$$
+leaves the variance unchanged and the periodic part exactly zero.
+
+Interpolation from the stored lattice to the inlet faces is a linear low-pass operator. Variance
+retained on a wave with $$n$$ points per wavelength, averaged over offsets:
+
+| $$n$$ | linear | cubic | 6-point Lagrange |
+|---|---|---|---|
+| 4 | 67% | 89% | 94% |
+| 6 | 83% | 97% | 99% |
+| 8 | 90% | 99.1% | 99.9% |
+
+so linear interpolation is not used. In the spanwise direction the nodes are periodic and
+uniform, where trigonometric interpolation is exact for the resolved wavenumbers; faces that
+coincide with stored nodes are copied unchanged.
+
 ### Davies Relaxation (Nudging)
 
 Large-scale atmospheric forcing is applied via Newtonian relaxation

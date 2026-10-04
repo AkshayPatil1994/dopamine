@@ -28,9 +28,17 @@ module mod_abl_types
     real(rp)    :: wind_dir_deg   = 270.0_rp  ! wind direction (meteorological, degrees)
     logical     :: use_sem        = .true.  ! enable Synthetic Eddy Method
     integer(ip) :: n_eddies       = 500  ! number of eddies
-    real(rp)    :: sem_sigma      = 0.0_rp  ! eddy length scale [m]; 0 = compute from BL height
+    real(rp)    :: sem_sigma      = 0.0_rp  ! eddy length scale (longest half-extent) [m]; 0 = 0.1*smaller inlet span
     character(len=16) :: sem_type = 'dfsem'  ! 'dfsem' (divergence-free eddies) or 'jarrin' (original SEM)
-    character(len=256) :: sem_profile_file = ''  ! CSV of U(z) and Reynolds stresses; '' = analytic
+    character(len=256) :: sem_profile_file = ''  ! CSV of U(z) plus stresses or intensities; '' = analytic
+    character(len=8)   :: sem_profile_format = 'stress'  ! 'stress' (z,U,R.. ) or 'ti' (z,U,Iu,Iv,Iw..)
+    character(len=8)   :: sem_mean_law   = 'log'  ! analytic mean profile: 'log' or 'power'
+    real(rp)    :: sem_alpha      = 0.2_rp  ! power-law exponent when sem_mean_law = 'power'
+    real(rp)    :: sem_Iu_ref     = 0.0_rp  ! streamwise turbulence intensity at z_ref; 0 = Panofsky-Dutton stresses
+    real(rp)    :: sem_Iv_ratio   = 0.75_rp  ! Iv / Iu
+    real(rp)    :: sem_Iw_ratio   = 0.5_rp   ! Iw / Iu
+    real(rp)    :: sem_rho_uw     = -0.3_rp  ! u'w' correlation coefficient where the input has none
+    integer(ip) :: sem_seed       = 0       ! 0 = built-in seed
     logical     :: use_nudging    = .false.  ! enable Davies nudging
     character(len=256) :: nudging_file = ''  ! netCDF/CSV file with reference profiles
     real(rp)    :: nudging_tau    = 1800.0_rp  ! nudging timescale [s]
@@ -39,7 +47,47 @@ module mod_abl_types
     logical     :: nudging_horizontal_only = .true.  ! leave w unforced so resolved motion survives
   end type ABLConfig
 
-  !> Synthetic Eddy Method state - persists between timesteps
+  !> dopamine-inflow-gen: offline generation of an inflow-plane database from the SEM.
+  type, public :: InflowGenParams
+    character(len=256) :: file = 'inflow_planes.nc'
+    character(len=256) :: grid_file = ''     ! plane grid exported by the solver (inflow_export_grid)
+    real(rp)    :: W = 0.0_rp                ! spanwise period [m]; required unless grid_file is given
+    real(rp)    :: y0 = 0.0_rp               ! t1 coordinate of the first node [m]
+    integer(ip) :: ny = 0, nz = 0            ! plane grid; z uniform in [z_min, z_max]
+    real(rp)    :: z_min = 0.0_rp, z_max = 0.0_rp
+    real(rp)    :: dt = 0.0_rp               ! frame spacing [s]; 0 = from the smallest eddy time
+    real(rp)    :: n_turnovers = 2.0_rp      ! segment length in eddy turnover times
+    real(rp)    :: T_turnover = 0.0_rp       ! eddy turnover time [s]; 0 = Lx/sigma_u at z_ref
+    integer(ip) :: n_segments = 4            ! independent realisations
+    real(rp)    :: n_sigma = 3.0_rp          ! eddies per sem_sigma^3 of box volume (sets the eddy count)
+    integer(ip) :: seed = 1
+    logical     :: decorrelate = .true.      ! remove the segment-mean spanwise-mean waveform (no line at 1/P)
+    logical     :: verify = .true.
+  end type InflowGenParams
+
+  !> Successor-run inflow source.
+  type, public :: InflowConfig
+    character(len=16)  :: source = 'sem'     ! 'sem' (online eddies) or 'planes' (database)
+    character(len=256) :: file = ''          ! database for source = 'planes'
+    real(rp)    :: t_offset = 0.0_rp         ! start offset into the replay sequence [s]
+    real(rp)    :: crossfade_time = 0.0_rp   ! overlap between replayed segments [s]; 0 = 10% of a segment
+    integer(ip) :: seed = 1                  ! seeds the segment order and spanwise shifts
+    character(len=256) :: export_grid = ''   ! write the inlet plane grid for dopamine-inflow-gen and stop
+  end type InflowConfig
+
+  !> Precursor run: record fluctuation planes into a database.
+  type, public :: InflowRecordConfig
+    logical     :: enabled = .false.
+    character(len=256) :: file = 'inflow_record.nc'
+    real(rp)    :: point(3)  = 0.0_rp        ! a point on the recording plane
+    real(rp)    :: normal(3) = [1.0_rp, 0.0_rp, 0.0_rp]  ! flow direction through the plane
+    real(rp)    :: dt = 0.0_rp               ! frame spacing [s]
+    real(rp)    :: t_start = 0.0_rp          ! discard spin-up before this time [s]
+    real(rp)    :: segment_time = 0.0_rp     ! length of one segment [s]
+    integer(ip) :: n_segments = 1
+  end type InflowRecordConfig
+
+  !> Synthetic Eddy Method state - persists between timesteps.
   type, public :: SEMState
     logical     :: initialized    = .false.
     integer(ip) :: n_eddies       = 0
@@ -75,11 +123,12 @@ module mod_abl_types
     real(rp)    :: period2         = 0.0_rp  ! period along t2 [m]
     real(rp)    :: per1_lo         = 0.0_rp  ! t1 of the lower periodic plane, relative to x_inlet [m]
     real(rp)    :: per2_lo         = 0.0_rp
-    ! Prescribed inflow profiles; empty means the analytic MOST/Panofsky defaults.
+    ! Prescribed inflow profile; empty means the analytic law from the namelist.
     logical     :: has_profile     = .false.
-    logical     :: prof_global_axes = .false.  ! 10-column files give U and R in x,y,z
+    logical     :: override_mean   = .false.  ! the solver must take the inlet mean from the SEM
+    logical     :: prof_global_axes = .false.  ! tables give U and R in x,y,z (frame = identity)
     integer(ip) :: n_levels        = 0
-    real(rp), allocatable :: prof_z(:)  ! (n_levels) ascending heights [m]
+    real(rp), allocatable :: prof_z(:)    ! (n_levels) ascending heights [m]
     real(rp), allocatable :: prof_U(:,:)  ! (3, n_levels) mean velocity [m/s]
     real(rp), allocatable :: prof_R(:,:)  ! (6, n_levels) uu,vv,ww,uv,uw,vw [m2/s2]
   end type SEMState

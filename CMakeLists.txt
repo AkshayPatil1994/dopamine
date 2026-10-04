@@ -572,12 +572,16 @@ set(DOPAMINE_FORTRAN_SOURCES
   src/abl/mod_abl_types.f90
   src/abl/mod_abl_profiles.f90
   src/abl/mod_sem_inflow.f90
+  src/abl/mod_inflow_db.f90
+  src/abl/mod_inflow_gen.f90
+  src/abl/mod_inflow_planes.f90
   src/abl/mod_abl_weather.f90
   src/abl/mod_abl_wall.f90
   src/solver/mod_pressure_solver.f90
   src/bc/mod_bc.f90
   src/bc/mod_bc_setup.f90
   src/solver/mod_fv_solver.f90
+  src/abl/mod_inflow_record.f90
   src/init/mod_initconditions.f90
   src/stats/mod_sampling.f90
   src/stats/mod_stats.f90
@@ -788,11 +792,22 @@ target_link_libraries(dopamine-checkpoint-partition PRIVATE
   MPI::MPI_C
   dl)
 
+# ============================================================================
+# dopamine-inflow-gen (offline SEM inflow-plane database generator)
+# ============================================================================
+add_executable(dopamine-inflow-gen src/tools/inflow_gen_main.f90)
+target_link_options(dopamine-inflow-gen PRIVATE -Wl,--no-as-needed)
+target_link_libraries(dopamine-inflow-gen PRIVATE
+  dopamine_lib
+  MPI::MPI_Fortran
+  MPI::MPI_C
+  dl)
+
 if(DOPAMINE_ENABLE_LTO AND DOPAMINE_LTO_SUPPORTED)
   # LTO must also apply at the final link step (not just dopamine_lib's compile),
   # or the linker just uses each object's fallback native code without the
   # cross-TU merge pass that's the actual point of enabling this.
-  set_target_properties(dopamine dopamine-decompose dopamine-checkpoint-partition
+  set_target_properties(dopamine dopamine-decompose dopamine-checkpoint-partition dopamine-inflow-gen
     PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 

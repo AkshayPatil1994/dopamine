@@ -270,7 +270,7 @@ contains
         solver%sem_state%pos = eddy_pos
         solver%sem_state%amp = eddy_amp
         call sem_set_rng_state(rng_ckpt)
-        call update_sem_inflow(solver)  ! inlet fluctuations for the restored eddies
+        call update_sem_inflow(solver, solver%time)  ! inlet fluctuations for the restored eddies
       else
         write(*, '(A)') 'WARNING: checkpoint synthetic-eddy state does not match this run; eddies restart fresh'
       end if

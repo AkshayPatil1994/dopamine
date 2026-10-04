@@ -8,7 +8,7 @@ module mod_input_parser
   use mod_bc
   use mod_fv_solver, only: solver_params_t
   use mod_sampling_types
-  use mod_abl_types, only: ABLConfig, WM_NONE, WM_LOGLAW, WM_MOST
+  use mod_abl_types, only: ABLConfig, InflowGenParams, InflowConfig, InflowRecordConfig, WM_NONE, WM_LOGLAW, WM_MOST
   implicit none
   private
 
@@ -87,6 +87,9 @@ module mod_input_parser
     real(rp)   :: abl_nudging_z_full  = 0.0_rp
     logical    :: abl_nudging_horizontal_only = .true.
     type(ABLConfig) :: abl_config  ! packed form passed to the solver
+    type(InflowConfig)       :: inflow        ! successor inflow source
+    type(InflowGenParams)    :: inflow_gen    ! dopamine-inflow-gen
+    type(InflowRecordConfig) :: inflow_rec    ! precursor plane recorder
 
   end type InputConfig
 
@@ -113,6 +116,8 @@ contains
     call read_physics(iunit, config)
     rewind(iunit)
     call read_abl(iunit, config)
+    rewind(iunit)
+    call read_inflow(iunit, config)
     rewind(iunit)
     call read_scalars(iunit, config)
     rewind(iunit)
@@ -587,6 +592,14 @@ contains
     real(rp)   :: sem_sigma       = 0.0_rp
     character(16) :: sem_type     = 'dfsem'
     character(256) :: sem_profile_file = ''
+    character(8)   :: sem_profile_format = 'stress'
+    character(8)   :: sem_mean_law    = 'log'
+    real(rp)   :: sem_alpha       = 0.2_rp
+    real(rp)   :: sem_Iu_ref      = 0.0_rp
+    real(rp)   :: sem_Iv_ratio    = 0.75_rp
+    real(rp)   :: sem_Iw_ratio    = 0.5_rp
+    real(rp)   :: sem_rho_uw      = -0.3_rp
+    integer(ip) :: sem_seed       = 0
     logical    :: use_nudging     = .false.
     character(256) :: nudging_file = ''
     real(rp)   :: nudging_tau     = 1800.0_rp
@@ -597,7 +610,9 @@ contains
 
     namelist /dopamine_abl/ use_abl, wall_model, u_ref, z_ref, z0_m, z0_h, T_surface, T_ref, &
                             L_obukhov, compute_L, wind_dir_deg, use_sem, n_eddies, &
-                            sem_sigma, sem_type, sem_profile_file, use_nudging, nudging_file, nudging_tau, nudging_z_start, &
+                            sem_sigma, sem_type, sem_profile_file, sem_profile_format, sem_mean_law, sem_alpha, &
+                            sem_Iu_ref, sem_Iv_ratio, sem_Iw_ratio, sem_rho_uw, sem_seed, &
+                            use_nudging, nudging_file, nudging_tau, nudging_z_start, &
                             nudging_z_full, nudging_horizontal_only
 
     read(iunit, nml=dopamine_abl, iostat=ios)
@@ -649,6 +664,15 @@ contains
       error stop 'read_abl: unknown sem_type'
     end if
     config%abl_config%sem_profile_file = sem_profile_file
+    config%abl_config%sem_profile_format = sem_profile_format
+    config%abl_config%sem_mean_law     = sem_mean_law
+    config%abl_config%sem_alpha        = sem_alpha
+    config%abl_config%sem_Iu_ref       = sem_Iu_ref
+    config%abl_config%sem_Iv_ratio     = sem_Iv_ratio
+    config%abl_config%sem_Iw_ratio     = sem_Iw_ratio
+    config%abl_config%sem_rho_uw       = sem_rho_uw
+    config%abl_config%sem_seed         = sem_seed
+    call validate_sem_inputs(config%abl_config)
     config%abl_config%use_nudging      = use_nudging
     config%abl_config%nudging_file     = nudging_file
     config%abl_config%nudging_tau      = nudging_tau
@@ -657,6 +681,113 @@ contains
     config%abl_config%nudging_horizontal_only = nudging_horizontal_only
 
   end subroutine read_abl
+
+  !> Reject SEM inputs that would silently produce nonsense.
+  subroutine validate_sem_inputs(c)
+    type(ABLConfig), intent(in) :: c
+
+    if (trim(c%sem_profile_format) /= 'stress' .and. trim(c%sem_profile_format) /= 'ti') &
+      error stop "sem_profile_format must be 'stress' or 'ti'"
+    if (trim(c%sem_mean_law) /= 'log' .and. trim(c%sem_mean_law) /= 'power') &
+      error stop "sem_mean_law must be 'log' or 'power'"
+    if (c%sem_Iu_ref < 0.0_rp .or. c%sem_Iv_ratio < 0.0_rp .or. c%sem_Iw_ratio < 0.0_rp) &
+      error stop 'sem intensities must be non-negative'
+    if (abs(c%sem_rho_uw) >= 1.0_rp) error stop 'sem_rho_uw must lie in (-1, 1)'
+    if (c%sem_sigma < 0.0_rp) error stop 'sem_sigma must be >= 0'
+  end subroutine validate_sem_inputs
+
+  subroutine read_inflow(iunit, config)
+    integer(ip),       intent(in)    :: iunit
+    type(InputConfig), intent(inout) :: config
+
+    ! &dopamine_inflow: successor source
+    character(16)  :: inflow_source = 'sem'
+    character(256) :: inflow_file = ''
+    real(rp)       :: inflow_t_offset = 0.0_rp
+    real(rp)       :: inflow_crossfade_time = 0.0_rp
+    integer(ip)    :: inflow_seed = 1
+    character(256) :: inflow_export_grid = ''
+    ! &dopamine_inflow_gen
+    character(256) :: gen_file = 'inflow_planes.nc', gen_grid_file = ''
+    real(rp)       :: gen_W = 0.0_rp, gen_y0 = 0.0_rp, gen_z_min = 0.0_rp, gen_z_max = 0.0_rp
+    real(rp)       :: gen_dt = 0.0_rp, gen_n_turnovers = 2.0_rp, gen_T_turnover = 0.0_rp, gen_n_sigma = 3.0_rp
+    integer(ip)    :: gen_ny = 0, gen_nz = 0, gen_n_segments = 4, gen_seed = 1
+    logical        :: gen_verify = .true., gen_decorrelate = .true.
+    ! &dopamine_inflow_record
+    logical        :: record_enabled = .false.
+    character(256) :: record_file = 'inflow_record.nc'
+    real(rp)       :: record_point(3) = 0.0_rp, record_normal(3) = [1.0_rp, 0.0_rp, 0.0_rp]
+    real(rp)       :: record_dt = 0.0_rp, record_t_start = 0.0_rp, record_segment_time = 0.0_rp
+    integer(ip)    :: record_n_segments = 1
+    integer(ip)    :: ios
+
+    namelist /dopamine_inflow/ inflow_source, inflow_file, inflow_t_offset, inflow_crossfade_time, &
+                               inflow_seed, inflow_export_grid
+    namelist /dopamine_inflow_gen/ gen_file, gen_grid_file, gen_W, gen_y0, gen_ny, gen_nz, gen_z_min, gen_z_max, &
+                               gen_dt, gen_n_turnovers, gen_T_turnover, gen_n_segments, gen_n_sigma, gen_seed, gen_verify, gen_decorrelate
+    namelist /dopamine_inflow_record/ record_enabled, record_file, record_point, record_normal, record_dt, &
+                               record_t_start, record_segment_time, record_n_segments
+
+    read(iunit, nml=dopamine_inflow, iostat=ios)
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_inflow, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
+    rewind(iunit)
+    read(iunit, nml=dopamine_inflow_gen, iostat=ios)
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_inflow_gen, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
+    rewind(iunit)
+    read(iunit, nml=dopamine_inflow_record, iostat=ios)
+    if (ios /= 0 .and. ios /= -1) then
+      write(*,'(A,I0)') 'ERROR: cannot parse &dopamine_inflow_record, ios=', ios
+      error stop 'input namelist parse error (check variable names and syntax)'
+    end if
+
+    if (trim(inflow_source) /= 'sem' .and. trim(inflow_source) /= 'planes') &
+      error stop "inflow_source must be 'sem' or 'planes'"
+    if (trim(inflow_source) == 'planes' .and. len_trim(inflow_file) == 0) &
+      error stop "inflow_source = 'planes' needs inflow_file"
+    if (inflow_crossfade_time < 0.0_rp) error stop 'inflow_crossfade_time must be >= 0'
+    if (record_enabled) then
+      if (record_dt <= 0.0_rp .or. record_segment_time <= 0.0_rp .or. record_n_segments < 1) &
+        error stop 'record_enabled needs record_dt > 0, record_segment_time > 0 and record_n_segments >= 1'
+      if (sqrt(sum(record_normal**2)) <= 0.0_rp) error stop 'record_normal must be non-zero'
+    end if
+
+    config%inflow%source = inflow_source
+    config%inflow%file = inflow_file
+    config%inflow%t_offset = inflow_t_offset
+    config%inflow%crossfade_time = inflow_crossfade_time
+    config%inflow%seed = inflow_seed
+    config%inflow%export_grid = inflow_export_grid
+    config%inflow_gen%file = gen_file
+    config%inflow_gen%grid_file = gen_grid_file
+    config%inflow_gen%W = gen_W
+    config%inflow_gen%y0 = gen_y0
+    config%inflow_gen%ny = gen_ny
+    config%inflow_gen%nz = gen_nz
+    config%inflow_gen%z_min = gen_z_min
+    config%inflow_gen%z_max = gen_z_max
+    config%inflow_gen%dt = gen_dt
+    config%inflow_gen%n_turnovers = gen_n_turnovers
+    config%inflow_gen%T_turnover = gen_T_turnover
+    config%inflow_gen%n_segments = gen_n_segments
+    config%inflow_gen%n_sigma = gen_n_sigma
+    config%inflow_gen%seed = gen_seed
+    config%inflow_gen%verify = gen_verify
+    config%inflow_gen%decorrelate = gen_decorrelate
+    config%inflow_rec%enabled = record_enabled
+    config%inflow_rec%file = record_file
+    config%inflow_rec%point = record_point
+    config%inflow_rec%normal = record_normal / sqrt(sum(record_normal**2))
+    config%inflow_rec%dt = record_dt
+    config%inflow_rec%t_start = record_t_start
+    config%inflow_rec%segment_time = record_segment_time
+    config%inflow_rec%n_segments = record_n_segments
+  end subroutine read_inflow
 
   subroutine read_scalar_sources(iunit, config)
     integer(ip), intent(in) :: iunit
