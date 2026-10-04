@@ -124,6 +124,14 @@ module mod_abl_types
     real(rp)    :: per1_lo         = 0.0_rp  ! t1 of the lower periodic plane, relative to x_inlet [m]
     real(rp)    :: per2_lo         = 0.0_rp
     ! Prescribed inflow profile; empty means the analytic law from the namelist.
+    ! Spatial bins over (t1, t2, n_in) for the evaluation: bin width >= rsup, so a point only meets the
+    ! eddies of its own bin and the neighbouring ones. Rebuilt whenever the eddies move.
+    logical     :: bins_ready      = .false.
+    integer(ip) :: nbin(3)         = 1
+    real(rp)    :: bin_lo(3)       = 0.0_rp  ! lower edge of the binned box along t1, t2, n_in [m]
+    real(rp)    :: bin_h(3)        = 1.0_rp  ! bin width [m]
+    integer(ip), allocatable :: bin_start(:)  ! (nbin_total+1) CSR offsets into bin_list
+    integer(ip), allocatable :: bin_list(:)   ! eddy ids grouped by bin
     logical     :: has_profile     = .false.
     logical     :: override_mean   = .false.  ! the solver must take the inlet mean from the SEM
     logical     :: prof_global_axes = .false.  ! tables give U and R in x,y,z (frame = identity)

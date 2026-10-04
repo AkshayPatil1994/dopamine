@@ -31,7 +31,7 @@ module mod_sem_inflow
   public :: sem_get_rng_state, sem_set_rng_state
   public :: sem_read_profile, sem_profile_at, sem_cholesky
   public :: sem_prepare, sem_eigen3, sem_dfsem_eddy_velocity, sem_reference_scales, sem_stress_at
-  public :: sem_init_targets, sem_setup, sem_target_at, sem_mean_at
+  public :: sem_init_targets, sem_setup, sem_target_at, sem_mean_at, sem_bins_fill
 
 contains
 
@@ -291,6 +291,7 @@ contains
     end do
     call sem_balance_amplitudes(state)
     if (state%dfsem) call sem_prepare(state, abl_cfg)
+    call sem_bins_fill(state)
 
     state%initialized = .true.
   end subroutine sem_setup
@@ -353,7 +354,135 @@ contains
       s = dot_product(state%pos(:, i) - state%x_inlet, state%n_in)
       if (s > state%rsup) call sem_place_eddy(state, i, -state%rsup, .false.)
     end do
+    call sem_bins_fill(state)
   end subroutine sem_advance
+
+  !> Sort the eddies into bins over (t1, t2, n_in) (counting sort). The bin width is at least the support
+  !> radius rsup in every direction, so everything that can touch a point lies in its 3x3x3 neighbourhood.
+  !> Periodic in-plane directions wrap; elsewhere eddies (and later query points) outside the box are
+  !> clamped into the end bins, which keeps them within one bin of anything they can touch.
+  !> The count is coarsened to O(n_eddies) bins, which only widens the bins.
+  subroutine sem_bins_fill(state)
+    type(SEMState), intent(inout) :: state
+
+    integer(ip) :: i, d, nb(3), nt, bi, cap
+    integer(ip) :: idx(3)
+    real(rp)    :: ext(3), lo(3), h(3), c(3)
+    integer(ip), allocatable :: cnt(:), bid(:)
+
+    state%bins_ready = .false.
+    if (.not. allocated(state%pos)) return
+    if (state%rsup <= SMALL) return
+
+    lo(1) = merge(state%per1_lo, state%t1_min, state%per1); ext(1) = merge(state%period1, state%t1_max - state%t1_min, state%per1)
+    lo(2) = merge(state%per2_lo, state%t2_min, state%per2); ext(2) = merge(state%period2, state%t2_max - state%t2_min, state%per2)
+    lo(3) = -state%rsup;                                    ext(3) = 2.0_rp * state%rsup
+    do d = 1, 3
+      nb(d) = max(1_ip, int(floor(ext(d) / state%rsup), ip))
+    end do
+    ! Coarsen the longest direction until the table is no larger than a few bins per eddy.
+    cap = max(27_ip, 4_ip * state%n_eddies)
+    do while (product(int(nb, int64)) > int(cap, int64))
+      d = maxloc(nb, 1)
+      if (nb(d) <= 1) exit
+      nb(d) = max(1_ip, nb(d) / 2_ip)
+    end do
+    do d = 1, 3
+      h(d) = ext(d) / real(nb(d), rp)
+      if (h(d) <= 0.0_rp) h(d) = state%rsup
+    end do
+    nt = nb(1) * nb(2) * nb(3)
+
+    state%nbin = nb; state%bin_lo = lo; state%bin_h = h
+    if (allocated(state%bin_start)) deallocate(state%bin_start)
+    if (allocated(state%bin_list))  deallocate(state%bin_list)
+    allocate(state%bin_start(nt + 1), source=0_ip)
+    allocate(state%bin_list(state%n_eddies))
+    allocate(bid(state%n_eddies), cnt(nt), source=0_ip)
+
+    do i = 1, state%n_eddies
+      c = [dot_product(state%pos(:, i) - state%x_inlet, state%t1), &
+           dot_product(state%pos(:, i) - state%x_inlet, state%t2), &
+           dot_product(state%pos(:, i) - state%x_inlet, state%n_in)]
+      call bin_index(state, c, idx)
+      bi = 1 + idx(1) + nb(1) * (idx(2) + nb(2) * idx(3))
+      bid(i) = bi
+      cnt(bi) = cnt(bi) + 1
+    end do
+    state%bin_start(1) = 1
+    do bi = 1, nt
+      state%bin_start(bi + 1) = state%bin_start(bi) + cnt(bi)
+    end do
+    cnt = 0
+    do i = 1, state%n_eddies
+      bi = bid(i)
+      state%bin_list(state%bin_start(bi) + cnt(bi)) = i
+      cnt(bi) = cnt(bi) + 1
+    end do
+    state%bins_ready = .true.
+  end subroutine sem_bins_fill
+
+  !> Zero-based bin index of the in-plane/normal coordinates c = (t1, t2, n_in) relative to x_inlet.
+  pure subroutine bin_index(state, c, idx)
+    type(SEMState), intent(in)  :: state
+    real(rp),       intent(in)  :: c(3)
+    integer(ip),    intent(out) :: idx(3)
+
+    integer(ip) :: d
+    real(rp)    :: u
+    logical     :: per(3)
+
+    per = [state%per1, state%per2, .false.]
+    do d = 1, 3
+      u = (c(d) - state%bin_lo(d)) / state%bin_h(d)
+      u = max(min(u, 1.0e9_rp), -1.0e9_rp)  ! far-away query points: keep the conversion finite
+      if (per(d)) then
+        idx(d) = modulo(int(floor(u), ip), state%nbin(d))
+      else
+        idx(d) = min(max(int(floor(u), ip), 0_ip), state%nbin(d) - 1_ip)
+      end if
+    end do
+  end subroutine bin_index
+
+  !> The (up to 27 distinct) bins within one bin of the point x: everything within rsup of x is in them.
+  pure subroutine bin_neighbours(state, x, bids, nbk)
+    type(SEMState), intent(in)  :: state
+    real(rp),       intent(in)  :: x(3)
+    integer(ip),    intent(out) :: bids(27), nbk
+
+    integer(ip) :: idx(3), lst(3, 3), nl(3), d, k, i1, i2, i3, j
+    logical     :: per(3), dup
+    real(rp)    :: c(3)
+
+    per = [state%per1, state%per2, .false.]
+    c = [dot_product(x - state%x_inlet, state%t1), dot_product(x - state%x_inlet, state%t2), &
+         dot_product(x - state%x_inlet, state%n_in)]
+    call bin_index(state, c, idx)
+    do d = 1, 3
+      nl(d) = 0
+      do k = -1, 1
+        j = idx(d) + k
+        if (per(d)) then
+          j = modulo(j, state%nbin(d))
+        else if (j < 0 .or. j > state%nbin(d) - 1) then
+          cycle
+        end if
+        dup = any(lst(1:nl(d), d) == j)  ! few bins along a direction: the wrap can repeat one
+        if (dup) cycle
+        nl(d) = nl(d) + 1
+        lst(nl(d), d) = j
+      end do
+    end do
+    nbk = 0
+    do i3 = 1, nl(3)
+      do i2 = 1, nl(2)
+        do i1 = 1, nl(1)
+          nbk = nbk + 1
+          bids(nbk) = 1 + lst(i1, 1) + state%nbin(1) * (lst(i2, 2) + state%nbin(2) * lst(i3, 3))
+        end do
+      end do
+    end do
+  end subroutine bin_neighbours
 
   !> Count whitespace/comma separated tokens on a line.
   integer(ip) function count_tokens(line) result(n)
@@ -771,6 +900,7 @@ contains
     integer(ip) :: i, j
     real(rp)    :: Rm(3,3), Wr(3,3), lam(3), V(3,3), Vg(3,3), s(3), K, b(3), A(3)
 
+    call sem_bins_fill(state)  ! positions may have been restored or moved since the last fill
     if (.not. state%dfsem) return
     if (.not. allocated(state%ampl)) return
     do i = 1, state%n_eddies
@@ -827,8 +957,8 @@ contains
     real(rp),        intent(out) :: u_fluc_out(3)
     real(rp), optional, intent(in) :: tau
 
-    integer(ip) :: i
-    real(rp)    :: d_vec(3), rs2, xs(3)
+    integer(ip) :: i, j, kb, nbk, bids(27)
+    real(rp)    :: rs2, xs(3)
 
     xs = face_centre
     if (present(tau)) xs = face_centre - state%u_convect * tau * state%n_in
@@ -841,13 +971,30 @@ contains
     call sem_mean_at(state, abl_cfg, face_centre(3), u_mean)
     u_fluc_out = 0.0_rp
     rs2 = state%rsup**2
-    do i = 1, state%n_eddies
-      d_vec = xs - state%pos(:, i)
-      if (state%per1) d_vec = d_vec - state%period1 * anint(dot_product(d_vec, state%t1) / state%period1) * state%t1
-      if (state%per2) d_vec = d_vec - state%period2 * anint(dot_product(d_vec, state%t2) / state%period2) * state%t2
-      if (sum(d_vec**2) >= rs2) cycle
-      u_fluc_out = u_fluc_out + sem_dfsem_eddy_velocity(d_vec, state%frame(:, i), state%sig(:, i), state%ampl(:, i))
-    end do
+    if (state%bins_ready) then
+      call bin_neighbours(state, xs, bids, nbk)
+      do kb = 1, nbk
+        do j = state%bin_start(bids(kb)), state%bin_start(bids(kb) + 1) - 1
+          call add_eddy(state%bin_list(j))
+        end do
+      end do
+    else
+      do i = 1, state%n_eddies
+        call add_eddy(i)
+      end do
+    end if
+
+  contains
+
+    subroutine add_eddy(e)
+      integer(ip), intent(in) :: e
+      real(rp) :: d(3)
+      d = xs - state%pos(:, e)
+      if (state%per1) d = d - state%period1 * anint(dot_product(d, state%t1) / state%period1) * state%t1
+      if (state%per2) d = d - state%period2 * anint(dot_product(d, state%t2) / state%period2) * state%t2
+      if (sum(d**2) >= rs2) return
+      u_fluc_out = u_fluc_out + sem_dfsem_eddy_velocity(d, state%frame(:, e), state%sig(:, e), state%ampl(:, e))
+    end subroutine add_eddy
   end subroutine sem_velocity_at_face
 
   subroutine sem_velocity_jarrin(state, abl_cfg, face_centre, u_mean, u_fluc_out, face_orig)
@@ -859,8 +1006,8 @@ contains
     real(rp),        intent(out) :: u_fluc_out(3)
 
     real(rp)    :: wind_rad, u_fluc_iso(3), L_chol(3,3), u_fluc_aniso(3), R6(6)
-    integer(ip) :: i
-    real(rp)    :: r_dist, tent_func, eddy_contrib(3), d_vec(3), sig, norm
+    integer(ip) :: i, j, kb, nbk, bids(27)
+    real(rp)    :: sig, norm
 
     ! Mean and target stresses at the face height, shared with the divergence-free path.
     call sem_target_at(state, abl_cfg, face_orig(3), u_mean, R6)
@@ -871,20 +1018,18 @@ contains
     sig  = max(state%sigma, SMALL)
     norm = TENT_NORM * sqrt(state%box_volume / sig**3) / sqrt(dble(state%n_eddies))
 
-    do i = 1, state%n_eddies
-      ! Compact support: reject on the bounding box before taking the square root.
-      d_vec = face_centre - state%pos(:, i)
-      if (state%per1) d_vec = d_vec - state%period1 * anint(dot_product(d_vec, state%t1) / state%period1) * state%t1
-      if (state%per2) d_vec = d_vec - state%period2 * anint(dot_product(d_vec, state%t2) / state%period2) * state%t2
-      if (abs(d_vec(1)) >= sig .or. abs(d_vec(2)) >= sig .or. abs(d_vec(3)) >= sig) cycle
-
-      r_dist = sqrt(sum(d_vec**2)) / sig
-      tent_func = max(0.0_rp, 1.0_rp - r_dist)
-      if (tent_func <= 0.0_rp) cycle
-
-      eddy_contrib = norm * tent_func * state%amp(:, i)
-      u_fluc_iso = u_fluc_iso + eddy_contrib
-    end do
+    if (state%bins_ready) then
+      call bin_neighbours(state, face_centre, bids, nbk)
+      do kb = 1, nbk
+        do j = state%bin_start(bids(kb)), state%bin_start(bids(kb) + 1) - 1
+          call add_eddy(state%bin_list(j))
+        end do
+      end do
+    else
+      do i = 1, state%n_eddies
+        call add_eddy(i)
+      end do
+    end if
 
     ! Full Cholesky of the target tensor; 10-column tables are already in global axes.
     L_chol = sem_cholesky(R6)
@@ -900,6 +1045,22 @@ contains
       u_fluc_out(2) = -u_fluc_aniso(1) * cos(wind_rad) - u_fluc_aniso(2) * sin(wind_rad)
       u_fluc_out(3) =  u_fluc_aniso(3)
     end if
+
+  contains
+
+    subroutine add_eddy(e)
+      integer(ip), intent(in) :: e
+      real(rp) :: d_vec(3), r_dist, tent_func
+      ! Compact support: reject on the bounding box before taking the square root.
+      d_vec = face_centre - state%pos(:, e)
+      if (state%per1) d_vec = d_vec - state%period1 * anint(dot_product(d_vec, state%t1) / state%period1) * state%t1
+      if (state%per2) d_vec = d_vec - state%period2 * anint(dot_product(d_vec, state%t2) / state%period2) * state%t2
+      if (abs(d_vec(1)) >= sig .or. abs(d_vec(2)) >= sig .or. abs(d_vec(3)) >= sig) return
+      r_dist = sqrt(sum(d_vec**2)) / sig
+      tent_func = max(0.0_rp, 1.0_rp - r_dist)
+      if (tent_func <= 0.0_rp) return
+      u_fluc_iso = u_fluc_iso + norm * tent_func * state%amp(:, e)
+    end subroutine add_eddy
   end subroutine sem_velocity_jarrin
 
 end module mod_sem_inflow

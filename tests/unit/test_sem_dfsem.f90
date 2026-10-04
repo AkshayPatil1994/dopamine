@@ -4,7 +4,9 @@
 !>  1. one eddy is solenoidal to finite-difference accuracy and has zero volume-integrated velocity;
 !>  2. the eddy ensemble on a doubly periodic inlet plane reproduces the target Reynolds tensor, with and
 !>     without shear stress and for a rotated mean-wind direction (prescribed full-tensor tables);
-!>  3. the Jacobi eigen-solver reconstructs its input.
+!>  3. the Jacobi eigen-solver reconstructs its input;
+!>  4. the binned evaluation equals the all-eddy sum (both kernels; periodic, partly periodic and open inlets,
+!>     two-bin periodic widths, query points outside the box, time look-ahead, after the eddies have moved).
 program test_sem_dfsem
   use mod_kinds
   use mod_abl_types
@@ -19,6 +21,12 @@ program test_sem_dfsem
   call check_statistics('analytic stresses, wind from 270', 270.0_rp, .false.)
   call check_statistics('analytic stresses, wind from 235', 235.0_rp, .false.)
   call check_statistics('prescribed tensor with shear uw', 270.0_rp, .true.)
+  call check_bins('dfsem, doubly periodic', 'dfsem', .true., .true., 1.0_rp, 0.1_rp)
+  call check_bins('dfsem, periodic in t1 only', 'dfsem', .true., .false., 1.0_rp, 0.1_rp)
+  call check_bins('dfsem, open inlet', 'dfsem', .false., .false., 1.0_rp, 0.1_rp)
+  call check_bins('dfsem, two bins across the period', 'dfsem', .true., .true., 0.45_rp, 0.2_rp)
+  call check_bins('jarrin, doubly periodic', 'jarrin', .true., .true., 1.0_rp, 0.1_rp)
+  call check_bins('jarrin, open inlet', 'jarrin', .false., .false., 1.0_rp, 0.1_rp)
 
   if (nfail > 0) then
     write(*,'(A,I0,A)') 'FAILED: ', nfail, ' check(s)'
@@ -203,5 +211,56 @@ contains
     write(*,'(A,6ES11.3)') '        cov  uu vv ww uv uw vw: ', cov(1,1), cov(2,2), cov(3,3), cov(1,2), cov(1,3), cov(2,3)
     write(*,'(A,6ES11.3)') '        R    uu vv ww uv uw vw: ', Rg(1,1), Rg(2,2), Rg(3,3), Rg(1,2), Rg(1,3), Rg(2,3)
   end subroutine check_statistics
+
+  !> Binned evaluation against the brute-force sum over all eddies on the same state.
+  subroutine check_bins(label, kernel, per1, per2, width, sigma)
+    character(len=*), intent(in) :: label, kernel
+    logical,          intent(in) :: per1, per2
+    real(rp),         intent(in) :: width, sigma
+
+    type(SEMState)  :: st, ref
+    type(ABLConfig) :: cfg
+    integer(int64) :: s
+    integer(ip), parameter :: nq = 1500
+    integer(ip) :: iq, istep
+    real(rp) :: fc(3), um(3), uf(3), ur(3), err, scale, tau, ext
+
+    cfg%wind_dir_deg = 270.0_rp
+    cfg%u_ref = 10.0_rp; cfg%z_ref = 0.5_rp; cfg%z0_m = 0.01_rp
+    cfg%sem_type = kernel
+    cfg%sem_sigma = sigma
+    cfg%n_eddies = 4000
+
+    st%n_in = [1.0_rp, 0.0_rp, 0.0_rp]; st%t1 = [0.0_rp, 1.0_rp, 0.0_rp]; st%t2 = [0.0_rp, 0.0_rp, 1.0_rp]
+    st%x_inlet = 0.0_rp
+    st%per1 = per1; st%per2 = per2
+    st%period1 = width; st%period2 = width; st%per1_lo = 0.0_rp; st%per2_lo = 0.0_rp
+    st%t1_min = 0.0_rp; st%t1_max = width; st%t2_min = 0.0_rp; st%t2_max = width
+    call sem_setup(st, cfg)
+    ext = st%rsup
+
+    s = 1234567_int64
+    err = 0.0_rp; scale = 0.0_rp
+    do istep = 0, 3
+      if (istep > 0) then
+        call sem_advance(st, 0.37_rp * st%rsup / st%u_convect)
+        call sem_prepare(st, cfg)
+      end if
+      ref = st
+      ref%bins_ready = .false.
+      do iq = 1, nq
+        ! Points inside the box, beyond its edges and (open inlets) well outside it.
+        fc = [0.0_rp, (1.6_rp * urand(s) - 0.3_rp) * width, (1.6_rp * urand(s) - 0.3_rp) * width]
+        tau = 0.0_rp
+        if (mod(iq, 3) == 0) tau = 1.3_rp * ext / st%u_convect * (2.0_rp * urand(s) - 1.0_rp)
+        call sem_velocity_at_face(st, cfg, fc, um, uf, tau)
+        call sem_velocity_at_face(ref, cfg, fc, um, ur, tau)
+        err = max(err, maxval(abs(uf - ur)))
+        scale = max(scale, maxval(abs(ur)))
+      end do
+    end do
+    call report(label//': binned == all-eddy sum (max |diff| / max |u|)', &
+                st%bins_ready .and. err <= 1.0e-12_rp * max(scale, 1.0_rp), err / max(scale, 1.0e-300_rp), 1.0e-12_rp)
+  end subroutine check_bins
 
 end program test_sem_dfsem

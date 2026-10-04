@@ -840,7 +840,9 @@ height, so there is no separate length-scale input and no height-dependent scale
 uses the same sequence, so the field is identical for any rank count.
 
 **Choosing `n_eddies`.** Fluctuation statistics are unbiased for any count, but the field
-becomes intermittent when too few eddies overlap. Cost is $$\mathcal{O}(N_{faces}\,N_e)$$ per step.
+becomes intermittent when too few eddies overlap. The eddies are sorted into spatial bins (width at least the eddy support, rebuilt whenever they move), so a face or plane
+point only visits the eddies of its own and the neighbouring bins: the cost is $$\mathcal{O}(N_e + N_{faces}\,n_{local})$$ per
+evaluation, with $$n_{local}$$ the number of eddies overlapping a point, independent of `n_eddies`. This holds for the online SEM and `dopamine-inflow-gen`.
 
 **Mean profile.** A table or `sem_mean_law = 'power'` **replaces** the analytic log law at
 `ablInlet` faces, so `u_ref`, `z_ref` and `z0_m` then no longer set the inlet mean. They
@@ -853,7 +855,7 @@ The per-step uniform flux correction at the inlet remains, and the pressure proj
 adjusts the field in the first cells downstream of the inlet plane. The heights are taken as
 `z` of the face centre, so terrain-following meshes need ground-relative heights in the table.
 
-The kernel is checked by `tests/unit/test_sem_dfsem.f90`
+The binned evaluation is checked against the all-eddy sum for both kernels (periodic, open and two-bin inlets, look-ahead). The kernel is checked by `tests/unit/test_sem_dfsem.f90`
 (`cmake --build build --target test_sem_dfsem && ctest --test-dir build -L unit`): eigen-solver, single-eddy
 divergence, quadrature and Monte Carlo second moments.
 
