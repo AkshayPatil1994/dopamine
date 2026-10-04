@@ -29,6 +29,7 @@ module mod_abl_types
     logical     :: use_sem        = .true.  ! enable Synthetic Eddy Method
     integer(ip) :: n_eddies       = 500  ! number of eddies
     real(rp)    :: sem_sigma      = 0.0_rp  ! eddy length scale [m]; 0 = compute from BL height
+    character(len=16) :: sem_type = 'dfsem'  ! 'dfsem' (divergence-free eddies) or 'jarrin' (original SEM)
     character(len=256) :: sem_profile_file = ''  ! CSV of U(z) and Reynolds stresses; '' = analytic
     logical     :: use_nudging    = .false.  ! enable Davies nudging
     character(len=256) :: nudging_file = ''  ! netCDF/CSV file with reference profiles
@@ -44,6 +45,16 @@ module mod_abl_types
     integer(ip) :: n_eddies       = 0
     real(rp), allocatable :: pos(:,:)  ! (3, n_eddies) - eddy positions [m]
     real(rp), allocatable :: amp(:,:)  ! (3, n_eddies) - eddy intensity signs (+1/-1)
+    ! Divergence-free eddies (sem_type = 'dfsem', Poletto et al. 2013): ellipsoidal eddies whose axes are the
+    ! principal axes of the Reynolds tensor at their centre. The three arrays below are derived from pos and
+    ! amp (not checkpointed) by sem_prepare.
+    logical     :: dfsem           = .true.  ! divergence-free eddy kernel (else Jarrin tent kernel)
+    real(rp)    :: lam_ref         = 1.0_rp  ! largest principal stress over the inflow [m2/s2]; sets sigma_i
+    real(rp)    :: sig_min         = 0.0_rp  ! smallest principal eddy half-extent over the energetic inflow [m]
+    real(rp)    :: rsup            = 0.0_rp  ! bound on the eddy support half-extent along any direction [m] (= sigma)
+    real(rp), allocatable :: frame(:,:)  ! (9, n_eddies) principal axes, column-major 3x3 (axis i = frame(3i-2:3i))
+    real(rp), allocatable :: sig(:,:)    ! (3, n_eddies) eddy half-extents along the principal axes [m]
+    real(rp), allocatable :: ampl(:,:)   ! (3, n_eddies) signed eddy intensities alpha_i = a_i eps_i
     real(rp)    :: sigma           = 0.0_rp  ! eddy length scale [m]
     real(rp)    :: u_convect       = 0.0_rp  ! bulk advection speed [m/s]
     ! Inlet-plane frame: origin, inward normal (convection direction), in-plane tangents.

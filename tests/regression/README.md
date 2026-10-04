@@ -15,7 +15,8 @@ being restructured (e.g. the GPU port); they are not validation cases.
 | `pdrop` | skewed 12^3 box (`mk_box_mesh.py`, no gmsh) | outlets at p = 1 and 0 with no body force: Umax must grow as t; Dirichlet outlets with non-orthogonal correctors |
 | `hydro` | same mesh | outlets at p = 1 and 0 balancing `fz = -1`: the fluid must stay at rest |
 | `hydrowall` | same mesh, all six faces no-slip walls | closed box under `fz = -1`: the wall pressure gradient `dp/dn = f.n`; Umax stays O(dt g) |
-| `inflow` | same mesh | SEM `ablInlet` at x0, outlet at xL, periodic y, slip z, CDS: eddies wrap across the periodic seam; the result must not depend on the rank count (np 1, 2, 3 agree to 1e-14) |
+| `inflow` | same mesh | divergence-free SEM (`sem_type = 'dfsem'`, the default) `ablInlet` at x0, outlet at xL, periodic y, slip z, CDS: eddies wrap across the periodic seam; the result must not depend on the rank count (np 1, 2, 3 agree to 1e-14) |
+| `inflow_jarrin` | same mesh | as `inflow` with the original tent-kernel SEM (`sem_type = 'jarrin'`); its reference is unchanged from before the DFSEM kernel was added |
 
 Run everything through CTest from a build tree (meshes are generated with gmsh on first use):
 

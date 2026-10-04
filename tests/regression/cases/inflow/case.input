@@ -1,5 +1,5 @@
-! Regression case: synthetic-eddy inflow on the skewed 12^3 box. ablInlet at x0 (SEM), outlet at xL,
-! periodic in y (the eddies are wrapped across the seam), slip in z. CDS advection, so the result must be
+! Regression case: divergence-free synthetic-eddy inflow (default sem_type = 'dfsem') on the skewed 12^3 box. ablInlet at x0,
+! outlet at xL, periodic y (the eddies are wrapped across the seam), slip z. CDS advection, so the result must be
 ! independent of the rank count: guards the periodic seam on the CDS path and across partition cuts.
 &dopamine_domain
   mesh_file = 'mesh.msh'
@@ -28,6 +28,7 @@
   z0_m  = 0.01
   wind_dir_deg = 270.0
   use_sem = .true.
+  sem_type = 'dfsem'
   n_eddies = 300
   sem_sigma = 0.2
 /

@@ -684,7 +684,8 @@ In the input file, set the following in `&dopamine_abl`:
   wind_dir_deg = 270.0                ! Wind direction (meteorological convention)
   use_sem = .true.                    ! Enable Synthetic Eddy inflow
   n_eddies = 500                      ! Number of synthetic eddies
-  sem_sigma = 0.0                     ! Eddy length scale [m]; 0 = auto (0.1*z_ref)
+  sem_sigma = 0.0                     ! Eddy length scale [m]; 0 = auto (0.1*min inlet span)
+  sem_type = 'dfsem'                  ! 'dfsem' (divergence-free eddies, default) or 'jarrin' (original tent kernel)
   use_nudging = .false.               ! Enable large-scale relaxation
   nudging_file = ''                   ! Path to weather profile (CSV/netCDF)
   nudging_tau = 1800.0                ! Relaxation timescale [s]
@@ -769,16 +770,18 @@ resolve distinct surfaces as separate mesh patches.
 When `use_sem = .true.`:
 
 - SEM generates $$N_e$$ eddies (default 500) in a recycle box upstream of inlet
+- `sem_type = 'dfsem'` (default) uses the divergence-free eddies of Poletto et al. (2013): ellipsoidal eddies in the principal frame of the Reynolds tensor, so the full tensor including shear is reproduced; `sem_type = 'jarrin'` keeps the original tent-kernel SEM
 - Eddies are convected downstream and create anisotropic turbulent fluctuations
 - Target Reynolds stress anisotropy matches ABL log-layer profiles
-- Eddy length scale $$\sigma$$ defaults to $$0.1 \times$$ the smaller in-plane extent of the inlet (override with `sem_sigma`); resolve it with at least 4-6 cells
+- `sem_sigma` is the longest eddy half-extent (default $$0.1 \times$$ the smaller in-plane extent of the inlet); with `dfsem` the other axes are smaller ($$\sigma\sqrt{\lambda_i/\lambda_{ref}}$$, floored at $$0.2\sigma$$), so resolve the *smallest* half-extent with at least 8 cells
 
 **Usage notes:**
 - Apply SEM only to inlet patches; other BCs are unaffected
 - SEM injects velocity fluctuations only; it does not require `boussinesq = .true.`
 - Recycle box depth is estimated from mesh bounds automatically
-- Eddies leaving the box are re-seeded upstream; across a periodic in-plane direction they wrap, so the fluctuation is periodic there (`sem_sigma` must then be below half the periodic width)
-- The fluctuation is not divergence-free: expect a pressure fluctuation of about twice the downstream level in the first cells at the inlet
+- Eddies leaving the box are re-seeded upstream; across a periodic in-plane direction they wrap, so the fluctuation is periodic there (`sem_sigma` must then be below half the periodic width; the run stops otherwise)
+- `jarrin` is not divergence-free and gives a large inlet pressure spike; `dfsem` does not, and the inlet is evaluated at every Runge-Kutta stage time so the first cell sees no stale normal flux. The remaining first-cell pressure is the field's own nonlinear pressure plus a discretisation term that falls like $$(\Delta x/\sigma)^2$$: resolve the smallest eddy half-extent with at least 8 cells (a startup message reports it and warns below 5). See *Measured behaviour* in the theory notes and `tests/sem_pressure/`
+- SEM is evaluated on the host each step; the face fluctuation is then uploaded, so GPU runs and any rank count use the same replicated eddy state (checkpoints store eddy positions and signs; frames and amplitudes are re-derived)
 
 #### Prescribed Inflow Profiles
 

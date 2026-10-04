@@ -427,9 +427,13 @@
   ! Number of synthetic eddies to place in recycle box
   n_eddies = 500
 
-  ! Eddy length scale / box depth. If 0, estimated as 0.1*min inlet-plane span [m]
+  ! Eddy length scale (longest half-extent) [m]. If 0, estimated as 0.1*min inlet-plane span.
   ! When non-zero, overrides automatic estimate.
   sem_sigma = 0.0
+
+  ! Eddy kernel: 'dfsem' (default) divergence-free eddies, principal-axis frames, full Reynolds
+  ! tensor; 'jarrin' original tent-kernel SEM (not divergence-free).
+  sem_type = 'dfsem'
 
   ! Prescribed inflow profiles. Empty = analytic neutral log law with
   ! Panofsky-Dutton stress ratios. Otherwise a CSV, '#' comments allowed,

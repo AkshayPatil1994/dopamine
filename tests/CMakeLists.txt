@@ -5,7 +5,7 @@ find_program(DOPAMINE_GMSH gmsh)
 set(_regression_dir "${CMAKE_CURRENT_SOURCE_DIR}/regression")
 set(_regression_work "${CMAKE_BINARY_DIR}/regression")
 
-foreach(_case tgv channel rb duct dynsmag graded pdrop hydro hydrowall inflow)
+foreach(_case tgv channel rb duct dynsmag graded pdrop hydro hydrowall inflow inflow_jarrin)
   foreach(_np 1 2)
     add_test(NAME regression_${_case}_np${_np}
              COMMAND "${_regression_dir}/check_case.sh" ${_case} ${_np} "${_regression_work}")
@@ -20,3 +20,10 @@ foreach(_case tgv channel rb duct dynsmag graded pdrop hydro hydrowall inflow)
       TIMEOUT 900)
   endforeach()
 endforeach()
+
+# Unit test of the divergence-free synthetic eddy kernel (no mesh, serial).
+add_executable(test_sem_dfsem unit/test_sem_dfsem.f90)
+target_link_options(test_sem_dfsem PRIVATE -Wl,--no-as-needed)
+target_link_libraries(test_sem_dfsem PRIVATE dopamine_lib MPI::MPI_Fortran MPI::MPI_C dl)
+add_test(NAME unit_sem_dfsem COMMAND test_sem_dfsem)
+set_tests_properties(unit_sem_dfsem PROPERTIES LABELS unit TIMEOUT 300)

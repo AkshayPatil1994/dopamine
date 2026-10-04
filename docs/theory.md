@@ -439,28 +439,109 @@ Stanton number, $$\mathrm{k}B^{-1} = \ln(z_{0m}/z_{0h}) \approx 2$$.
 
 ### Synthetic Eddy Method (SEM) for Turbulent Inflow
 
-The SEM [@jarrin2006] builds the inlet fluctuation from a superposition of eddies:
+Two eddy kernels are available through `sem_type`. Both superpose $$N_e$$ eddies, placed uniformly in a box of
+depth $$2 r_{sup}$$ about the inlet plane, convected with the bulk velocity $$u_{ref}$$ along the inward normal and
+re-seeded upstream when they leave the box. Where the inlet plane is periodic (a periodic patch pair normal to an
+in-plane direction) the box spans exactly one period and eddies are wrapped, so the fluctuation is periodic across
+the seam.
+
+**Divergence-free kernel (`sem_type = 'dfsem'`, default).** This is the divergence-free SEM of Poletto et al.
+[@poletto2013]: the eddy method is applied to the vorticity, so the velocity of one eddy is a Biot-Savart-type
+field. In the principal frame $$(\mathbf{e}_1,\mathbf{e}_2,\mathbf{e}_3)$$ of the target Reynolds tensor at the eddy
+centre (their Eq. 8, with intensities $$\alpha_l = a_l\epsilon_l$$, random signs $$\epsilon_l = \pm 1$$),
 
 $$
-\mathbf{u}'(\mathbf{x}) = \sqrt{\frac{V_{box}}{N_e}}\, \sum_{e=1}^{N_e} \mathbf{a}_e \, f\left(\frac{|\mathbf{x} - \mathbf{x}_e|}{\sigma}\right)
+u'_\beta = \sigma_\beta\,(1-d^2)\,(\mathbf{r}\times\boldsymbol{\alpha})_\beta \quad (\text{no sum on } \beta),\qquad
+r_j = \frac{(\mathbf{x}-\mathbf{x}_k)\cdot\mathbf{e}_j}{\sigma_j},\quad d = |\mathbf{r}| < 1,
 $$
 
-where $$\mathbf{a}_e$$ are eddy amplitude vectors (random signs), $$\mathbf{x}_e$$ eddy positions,
-and $$f(r) = \sqrt{15/2\pi}\,\max(0, 1-r)$$ is a tent kernel. Amplitudes are mapped through the Cholesky
-factor of the target Reynolds stress tensor to achieve anisotropy: $$\sigma_u/u_* \approx 2.4$$,
-$$\sigma_v/u_* \approx 1.9$$, $$\sigma_w/u_* \approx 1.25$$.
+zero outside the ellipsoid $$d<1$$; the fluctuation is the sum over eddies. It is exactly solenoidal because
+$$\partial u'_1/\partial x_1 = -2r_1(r_2\alpha_3 - r_3\alpha_2)$$ and its two cyclic partners cancel; the factor
+$$\sigma_\beta$$ in front is what makes the length-scale anisotropy compatible with continuity (their Eq. 6). The
+velocity is continuous ($$1-d^2$$ vanishes at $$d=1$$) and only its gradient jumps there, so the field is divergence-free
+everywhere in the distributional sense. No Cholesky transform is applied (a constant linear map of a solenoidal
+field is not solenoidal); anisotropy and shear stress come from the eddy geometry:
 
-The fluctuation is **not divergence-free**: the kernel is scalar and the amplitude a random vector, so
-$$\nabla\cdot\mathbf{u}'\neq 0$$ (measured: the divergence is as large as the full velocity gradient). The
-inlet fluctuation is given zero net flux, so the projection stays consistent and the face-flux divergence is
-still zero to round-off, but the pressure responds to the non-solenoidal inflow with a localised
-fluctuation in the first cells (about twice the downstream level). Resolve $$\sigma$$ with at least
-4-6 cells. A divergence-free variant (Poletto et al. 2013) is not implemented.
+- *Principal axes.* $$\mathbf{R} = \mathbf{Q}\,\mathrm{diag}(\lambda_i)\,\mathbf{Q}^T$$ at the eddy-centre height; a rigid
+  rotation of a solenoidal eddy stays solenoidal (their Eq. 10), so the full tensor including $$\overline{u'w'}$$ is
+  matched in expectation.
+- *Sizes.* $$\sigma_i = \sigma\,\max(0.2,\sqrt{\lambda_i/\lambda_{ref}})$$ with $$\lambda_{ref}$$ the largest principal
+  stress over the inflow and $$\sigma$$ = `sem_sigma`: the longest eddy is along the strongest stress.
+- *Intensities.* Independent signs give vanishing cross-stresses and
+  $$\lambda_1 = K\sigma_1^2(A_2 + A_3)$$ and cyclic, with $$A_i = a_i^2$$ and
+  $$K = N_e\sigma_1\sigma_2\sigma_3 I/V_{box}$$, $$I = \int(1-d^2)^2 r_2^2\,d^3r = 32\pi/945$$. Hence
+  $$A_1 = (b_2 + b_3 - b_1)/2$$ and cyclic with $$b_i = \lambda_i/(K\sigma_i^2)$$. These replace the printed
+  normalisation of Eqs. 11-13 of the paper (the constants $$C_1$$, $$C_2$$ and the ratio table $$\Gamma$$), whose indices are
+  ambiguous in the published text; the result is checked against numerical quadrature of the eddy second moment in
+  `tests/unit/test_sem_dfsem.f90`. With $$\sigma_i^2 \propto \lambda_i$$ all $$b_i$$ are equal, so every
+  $$A_i > 0$$ for any positive-definite tensor (the paper instead covers the Lumley triangle in regions with a ladder
+  of fixed aspect ratios); the 0.2 floor can clip a vanishing stress, and a negative $$A_i$$ is then set to zero.
+- *Inhomogeneity.* Frames, sizes and intensities are fixed per eddy from the stress at its centre height (as in the
+  paper), so the field stays exactly solenoidal for height-dependent stresses; the stress profile is smoothed over an
+  eddy.
 
-Eddies are placed in a box of depth $$2\sigma$$ about the inlet plane and convected with the bulk velocity;
-an eddy leaving the box is re-seeded upstream (amplitudes are kept, so the zero-mean balance survives). Where
-the inlet plane is periodic (a periodic patch pair normal to an in-plane direction) the box spans exactly one
-period and eddies are wrapped, so the fluctuation is periodic across the seam.
+The ellipsoid reaches at most $$\sigma$$ along any direction, so $$r_{sup}=\sigma$$ in the box depth, the recycling plane and
+the periodic-width check ($$\sigma$$ must be below half the periodic width). The paper's $$d = N_e\sigma_x\sigma_y\sigma_z/V_0$$
+(eddy density, about 1 recommended) is $$K/I$$ here.
+
+Net flux: a complete eddy has zero net flux, but eddies cut by the domain edge do not, which makes the bulk inflow
+fluctuate and drives a pressure drop along the whole domain (their Sect. 4.2, Fig. 7). The inlet fluctuation is
+therefore given zero net flux (a uniform normal shift, where the paper rescales the profile).
+
+**Original kernel (`sem_type = 'jarrin'`).** The SEM of Jarrin et al. [@jarrin2006] builds the fluctuation from a
+scalar tent kernel $$f(r) = \sqrt{15/2\pi}\,\max(0, 1-r)$$ with random-sign amplitude vectors,
+
+$$
+\mathbf{u}'(\mathbf{x}) = \sqrt{\frac{V_{box}}{N_e}}\, \sum_{e=1}^{N_e} \mathbf{a}_e \, f\left(\frac{|\mathbf{x} - \mathbf{x}_e|}{\sigma}\right),
+$$
+
+mapped through the Cholesky factor of the target Reynolds tensor ($$\sigma_u/u_* \approx 2.4$$,
+$$\sigma_v/u_* \approx 1.9$$, $$\sigma_w/u_* \approx 1.25$$ by default). It is **not divergence-free**: the divergence
+is as large as the full velocity gradient. The inlet fluctuation is given zero net flux, so the face-flux divergence is
+still zero to round-off, but the field is far from frozen-convective near the inlet and the pressure responds with a
+fluctuation concentrated in the first cells.
+
+**Inlet time level.** The SEM is evaluated at the end time of every Runge-Kutta stage, $$t_n + (c_k+\gamma_k)\Delta t$$,
+not once per step. The eddies convect rigidly, so this is just a shift of the sample point by $$u_{ref}\,\tau$$ along the
+inward normal. Holding the inlet value for the whole step leaves the first cell with a normal flux that is out of date
+by up to a stage; the pressure has to absorb it, and since the mismatch is $$\Delta t\,\partial_t u_n$$ spread over a sub-step
+of length $$\sim\Delta t$$ it gives $$p \sim \Delta x\,\partial_t u_n$$ whatever the time step. In the old code the first-cell
+pressure swung by several times its mean from stage to stage (+0.020, -0.018, +0.0065, +0.017 within one step in the
+test below) and was therefore also not a smooth function of time. Any time-dependent Dirichlet inlet needs this.
+
+**Measured behaviour.** `tests/sem_pressure/run_study.py` runs a box (periodic y, slip z, SEM `ablInlet` at x0, outlet
+at xL, KEP + Vreman, 80x32x32, $$\sigma$$ = 4.8 cells, six sampling lines) and reports $$C_p = p_{rms}/u_{rms}^2$$
+($$u_{rms}^2 = \langle u'_iu'_i\rangle/3$$) in the first cell; downstream it is $$\approx 1$$ for every case.
+
+| inflow | Jarrin, stage-held inlet | Jarrin, stage times | DFSEM, stage-held inlet | DFSEM, stage times |
+|---|---|---|---|---|
+| uniform mean, 10% isotropic | 10.8 | 18.1 | 5.2 | 2.2 |
+| anisotropic with shear stress | 7.8 | 19.2 | 4.7 | 4.8 |
+| neutral log law, Panofsky-Dutton | 5.5 | 10.5 | 2.6 | 2.0 |
+
+Diagnosis, in the order it was established:
+
+1. *One exactly frozen, exactly solenoidal wave* (a stream-function mode $$\psi = B\sin k_x(x-Ut)\sin m_y y$$) was fed through
+   the inlet. Its continuum solution has $$p = 0$$, yet the old inlet produced $$p \approx 0.4\,U v'$$ in the first cell, a standing
+   evanescent field decaying like $$e^{-\kappa x}$$, $$\kappa = \sqrt{k_x^2+m_y^2}$$. It was proportional to $$U$$ (doubling $$U$$
+   doubled it, $$U\to 0$$ removed it), independent of $$k_x$$, $$m_y$$, $$\Delta t$$, the advection scheme, the gradient scheme and
+   the pressure BC, and zero for a $$y$$-uniform transverse wave. The stage-resolved dump of the projection showed the increment
+   $$\phi$$ in cell 1 to be as large as the pressure itself. Evaluating the inlet at stage end times cut it by 14x (0.0232 to
+   0.0017, against a nonlinear floor of 0.0006).
+2. *What is left in the eddy fields* is $$p(\text{cell }1) \approx a\,U u' + b\,u'^2$$. Halving $$u'$$ gives $$b \approx 0.7$$-$$0.9$$ (the natural
+   nonlinear pressure of the field, $$C_p \approx 1$$ downstream) and $$a \approx 0.15$$; with periodic z (no cut eddies, no
+   net-flux correction) $$a \approx 0.10$$. $$a$$ falls with resolution, 0.34, 0.10, 0.05 for 2.4, 4.8, 8 cells per $$\sigma$$ (about
+   $$(\Delta x/\sigma)^{1.5\text{-}2}$$), and does not depend on $$\Delta t$$. This matches an $$O(\Delta x)$$ closure error of the
+   first cell's convective term: in the interior the two face errors $$+\Delta x^2 u''/8$$ cancel, at the inlet face the value is
+   exact, so $$p\approx (k\Delta x)^2 U u'/8$$ (0.043 for the wave, measured 0.03). A startup message reports the smallest eddy
+   half-extent in inlet cells and warns below 5; 8 or more keeps the first-cell pressure near the nonlinear floor.
+3. *The tent kernel gets worse* with the exact time level (its inlet field is not solenoidal, so the first cell's continuity
+   error is no longer partly offset by the lag). It is kept for compatibility only.
+
+Sampled at the face centres of the same grid, the divergence-free field has a discrete divergence of 3.4% of the
+velocity-gradient scale (Jarrin: about 100%), and from the second cell on the interior stays frozen-convective (residual
+of $$\partial_t u + U\partial_x u$$ about 12% for all components). Poletto et al. also report a residual, much reduced but not zero,
+pressure elevation next to the inlet (their Fig. 8).
 
 ### Davies Relaxation (Nudging)
 

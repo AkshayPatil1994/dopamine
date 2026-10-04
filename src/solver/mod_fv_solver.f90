@@ -242,7 +242,7 @@ module mod_fv_solver
     real(rp)                 :: diag_nonortho_prev = 0.0_rp   ! divU_norm_prev at that exit
     real(rp)                 :: diag_nonortho_atol = 0.0_rp   ! atol_dynamic at that exit
 
-  contains
+contains
     procedure :: init         => solver_init
     procedure :: advance      => solver_advance
     procedure :: project_once => solver_project_once
@@ -1331,6 +1331,13 @@ contains
 #endif
       end if
 
+      ! The stage ends at t_n + (c_k + gamma_k) dt, where the projected velocity must meet the inlet data: the
+      ! SEM eddies convect rigidly, so evaluate them there (a held-over value is a one-stage-old normal flux that
+      ! the pressure has to absorb: p ~ dx du_n/dt, whatever dt). The next stage starts from this same value.
+      if (self%abl_config%use_sem .and. self%sem_state%initialized) then
+        call update_sem_inflow(self, (RK3W_C(k) + RK3W_GAMMA(k)) * dt)
+        !$acc update device(self%sem_fluc_bnd) if(self%on_device)
+      end if
       call self%mesh%begin_halos_vec(self%U)
       call apply_velocity_bc(self%U, self%U_bnd, self%bc_configs, self%mesh, &
                              periodic_only=.false., grad_U=self%grad_U, u_fluc_bnd=self%sem_fluc_bnd, u_mean_bnd=self%abl_mean_bnd)
@@ -1550,12 +1557,9 @@ contains
     self%time = time_n
 
     if (self%abl_config%use_sem) then
+      ! Stage 3 already left sem_fluc_bnd at t_n + dt (its end time), the value the next step starts from.
+      ! Eddies are rigid and a re-seeded one sits at the box edge, so advancing them does not change it.
       call sem_advance(self%sem_state, dt)
-      call update_sem_inflow(self)
-      !$acc update device(self%sem_fluc_bnd) if(self%on_device)
-      if (allocated(self%abl_mean_bnd)) then
-        !$acc update device(self%abl_mean_bnd) if(self%on_device)
-      end if
     end if
 
     end associate
@@ -2009,8 +2013,9 @@ contains
 
   !> Refresh the SEM inflow fluctuation on every ABL inlet face.
   !> The patch-mean normal component is removed so the inlet mass flux is unchanged.
-  subroutine update_sem_inflow(self)
+  subroutine update_sem_inflow(self, tau)
     class(FVSolver), intent(inout) :: self
+    real(rp), optional, intent(in) :: tau  ! look-ahead from the eddy state [s] (stage time within a step)
 
     integer(ip) :: p, f, f_bnd, f_global, ierr
     real(rp)    :: u_mean(3), u_fluc(3), buf(2), gbuf(2), delta
@@ -2018,6 +2023,8 @@ contains
     if (.not. allocated(self%sem_fluc_bnd)) return
     self%sem_fluc_bnd = 0.0_rp
     if (.not. self%sem_state%initialized) return
+    ! Per-eddy frames and amplitudes follow the eddy positions (also after a checkpoint restore).
+    call sem_prepare(self%sem_state, self%abl_config)
 
     buf = 0.0_rp
     do p = 1, self%mesh%n_patches
@@ -2026,7 +2033,7 @@ contains
         f_bnd    = self%mesh%patches(p)%start_face + f - 1
         f_global = self%mesh%n_int_faces + f_bnd
         call sem_velocity_at_face(self%sem_state, self%abl_config, &
-                                  self%mesh%faces(f_global)%centre, u_mean, u_fluc)
+                                  self%mesh%faces(f_global)%centre, u_mean, u_fluc, tau)
         self%sem_fluc_bnd(:, f_bnd) = u_fluc
         if (allocated(self%abl_mean_bnd)) self%abl_mean_bnd(:, f_bnd) = u_mean
         buf(1) = buf(1) + dot_product(u_fluc, self%mesh%faces(f_global)%sf)

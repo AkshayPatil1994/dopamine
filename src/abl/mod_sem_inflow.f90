@@ -18,12 +18,19 @@ module mod_sem_inflow
   ! Tent kernel max(0,1-r) needs this factor so that integral f^2 d3y = 1.
   real(rp), parameter :: TENT_NORM = 1.5450968080927583_rp  ! sqrt(15/(2*pi))
 
+  ! Divergence-free eddy of Poletto et al. (2013), Eq. 8: u_b = sigma_b (1 - d^2) (r x alpha)_b with
+  ! r_j = (x_j - x_j^k) / sigma_j, d = |r| < 1. DF_I = int (1-d^2)^2 r_2^2 d3r over the unit ball.
+  real(rp), parameter :: DF_I = 32.0_rp * PI / 945.0_rp
+  ! Smallest eddy half-extent relative to the largest (guards a vanishing principal stress).
+  real(rp), parameter :: DF_FMIN = 0.2_rp
+
   integer(int64), parameter :: RNG_SEED = 88172645463325252_int64
   integer(int64), save      :: rng_state = RNG_SEED
 
   public :: sem_init, sem_advance, sem_velocity_at_face
   public :: sem_get_rng_state, sem_set_rng_state
   public :: sem_read_profile, sem_profile_at, sem_cholesky
+  public :: sem_prepare, sem_eigen3, sem_dfsem_eddy_velocity, sem_reference_scales, sem_stress_at
 
 contains
 
@@ -185,8 +192,11 @@ contains
 
     state%n_eddies = max(1_ip, abl_cfg%n_eddies)
     n_e = state%n_eddies
-    if (allocated(state%pos)) deallocate(state%pos)
-    if (allocated(state%amp)) deallocate(state%amp)
+    if (allocated(state%pos))   deallocate(state%pos)
+    if (allocated(state%amp))   deallocate(state%amp)
+    if (allocated(state%frame)) deallocate(state%frame)
+    if (allocated(state%sig))   deallocate(state%sig)
+    if (allocated(state%ampl))  deallocate(state%ampl)
     allocate(state%pos(3, n_e), source=0.0_rp)
     allocate(state%amp(3, n_e), source=0.0_rp)
 
@@ -201,35 +211,49 @@ contains
     end if
     if (state%sigma <= SMALL) state%sigma = 0.1_rp * abl_cfg%z_ref
 
+    ! Divergence-free eddies are ellipsoidal (half-extents follow the principal stresses, the largest
+    ! being sigma); rsup bounds the support half-extent along any direction and replaces sigma for the box.
+    state%dfsem = (trim(abl_cfg%sem_type) /= 'jarrin')
+    state%rsup  = state%sigma
+    if (state%dfsem) then
+      allocate(state%frame(9, n_e), source=0.0_rp)
+      allocate(state%sig(3, n_e),   source=0.0_rp)
+      allocate(state%ampl(3, n_e),  source=0.0_rp)
+      call sem_reference_scales(state, abl_cfg)
+      call sem_check_resolution(state, msh)
+    end if
+
     ! A periodic direction needs exactly one period of eddies (they are wrapped when evaluated, so
     ! the fluctuation is periodic across the seam) and a kernel that fits inside half of it.
-    if ((state%per1 .and. state%sigma >= 0.5_rp * state%period1) .or. &
-        (state%per2 .and. state%sigma >= 0.5_rp * state%period2)) then
-      if (msh%rank == 0) write(*,'(A)') 'ERROR: sem_sigma must be below half the periodic width of the inlet plane'
+    if ((state%per1 .and. state%rsup >= 0.5_rp * state%period1) .or. &
+        (state%per2 .and. state%rsup >= 0.5_rp * state%period2)) then
+      if (msh%rank == 0) write(*,'(A,ES10.3,A)') 'ERROR: the SEM eddy support (', state%rsup, &
+        ' m) must be below half the periodic width of the inlet plane; reduce sem_sigma'
       error stop 'sem_init: eddy scale too large for the periodic inlet'
     end if
-    ! Otherwise pad the box by sigma so eddies straddling the edges are represented.
+    ! Otherwise pad the box by the support so eddies straddling the edges are represented.
     if (state%per1) then
       state%t1_min = state%per1_lo; state%t1_max = state%per1_lo + state%period1
     else
-      state%t1_min = state%t1_min - state%sigma; state%t1_max = state%t1_max + state%sigma
+      state%t1_min = state%t1_min - state%rsup; state%t1_max = state%t1_max + state%rsup
     end if
     if (state%per2) then
       state%t2_min = state%per2_lo; state%t2_max = state%per2_lo + state%period2
     else
-      state%t2_min = state%t2_min - state%sigma; state%t2_max = state%t2_max + state%sigma
+      state%t2_min = state%t2_min - state%rsup; state%t2_max = state%t2_max + state%rsup
     end if
-    ! Box spans -sigma to +sigma about the plane so a face there sees full kernel support.
-    state%box_volume = 2.0_rp * state%sigma &
+    ! Box spans -rsup to +rsup about the plane so a face there sees every eddy that can touch it.
+    state%box_volume = 2.0_rp * state%rsup &
                      * (state%t1_max - state%t1_min) * (state%t2_max - state%t2_min)
 
     state%u_convect = max(abl_cfg%u_ref, SMALL)
 
     rng_state = RNG_SEED
     do i = 1, n_e
-      call sem_place_eddy(state, i, state%sigma * (2.0_rp * sem_rand() - 1.0_rp), .true.)
+      call sem_place_eddy(state, i, state%rsup * (2.0_rp * sem_rand() - 1.0_rp), .true.)
     end do
     call sem_balance_amplitudes(state)
+    if (state%dfsem) call sem_prepare(state, abl_cfg)
 
     state%initialized = .true.
   end subroutine sem_init
@@ -254,7 +278,7 @@ contains
   end subroutine sem_balance_amplitudes
 
   !> Place eddy i at signed distance s along the inward normal from the inlet plane.
-  !> Amplitudes are redrawn only at seeding, so the zero-mean balance survives recycling.
+  !> Amplitude signs are redrawn only at seeding, so the zero-mean balance survives recycling.
   subroutine sem_place_eddy(state, i, s, new_amp)
     type(SEMState), intent(inout) :: state
     integer(ip),    intent(in)    :: i
@@ -290,12 +314,9 @@ contains
     do i = 1, state%n_eddies
       state%pos(:, i) = state%pos(:, i) + displacement * state%n_in
       s = dot_product(state%pos(:, i) - state%x_inlet, state%n_in)
-      if (s > state%sigma) call sem_place_eddy(state, i, -state%sigma, .false.)
+      if (s > state%rsup) call sem_place_eddy(state, i, -state%rsup, .false.)
     end do
   end subroutine sem_advance
-
-  !> Evaluate SEM synthetic velocity fluctuation at a point
-  !> Returns fluctuation vector u'(x) computed as a sum of eddy contributions:
 
   !> Read prescribed inflow profiles: 6 columns z,U,uu,vv,ww,uw (wind-aligned)
   !> or 10 columns z,U,V,W,uu,vv,ww,uv,uw,vw (global axes).
@@ -447,10 +468,274 @@ contains
     L(3,3) = sqrt(max(R(3) - L(3,1)**2 - L(3,2)**2, SMALL))
   end function sem_cholesky
 
-  subroutine sem_velocity_at_face(state, abl_cfg, face_centre, u_mean, u_fluc_out)
+  !> Mean velocity at height z: the prescribed profile, else the neutral MOST log law.
+  subroutine sem_mean_at(state, abl_cfg, z, u_mean)
+    type(SEMState),  intent(in)  :: state
+    type(ABLConfig), intent(in)  :: abl_cfg
+    real(rp),        intent(in)  :: z
+    real(rp),        intent(out) :: u_mean(3)
+
+    real(rp) :: R_prof(6), u_star, u_mag
+
+    if (state%has_profile) then
+      call sem_profile_at(state, z, u_mean, R_prof)
+      ! 6-column tables give a streamwise magnitude; 10-column ones are already global.
+      if (.not. state%prof_global_axes) u_mean = abl_wind_vector(u_mean(1), abl_cfg%wind_dir_deg)
+    else
+      u_star = abl_ustar_from_ref(abl_cfg%u_ref, abl_cfg%z_ref, abl_cfg%z0_m)
+      u_mag  = abl_u_profile(z, u_star, abl_cfg%z0_m, 0.0_rp)
+      u_mean = abl_wind_vector(u_mag, abl_cfg%wind_dir_deg)
+    end if
+  end subroutine sem_mean_at
+
+  !> Target Reynolds tensor at height z as a symmetric matrix Rm in the stress frame, and the matrix Wr
+  !> whose columns are the stress-frame axes in global coordinates (R_global = Wr Rm Wr^T). The stress
+  !> frame is the mean-wind frame (e_s, e_n, e_z) except for 10-column tables, which are already global.
+  subroutine sem_stress_at(state, abl_cfg, z, Rm, Wr)
+    type(SEMState),  intent(in)  :: state
+    type(ABLConfig), intent(in)  :: abl_cfg
+    real(rp),        intent(in)  :: z
+    real(rp),        intent(out) :: Rm(3,3), Wr(3,3)
+
+    real(rp) :: R6(6), u_mean(3), u_star, wind_rad
+
+    if (state%has_profile) then
+      call sem_profile_at(state, z, u_mean, R6)
+    else
+      u_star = abl_ustar_from_ref(abl_cfg%u_ref, abl_cfg%z_ref, abl_cfg%z0_m)
+      ! Panofsky & Dutton surface-layer ratios, as in the Jarrin path.
+      R6 = [(2.4_rp * u_star)**2, (1.9_rp * u_star)**2, (1.25_rp * u_star)**2, &
+            -0.1_rp * u_star**2, 0.0_rp, 0.0_rp]
+    end if
+    Rm(1,1) = R6(1); Rm(2,2) = R6(2); Rm(3,3) = R6(3)
+    Rm(1,2) = R6(4); Rm(2,1) = R6(4)
+    Rm(1,3) = R6(5); Rm(3,1) = R6(5)
+    Rm(2,3) = R6(6); Rm(3,2) = R6(6)
+
+    Wr = 0.0_rp
+    if (state%has_profile .and. state%prof_global_axes) then
+      Wr(1,1) = 1.0_rp; Wr(2,2) = 1.0_rp; Wr(3,3) = 1.0_rp
+    else
+      wind_rad = abl_cfg%wind_dir_deg * PI / 180.0_rp
+      Wr(:,1) = [-sin(wind_rad), -cos(wind_rad), 0.0_rp]  ! e_s along the mean wind
+      Wr(:,2) = [ cos(wind_rad), -sin(wind_rad), 0.0_rp]  ! e_n horizontal, normal to it
+      Wr(:,3) = [0.0_rp, 0.0_rp, 1.0_rp]
+    end if
+  end subroutine sem_stress_at
+
+  !> Eigen-decomposition of a symmetric 3x3 matrix by cyclic Jacobi: A = V diag(lam) V^T, columns of V
+  !> orthonormal. Eigenvalues are returned in the order they converge (not sorted).
+  pure subroutine sem_eigen3(A_in, lam, V)
+    real(rp), intent(in)  :: A_in(3,3)
+    real(rp), intent(out) :: lam(3), V(3,3)
+
+    real(rp)    :: A(3,3), off, th, t, c, sn, tau, apq
+    integer(ip) :: sweep, p, q, k
+    real(rp)    :: akp, akq, vkp, vkq
+
+    A = A_in
+    V = 0.0_rp
+    V(1,1) = 1.0_rp; V(2,2) = 1.0_rp; V(3,3) = 1.0_rp
+    do sweep = 1, 30
+      off = abs(A(1,2)) + abs(A(1,3)) + abs(A(2,3))
+      if (off <= 1.0e-15_rp * (abs(A(1,1)) + abs(A(2,2)) + abs(A(3,3)) + SMALL)) exit
+      do p = 1, 2
+        do q = p + 1, 3
+          apq = A(p,q)
+          if (abs(apq) <= SMALL) cycle
+          th  = (A(q,q) - A(p,p)) / (2.0_rp * apq)
+          t   = sign(1.0_rp, th) / (abs(th) + sqrt(th * th + 1.0_rp))
+          c   = 1.0_rp / sqrt(t * t + 1.0_rp)
+          sn  = t * c
+          tau = sn / (1.0_rp + c)
+          A(p,p) = A(p,p) - t * apq
+          A(q,q) = A(q,q) + t * apq
+          A(p,q) = 0.0_rp; A(q,p) = 0.0_rp
+          do k = 1, 3
+            if (k /= p .and. k /= q) then
+              akp = A(k,p); akq = A(k,q)
+              A(k,p) = akp - sn * (akq + tau * akp); A(p,k) = A(k,p)
+              A(k,q) = akq + sn * (akp - tau * akq); A(q,k) = A(k,q)
+            end if
+            vkp = V(k,p); vkq = V(k,q)
+            V(k,p) = vkp - sn * (vkq + tau * vkp)
+            V(k,q) = vkq + sn * (vkp - tau * vkq)
+          end do
+        end do
+      end do
+    end do
+    lam = [A(1,1), A(2,2), A(3,3)]
+  end subroutine sem_eigen3
+
+  !> Largest principal stress over the inflow (sets the eddy sizes). Eddy half-extents are
+  !> sigma_i = sigma * max(DF_FMIN, sqrt(lam_i / lam_ref)): the longest eddy is along the strongest principal
+  !> stress, which keeps the eddy intensities real for any positive-definite tensor. The ellipsoidal support
+  !> reaches at most sigma along any direction, so rsup = sigma.
+  subroutine sem_reference_scales(state, abl_cfg)
+    type(SEMState),  intent(inout) :: state
+    type(ABLConfig), intent(in)    :: abl_cfg
+
+    integer(ip) :: k, nl
+    real(rp)    :: Rm(3,3), Wr(3,3), lam(3), V(3,3), lmax, fmin
+    real(rp), allocatable :: zl(:)
+
+    nl = 1
+    if (state%has_profile) nl = state%n_levels
+    allocate(zl(nl))
+    if (state%has_profile) then
+      zl = state%prof_z(1:nl)
+    else
+      zl = abl_cfg%z_ref
+    end if
+
+    lmax = SMALL
+    do k = 1, nl
+      call sem_stress_at(state, abl_cfg, zl(k), Rm, Wr)
+      call sem_eigen3(Rm, lam, V)
+      lmax = max(lmax, maxval(lam))
+    end do
+    state%lam_ref = lmax
+    state%rsup    = state%sigma
+    ! Smallest half-extent where the inflow is energetic (levels with a principal stress above a quarter of the
+    ! largest); weak-stress levels sit at the DF_FMIN floor and carry little pressure.
+    fmin = 1.0_rp
+    do k = 1, nl
+      call sem_stress_at(state, abl_cfg, zl(k), Rm, Wr)
+      call sem_eigen3(Rm, lam, V)
+      if (maxval(lam) >= 0.25_rp * lmax) fmin = min(fmin, max(DF_FMIN, sqrt(max(minval(lam), 0.0_rp) / lmax)))
+    end do
+    state%sig_min = state%sigma * fmin
+    deallocate(zl)
+  end subroutine sem_reference_scales
+
+  !> Warn when the smallest eddy is poorly resolved by the inlet cells. The first cell's convective term has an
+  !> O(dx) closure error at the inlet face (the interior's two face errors cancel, the exact inlet value does
+  !> not), which the pressure absorbs: roughly p ~ ((k dx)^2 / 8) U u', i.e. (dx/sigma)^1.5-2.
+  subroutine sem_check_resolution(state, msh)
+    type(SEMState), intent(in) :: state
+    type(Mesh),     intent(in) :: msh
+
+    integer(ip) :: p, f, f_global, o, ierr
+    real(rp)    :: h_loc, h_glob, area, h
+
+    h_loc = huge(1.0_rp)
+    do p = 1, msh%n_patches
+      if (msh%patches(p)%bc_id /= BC_ABL_INLET) cycle
+      do f = 1, msh%patches(p)%n_faces
+        f_global = msh%n_int_faces + msh%patches(p)%start_face + f - 1
+        if (f_global < 1 .or. f_global > size(msh%faces)) cycle
+        area = msh%faces(f_global)%area
+        o    = msh%faces(f_global)%owner
+        h    = sqrt(area)  ! in-plane spacing
+        if (o >= 1 .and. o <= msh%n_cells) h = max(h, msh%cells(o)%volume / max(area, SMALL))  ! and the normal one
+        h_loc = min(h_loc, h)
+      end do
+    end do
+    call MPI_Allreduce(h_loc, h_glob, 1, MPI_DOUBLE_PRECISION, MPI_MIN, msh%comm, ierr)
+    if (msh%rank /= 0 .or. h_glob >= 0.5_rp * huge(1.0_rp)) return
+    write(*,'(A,ES9.2,A,F5.1,A)') ' SEM: smallest eddy half-extent ', state%sig_min, ' m = ', &
+      state%sig_min / max(h_glob, SMALL), ' inlet cells'
+    if (state%sig_min < 5.0_rp * h_glob) &
+      write(*,'(A)') ' WARNING: SEM eddies are under-resolved (< 5 cells); the inlet pressure fluctuation grows ' // &
+        'roughly as (dx/sigma)^2 - raise sem_sigma or refine the inlet (>= 8 cells keeps it near the nonlinear floor)'
+  end subroutine sem_check_resolution
+
+  !> Derive the per-eddy principal frame, half-extents and intensities from the target stress at each eddy
+  !> centre. The independent random signs make the cross-stresses vanish in the principal frame and give
+  !> lam_1 = K sigma_1^2 (A_2 + A_3) and cyclic, with A_i = alpha_i^2 and
+  !> K = N sigma_1 sigma_2 sigma_3 DF_I / V_box, so A_1 = (b_2 + b_3 - b_1)/2 with b_i = lam_i/(K sigma_i^2).
+  !> Cheap (O(N_eddies)); call after the eddies move or are restored.
+  subroutine sem_prepare(state, abl_cfg)
+    type(SEMState),  intent(inout) :: state
+    type(ABLConfig), intent(in)    :: abl_cfg
+
+    integer(ip) :: i, j
+    real(rp)    :: Rm(3,3), Wr(3,3), lam(3), V(3,3), Vg(3,3), s(3), K, b(3), A(3)
+
+    if (.not. state%dfsem) return
+    if (.not. allocated(state%ampl)) return
+    do i = 1, state%n_eddies
+      call sem_stress_at(state, abl_cfg, state%pos(3, i), Rm, Wr)
+      call sem_eigen3(Rm, lam, V)
+      Vg = matmul(Wr, V)  ! principal axes in global coordinates
+      do j = 1, 3
+        state%frame(3*j-2:3*j, i) = Vg(:, j)
+        s(j) = state%sigma * max(DF_FMIN, sqrt(max(lam(j), 0.0_rp) / state%lam_ref))
+      end do
+      state%sig(:, i) = s
+      K = dble(state%n_eddies) * s(1) * s(2) * s(3) * DF_I / state%box_volume
+      b = max(lam, 0.0_rp) / (K * s**2)
+      A(1) = 0.5_rp * (b(2) + b(3) - b(1))
+      A(2) = 0.5_rp * (b(1) + b(3) - b(2))
+      A(3) = 0.5_rp * (b(1) + b(2) - b(3))
+      state%ampl(:, i) = sqrt(max(A, 0.0_rp)) * state%amp(:, i)
+    end do
+  end subroutine sem_prepare
+
+  !> Velocity of one divergence-free eddy at offset d from its centre (global axes), Poletto et al. Eq. 8 in
+  !> the principal frame, then rotated back: u_b = sigma_b (1 - d^2) (r x alpha)_b, r_j = d.e_j / sigma_j.
+  !> Zero outside the ellipsoid d < 1. Exactly solenoidal: du_b/dx_b = -2 r_b (r x alpha)_b (no sum),
+  !> and the three terms cancel.
+  pure function sem_dfsem_eddy_velocity(d, frame, sig, ampl) result(u)
+    real(rp), intent(in) :: d(3), frame(9), sig(3), ampl(3)
+    real(rp) :: u(3)
+
+    real(rp) :: r(3), d2, g, up(3)
+    integer(ip) :: j
+
+    u = 0.0_rp
+    d2 = 0.0_rp
+    do j = 1, 3
+      r(j) = dot_product(d, frame(3*j-2:3*j)) / sig(j)
+      d2 = d2 + r(j)**2
+    end do
+    if (d2 >= 1.0_rp) return
+    g = 1.0_rp - d2
+    up(1) = sig(1) * g * (r(2) * ampl(3) - r(3) * ampl(2))
+    up(2) = sig(2) * g * (r(3) * ampl(1) - r(1) * ampl(3))
+    up(3) = sig(3) * g * (r(1) * ampl(2) - r(2) * ampl(1))
+    u = up(1) * frame(1:3) + up(2) * frame(4:6) + up(3) * frame(7:9)
+  end function sem_dfsem_eddy_velocity
+
+  !> Mean velocity and synthetic fluctuation at an inlet face centre.
+  !> tau (default 0) is a time look-ahead from the eddy state: the eddies are convected rigidly, so the field
+  !> at time t + tau is the field at t sampled upstream by u_convect * tau along the inward normal.
+  subroutine sem_velocity_at_face(state, abl_cfg, face_centre, u_mean, u_fluc_out, tau)
     type(SEMState),  intent(in)  :: state
     type(ABLConfig), intent(in)  :: abl_cfg
     real(rp),        intent(in)  :: face_centre(3)
+    real(rp),        intent(out) :: u_mean(3)
+    real(rp),        intent(out) :: u_fluc_out(3)
+    real(rp), optional, intent(in) :: tau
+
+    integer(ip) :: i
+    real(rp)    :: d_vec(3), rs2, xs(3)
+
+    xs = face_centre
+    if (present(tau)) xs = face_centre - state%u_convect * tau * state%n_in
+
+    if (.not. state%dfsem) then
+      call sem_velocity_jarrin(state, abl_cfg, xs, u_mean, u_fluc_out, face_centre)
+      return
+    end if
+
+    call sem_mean_at(state, abl_cfg, face_centre(3), u_mean)
+    u_fluc_out = 0.0_rp
+    rs2 = state%rsup**2
+    do i = 1, state%n_eddies
+      d_vec = xs - state%pos(:, i)
+      if (state%per1) d_vec = d_vec - state%period1 * anint(dot_product(d_vec, state%t1) / state%period1) * state%t1
+      if (state%per2) d_vec = d_vec - state%period2 * anint(dot_product(d_vec, state%t2) / state%period2) * state%t2
+      if (sum(d_vec**2) >= rs2) cycle
+      u_fluc_out = u_fluc_out + sem_dfsem_eddy_velocity(d_vec, state%frame(:, i), state%sig(:, i), state%ampl(:, i))
+    end do
+  end subroutine sem_velocity_at_face
+
+  subroutine sem_velocity_jarrin(state, abl_cfg, face_centre, u_mean, u_fluc_out, face_orig)
+    type(SEMState),  intent(in)  :: state
+    type(ABLConfig), intent(in)  :: abl_cfg
+    real(rp),        intent(in)  :: face_centre(3)  ! sample point (look-ahead shifted)
+    real(rp),        intent(in)  :: face_orig(3)    ! the face centre itself (heights)
     real(rp),        intent(out) :: u_mean(3)
     real(rp),        intent(out) :: u_fluc_out(3)
 
@@ -461,7 +746,7 @@ contains
     real(rp)    :: r_dist, tent_func, eddy_contrib(3), d_vec(3), sig, norm
 
     ! Height above ground
-    z = face_centre(3)
+    z = face_orig(3)
 
     wind_rad = abl_cfg%wind_dir_deg * PI / 180.0_rp
     if (state%has_profile) then
@@ -542,6 +827,6 @@ contains
     u_fluc_out(2) = -u_fluc_aniso(1) * cos(wind_rad) - u_fluc_aniso(2) * sin(wind_rad)
     u_fluc_out(3) =  u_fluc_aniso(3)
 
-  end subroutine sem_velocity_at_face
+  end subroutine sem_velocity_jarrin
 
 end module mod_sem_inflow

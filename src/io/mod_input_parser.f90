@@ -585,6 +585,7 @@ contains
     logical    :: use_sem         = .true.
     integer(ip) :: n_eddies       = 500
     real(rp)   :: sem_sigma       = 0.0_rp
+    character(16) :: sem_type     = 'dfsem'
     character(256) :: sem_profile_file = ''
     logical    :: use_nudging     = .false.
     character(256) :: nudging_file = ''
@@ -596,7 +597,7 @@ contains
 
     namelist /dopamine_abl/ use_abl, wall_model, u_ref, z_ref, z0_m, z0_h, T_surface, T_ref, &
                             L_obukhov, compute_L, wind_dir_deg, use_sem, n_eddies, &
-                            sem_sigma, sem_profile_file, use_nudging, nudging_file, nudging_tau, nudging_z_start, &
+                            sem_sigma, sem_type, sem_profile_file, use_nudging, nudging_file, nudging_tau, nudging_z_start, &
                             nudging_z_full, nudging_horizontal_only
 
     read(iunit, nml=dopamine_abl, iostat=ios)
@@ -642,6 +643,11 @@ contains
     config%abl_config%use_sem          = use_sem
     config%abl_config%n_eddies         = n_eddies
     config%abl_config%sem_sigma        = sem_sigma
+    config%abl_config%sem_type         = lower_case(adjustl(sem_type))
+    if (trim(config%abl_config%sem_type) /= 'dfsem' .and. trim(config%abl_config%sem_type) /= 'jarrin') then
+      write(*,'(A)') 'ERROR: sem_type must be ''dfsem'' or ''jarrin'', got '''//trim(sem_type)//''''
+      error stop 'read_abl: unknown sem_type'
+    end if
     config%abl_config%sem_profile_file = sem_profile_file
     config%abl_config%use_nudging      = use_nudging
     config%abl_config%nudging_file     = nudging_file
