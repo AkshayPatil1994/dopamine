@@ -2359,22 +2359,6 @@ contains
     end do
   end subroutine build_total_pressure
 
-  !> Assemble predictor face fluxes and Poisson RHS: rhs(c) = -(1/dt)*sum_f q*_f.
-  !> Owner weight of the interpolation across a face for the deferred non-orthogonal flux. A periodic face
-  !> carries gc = 1 (it is a boundary face), which would use only the owner's gradient on both sides of the seam
-  !> and break the antisymmetry of the pair's flux; use the periodic-pair weight instead.
-  pure function cross_owner_weight(f_mesh, n_int, gcs, pgcs) result(g)
-    !$acc routine seq
-    integer(ip), intent(in) :: f_mesh, n_int
-    real(rp),    intent(in) :: gcs(:), pgcs(:)
-    real(rp) :: g
-    if (f_mesh > n_int) then
-      g = pgcs(f_mesh - n_int)
-    else
-      g = gcs(f_mesh)
-    end if
-  end function cross_owner_weight
-
   subroutine compute_face_fluxes_and_rhs(self, dt, rhs_p, p_is_increment)
     class(FVSolver), intent(inout), target :: self
     real(rp),        intent(in)    :: dt
@@ -2383,7 +2367,7 @@ contains
 
     integer(ip) :: nc, ntot, nf, n_int, n_faces, n_bnd, n_patches, n_nper, n_per, c, f, q, ib, f_bnd, f_glob
     integer(ip) :: idx, o, nb, f_mesh, pair_bnd, pair_face, om, nm, j
-    real(rp)    :: flux, coeff_rc, gc_f, d_o, d_nb, d_tot, w_blend, s_dot_dhat, d_on_len, cross, rdt
+    real(rp)    :: flux, coeff_rc, gc_f, d_o, d_nb, d_tot, w_blend, s_dot_dhat, d_on_len, cross, rdt, gc_w
     real(rp)    :: sf(3), d_on(3), k_f(3), k_rc(3), Uf(3), Uf_plain(3), Uf_eps(3), gm(3)
     logical     :: incr, skip_no
     integer(ip) :: col, idx2, n_loops, lo, hi
@@ -2659,9 +2643,9 @@ contains
           hi = nf
         end if
 #ifdef _OPENACC
-        !$acc parallel loop if(use_color) default(present) private(idx, o, nb, f_mesh, cross)
+        !$acc parallel loop if(use_color) default(present) private(idx, o, nb, f_mesh, cross, gc_w)
 #else
-        !$omp parallel do if(use_color) default(shared) private(idx, idx2, o, nb, f_mesh, cross)
+        !$omp parallel do if(use_color) default(shared) private(idx, idx2, o, nb, f_mesh, cross, gc_w)
 #endif
         do idx2 = lo, hi
           if (use_color) then
@@ -2681,7 +2665,13 @@ contains
           if (.not. act_int(idx)) cycle
 
           ! Use mesh-precomputed gc (consistent with gradient and viscous operators).
-          cross = nonortho_cross_flux(gp(:, o), gp(:, nb), cross_owner_weight(f_mesh, n_int, gcs, pgcs), k_int(:, idx))
+          ! Owner weight inline: array pointers passed into a device routine would carry host addresses.
+          if (f_mesh > n_int) then
+            gc_w = pgcs(f_mesh - n_int)
+          else
+            gc_w = gcs(f_mesh)
+          end if
+          cross = nonortho_cross_flux(gp(:, o), gp(:, nb), gc_w, k_int(:, idx))
           rhs_p(o)  = rhs_p(o)  + cross
           if (nb <= nc) rhs_p(nb) = rhs_p(nb) - cross
         end do
@@ -2797,7 +2787,11 @@ contains
       if (act_int(idx)) then
         ! Use precomputed projection-based gc (FPS Sect. 7.2) - consistent with
         ! the gradient, advection, and viscous operators.
-        gc = cross_owner_weight(f_mesh, n_int, gcs, pgcs)
+        if (f_mesh > n_int) then
+          gc = pgcs(f_mesh - n_int)
+        else
+          gc = gcs(f_mesh)
+        end if
         cross = nonortho_cross_flux(gp(:, o), gp(:, nb), gc, k_int(:, idx))
         ff(f_mesh) = ff(f_mesh) - dt * cross
       end if
@@ -2938,6 +2932,7 @@ contains
     gp => self%w_gp
     gpc => self%w_gp_cell
     U => self%U
+    Tcell => self%T  ! read by the wall pre-correction; a data-region member so it is also present before to_device
 
     use_color = (self%psolver%n_colors > 0 .and. allocated(self%psolver%idx_color_perm) &
                  .and. allocated(self%psolver%color_offsets))
@@ -2948,7 +2943,7 @@ contains
       perm => fmi  ! placeholder, unused when not colored (idx is taken directly)
     end if
 
-    !$acc data copyin(p, gp) copy(gpc, U)
+    !$acc data copyin(p, gp, Tcell) copy(gpc, U)
     !$acc parallel loop default(present)
     do c = 1, nc
       gpc(1, c) = 0.0_rp
@@ -2990,7 +2985,11 @@ contains
         g_f   = coeff * (p(nb) - p(o))
         if (do_cross) then
           if (act_int(idx)) then
-            gc  = cross_owner_weight(f_mesh, n_int, gcs, pgcs)
+            if (f_mesh > n_int) then
+              gc = pgcs(f_mesh - n_int)
+            else
+              gc = gcs(f_mesh)
+            end if
             g_f = g_f + nonortho_cross_flux(gp(:, o), gp(:, nb), gc, k_int(:, idx))
           end if
         end if
@@ -3058,7 +3057,6 @@ contains
       if (self%params%boussinesq) bous_beta = self%params%beta
       gvec_b = self%params%g
       t_ref_b = self%params%T_ref
-      Tcell => self%T
       !$acc parallel loop default(present) copyin(fb, gvec_b) &
       !$acc      private(f_bnd, f_glob, o, q, fn_wall, g1, g2, g3, d1, d2, d3)
       do ib = 1, n_nper

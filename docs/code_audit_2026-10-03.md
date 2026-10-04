@@ -28,6 +28,7 @@ Status legend: **[confirmed]** = traced in code (and/or evidence); **[suspected]
 - `t_end` is now hit exactly (the last step is shortened) and a CFL-clamped `write_time` step is no longer written twice.
 - `copy_solver_params` is an intrinsic assignment (the hand-kept field count compared constants and could never fail).
 - `mesh_destroy` frees the SoA mirrors and colouring on host builds.
+- GPU build audit (OpenACC + CUDA, two RTX A6000): the non-orthogonal cross-flux kernels called a helper taking pointer arrays inside an `acc routine seq` (illegal device address, `pdrop`/`hydro`/`hydrowall`/`inflow*`); the owner weight is now inlined. `Tcell` was missing from the data clause of the wall pre-correction (present-table error at the first projection). With both fixed all regression cases pass at np=1,2 on GPU, `inflow` also with `DOPAMINE_GPU_AWARE_MPI=0`, and tgv/inflow/channel at np=4 on 2 GPUs. Multi-node and timing were not run.
 - `noise_seed` makes the initial noise reproducible; radius-0 scalar sources and unreadable source/sampling files now warn.
 - The mesh-quality report counts processor faces once; the divergence scratch array is on the heap; the MOST wall heat flux is skipped when T is not solved.
 - Left alone on purpose: `ksp_max_iterations = max(p_max_iter, 2000)` (a floor that guards AMG robustness), `foam bc_type_to_id` defaults (only used for patches missing from the input, which already warn), int32 mesh headers, and the O(n^2) sampling set-up.
