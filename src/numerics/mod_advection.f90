@@ -214,7 +214,7 @@ contains
         patch_id = msh%faces(f)%patch_id
         if (patch_id >= 1 .and. patch_id <= msh%n_patches) then
           if (msh%patches(patch_id)%bc_id == BC_PERIODIC) then
-            ! F5: nb_per resolved earlier in this face iteration; reuse.
+            ! nb_per resolved earlier in this face iteration; reuse.
             if (nb_per >= 1 .and. nb_per <= size(phi)) then
               phi_f = 0.5_rp * (phi(o) + phi(nb_per))
             else if (present(phi_bnd)) then
@@ -950,7 +950,7 @@ contains
           patch_id = msh%faces(f)%patch_id
           if (patch_id >= 1 .and. patch_id <= msh%n_patches) then
             if (msh%patches(patch_id)%bc_id == BC_PERIODIC) then
-              ! F5: nb_per was already resolved above for this face; reuse.
+              ! nb_per was already resolved above for this face; reuse.
               if (nb_per >= 1 .and. nb_per <= size(U, 2)) then
                 phi_f = 0.5_rp * (U(k, o) + U(k, nb_per))
               else if (present(U_bnd)) then

@@ -197,9 +197,8 @@ nudging flags is the precedent (see "Enabling ABL Features" in
 - Commit messages: short, no long bodies. One
   line stating what changed and, if not obvious, why.
 - Prefer focused commits over one commit mixing a numerics change with
-  unrelated cleanup — it keeps `git blame` and future audits (like the
-  code-review memory entries tracked for this project) attributable to a
-  single change.
+  unrelated cleanup — it keeps `git blame` and bisection attributable to
+  a single change.
 - The repository carries `main` alongside topic branches such as `PETSc-GPU`;
   check `git log --oneline -5` and the branch name before assuming which
   capabilities are present.

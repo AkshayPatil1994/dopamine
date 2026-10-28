@@ -149,7 +149,7 @@ contains
 
     ! Audit periodic mapping (single-rank and MPI modes); prefers msh%periodic_neighbor.
     if (present(bc_configs)) then
-      call audit_periodic_consistency(msh, bc_configs)
+      call check_periodic_consistency(msh, bc_configs)
     end if
 
     n_periodic_edges = 0
@@ -506,7 +506,7 @@ contains
     deallocate(face_color, cell_color_used, counts)
   end subroutine build_psolver_face_coloring
 
-  subroutine audit_periodic_consistency(msh, bc_configs)
+  subroutine check_periodic_consistency(msh, bc_configs)
     type(Mesh),      intent(in) :: msh
     type(BCConfig),  intent(in) :: bc_configs(:)
 
@@ -606,7 +606,7 @@ contains
 
     if (msh%rank == 0) then
       write(*,'(A,I0,A,I0,A,I0,A,I0,A,I0,A,I0,A,I0,A,I0)') &
-        ' Periodic consistency audit: faces=', g_faces, ', resolved=', g_resolved, &
+        ' Periodic consistency check: faces=', g_faces, ', resolved=', g_resolved, &
         ', unresolved=', g_unresolved, ', neighbor_oob=', g_neighbor_oob, &
         ', pair_oob=', g_pair_oob, ', self_pair=', g_self_pair, &
         ', reciprocity_mismatch=', g_recip_mismatch, ', nb_cell_oob=', g_nb_cell_oob
@@ -614,9 +614,9 @@ contains
 
     if (g_unresolved > 0 .or. g_self_pair > 0 .or. g_neighbor_oob > 0 .or. &
         g_pair_oob > 0 .or. g_recip_mismatch > 0 .or. g_nb_cell_oob > 0) then
-      error stop 'audit_periodic_consistency: invalid periodic mapping detected'
+      error stop 'check_periodic_consistency: invalid periodic mapping detected'
     end if
-  end subroutine audit_periodic_consistency
+  end subroutine check_periodic_consistency
 
   subroutine pressure_solver_solve(handle, rhs, p, tol, max_iter, n_iter, residual, atol_in, on_device, p_is_total)
     type(pressure_solver_handle_t), intent(inout), target :: handle

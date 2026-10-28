@@ -366,12 +366,12 @@ contains
     self%w_flux_built = .false.
     allocate(self%w_gp(3, nc+ng), source=0.0_rp)
     if (msh%nranks > 1) then
-      ! F2: pre-allocate the gradient halo pack buffer once. 9 components
+      ! Pre-allocate the gradient halo pack buffer once. 9 components
       ! for grad_U (3x3) + 3 for grad_T + 3*n_scalars for grad_C.
       allocate(self%w_pack_grad(9 + 3 + 3*params%n_scalars, nc+ng))
     end if
     if (trim(params%gradient_scheme) == 'GREEN_GAUSS' .and. params%gg_iterations > 1) then
-      ! F3: persistent previous-gradient scratch for GG skewness sweeps.
+      ! Persistent previous-gradient scratch for GG skewness sweeps.
       allocate(self%w_g_prev_U(3, 3, nc+ng))
       allocate(self%w_g_prev_T(3, nc+ng))
       allocate(self%w_gp_prev(3, nc+ng), source=0.0_rp)
@@ -1047,7 +1047,7 @@ contains
         ! Exchange halos so ghost-cell gradients from the previous sweep are
         ! valid before building the skewness correction for this sweep.
         call exchange_grad_halos(self)
-        ! F3: reuse persistent buffers (allocated in solver_init).
+        ! Reuse persistent buffers (allocated in solver_init).
         !$acc parallel loop collapse(3) default(present)
         do c = 1, ntot
           do j = 1, 3
@@ -3899,7 +3899,7 @@ contains
       p_iters_per_solve_local = 0.0_rp
     end if
 
-    ! F7: pack 7 MAX-reduce values + 6 SUM-reduce values into 2 Allreduces
+    ! Pack 7 MAX-reduce values + 6 SUM-reduce values into 2 Allreduces
     ! (was 13 separate Allreduce calls).
     block
       real(rp) :: max_in(8), max_out(8), sum_in(7), sum_out(7)
@@ -4059,7 +4059,7 @@ contains
     call cell_velocity_divergence(self, div_u(1:nc))
 
     ! Flag every cell that has at least one refinement-interface face, to separate
-    ! this session's original suspect (refine faces) from an unrelated bad cell.
+    ! refine-interface faces from an unrelated bad cell.
     allocate(cell_touches_refine(nc), source=.false.)
     do f = 1, self%mesh%n_faces
       if (.not. self%mesh%faces(f)%is_refine) cycle

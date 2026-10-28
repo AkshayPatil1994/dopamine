@@ -159,7 +159,7 @@ module mod_mesh
     !> present (callers also exchange host-only scratch, e.g. filter set-up and sampling).
     logical                    :: halo_xfer_dev = .false.
 
-    ! -- F9: face coloring for thread-safe parallel face accumulation.
+    ! -- Face coloring for thread-safe parallel face accumulation.
     ! face_color_perm(:) is a permutation of 1..n_faces grouped by color so
     integer(ip)              :: n_colors = 0
     integer(ip), allocatable :: color_offsets(:)  ! size n_colors+1
@@ -262,7 +262,7 @@ contains
     deallocate(degree)
   end subroutine mesh_build_connectivity
 
-  !> F9: build a greedy face coloring for thread-safe accumulation.
+  !> Build a greedy face coloring for thread-safe accumulation.
   !> Two faces may share a color iff they have no common cell (owner/nb).
   subroutine mesh_build_face_coloring(self)
     class(Mesh), intent(inout) :: self

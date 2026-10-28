@@ -746,7 +746,7 @@ endif()
 
 # ============================================================================
 # Interprocedural/link-time optimization (opt-in; untried, benchmark before
-# defaulting on -- see the CPU performance audit notes)
+# defaulting on)
 # ============================================================================
 if(DOPAMINE_ENABLE_LTO)
   include(CheckIPOSupported)
