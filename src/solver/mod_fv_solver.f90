@@ -3598,7 +3598,7 @@ contains
     integer(ip) :: f, o, nb, ierr, nc, ntot, nf, n_patches, patch_id, bc_id
     real(rp)    :: cfl_max_local, cfl_max_global
     real(rp)    :: diff_max_local, diff_max_global, nu_eff, area, w, gc
-    real(rp)    :: dt_min, safety_factor, dt_conv, dt_diff
+    real(rp)    :: dt_min, dt_conv, dt_diff
     real(rp)    :: u_face_use, sf1, sf2, sf3, nu_mol
     logical     :: have_uface, dev
     real(rp), parameter :: diff_cfl_limit = 1.0_rp
@@ -3743,14 +3743,13 @@ contains
       diff_max_global = red_global(2)
     end block
 
-    ! Compute convective and diffusive dt limits, then apply safety margin.
-    safety_factor = 0.8_rp
+    ! Convective and diffusive dt limits; cfl_max and diff_cfl_limit are the margins, no extra safety factor.
     dt_conv = huge(1.0_rp)
     dt_diff = huge(1.0_rp)
     if (cfl_max_global > SMALL) dt_conv = self%params%cfl_max / cfl_max_global
     if (diff_max_global > SMALL) dt_diff = diff_cfl_limit / diff_max_global
 
-    dt = safety_factor * min(dt_conv, dt_diff)
+    dt = min(dt_conv, dt_diff)
     if (.not. (dt > 0.0_rp)) dt = self%params%dt
 
     ! Keep adaptive dt in a numerically safe range (both upper and lower bounds)
