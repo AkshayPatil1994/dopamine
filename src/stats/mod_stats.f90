@@ -25,7 +25,6 @@ module mod_stats
     integer(ip)   :: file_unit = -1
     real(rp)      :: E0_ref = -1.0_rp
     real(rp)      :: t_last = 0.0_rp     ! wall time of the last screen row (or of the loop start)
-    integer(ip)   :: step_last = 0       ! step of that row
   end type StatsCollector
 
 contains
@@ -153,16 +152,14 @@ contains
   end subroutine stats_prepare_restart
 
   !> Start the wall-clock interval of the screen monitor; call right before the time loop (also on restart).
-  subroutine stats_mark_start(stats, step)
+  subroutine stats_mark_start(stats)
     type(StatsCollector), intent(inout) :: stats
-    integer(ip),          intent(in)    :: step
 
     stats%t_last = wall_clock_seconds()
-    stats%step_last = step
   end subroutine stats_mark_start
 
   !> Sample statistics and write to screen (+ CSV unless write_csv is false).
-  !> Each screen row reports the wall time per step since the previous row; a row on which a 3D field was
+  !> Each screen row reports the wall time elapsed since the previous row; a row on which a 3D field was
   !> written carries a '| 3D output saved' note, and that write is included in its wall time.
   subroutine stats_sample(stats, solver, time, step, rank, E0, dt, output_written, write_csv)
     type(StatsCollector), intent(inout) :: stats
@@ -180,7 +177,7 @@ contains
     real(rp) :: ubulk, tauw_mean, cf_bulk, nu_sgs_mean, sgs_to_mol
     real(rp) :: E_norm, eps_ref, E0_val, dt_val
     character(len=24) :: output_tag
-    real(rp) :: t_now, wall_per_step
+    real(rp) :: t_now, wall_elapsed
     logical  :: do_csv
 
     ! One cell/boundary pass builds every partial sum, settled by a single SUM- and MAX-Allreduce (was 6 separate collectives).
@@ -219,9 +216,8 @@ contains
     if (rank /= 0) return
 
     t_now = wall_clock_seconds()
-    wall_per_step = (t_now - stats%t_last) / real(max(step - stats%step_last, 1_ip), rp)
+    wall_elapsed = t_now - stats%t_last
     stats%t_last = t_now
-    stats%step_last = step
 
     ! ---- screen output -------------------------------------------------------
     if (.not. stats%header_written) then
@@ -230,16 +226,16 @@ contains
       write(*, '(A)') right_header_col('step', 8) // right_header_col('dt', 10) // &
                       right_header_col('time', 14) // right_header_col('CFL', 14) // &
                       right_header_col('max|U|', 14) // right_header_col('max|divU|', 14) // &
-                      right_header_col('<|divU|>V', 14) // right_header_col('wall s/step', 18)
+                      right_header_col('<|divU|>V', 14) // right_header_col('wall [s]', 18)
       write(*, '(A)') repeat('-', 106)
       stats%header_written = .true.
     end if
 
     if (present(dt)) then
-      write(*, '(I8,ES10.3,5ES14.6,F14.4,A)') step, dt, time, cfl, umax, max_div, abs_div, wall_per_step, &
+      write(*, '(I8,ES10.3,5ES14.6,F14.4,A)') step, dt, time, cfl, umax, max_div, abs_div, wall_elapsed, &
         trim(output_tag)
     else
-      write(*, '(I8,A10,5ES14.6,F14.4,A)') step, '-', time, cfl, umax, max_div, abs_div, wall_per_step, &
+      write(*, '(I8,A10,5ES14.6,F14.4,A)') step, '-', time, cfl, umax, max_div, abs_div, wall_elapsed, &
         trim(output_tag)
     end if
 

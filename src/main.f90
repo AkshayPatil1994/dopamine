@@ -366,7 +366,7 @@ program dopamine_main
   call solver%to_device(gpu_aware_mpi=device_mpi_gpu_aware)
 
   if (rank == 0) write(*, '(A)') ' Starting time loop...'
-  call stats_mark_start(stats, restart_step)
+  call stats_mark_start(stats)
   call MPI_Barrier(MPI_COMM_WORLD, ierr)  ! Synchronize all ranks before time loop
 
   dt = config%params%dt
