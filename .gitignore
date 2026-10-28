@@ -22,6 +22,7 @@ docs/build/
 *.nc
 *.xmf
 *.csv
+!tests/regression/reference/*.csv
 
 # IDE and editor files
 .vscode/

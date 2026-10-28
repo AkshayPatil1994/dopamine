@@ -1,3 +1,6 @@
+! SPDX-FileCopyrightText: 2026 DOPAMINE contributors
+! SPDX-License-Identifier: AGPL-3.0-only
+
 !> mod_mesh_validate
 !> Cross-rank consistency self-tests for the local Mesh. Run once at startup
 module mod_mesh_validate

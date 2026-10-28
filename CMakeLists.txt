@@ -837,7 +837,7 @@ add_custom_target(cleanall
 # ============================================================================
 # Install
 # ============================================================================
-install(TARGETS dopamine dopamine-decompose dopamine-checkpoint-partition RUNTIME DESTINATION bin)
+install(TARGETS dopamine dopamine-decompose dopamine-checkpoint-partition dopamine-inflow-gen RUNTIME DESTINATION bin)
 install(TARGETS dopamine_lib ARCHIVE DESTINATION lib)
 install(DIRECTORY src/ DESTINATION include/dopamine
         FILES_MATCHING PATTERN "*.f90" PATTERN "*.hpp")
