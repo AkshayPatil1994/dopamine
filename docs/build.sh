@@ -26,8 +26,17 @@ strip_front_matter() {
   awk 'BEGIN{n=0} /^---$/{n++; if(n<=2) next} {if(n>=2) print}' "$1"
 }
 
+# Jekyll uses $$..$$ for inline math (pandoc reads it as display math) and
+# {{ site.baseurl }} in asset paths; rewrite both for the PDF/HTML build.
+jekyll_to_pandoc() {
+  perl -pe '
+    s/\{\{ site\.baseurl \}\}\///g;
+    unless (/^\s*\$\$.*\$\$\s*$/ && (() = /\$\$/g) == 2) { s/\$\$(.+?)\$\$/\$$1\$/g }
+  '
+}
+
 for page in installation usage preprocessing input-reference theory examples tools development; do
-  strip_front_matter "$ROOT_DIR/$page.md" >> "$TMP_MD"
+  strip_front_matter "$ROOT_DIR/$page.md" | jekyll_to_pandoc >> "$TMP_MD"
   printf "\n\n" >> "$TMP_MD"
 done
 
@@ -50,6 +59,7 @@ pandoc "$TMP_MD" \
   --mathjax \
   --toc \
   --toc-depth=3 \
+  --resource-path "$ROOT_DIR" \
   --bibliography "$ROOT_DIR/references.bib" \
   --citeproc \
   "${CSL_ARGS[@]}" \
@@ -61,10 +71,13 @@ pandoc "$TMP_MD" \
   --to pdf \
   --toc \
   --toc-depth=3 \
+  --resource-path "$ROOT_DIR" \
   --bibliography "$ROOT_DIR/references.bib" \
   --citeproc \
   "${CSL_ARGS[@]}" \
   --pdf-engine=lualatex \
+  --lua-filter "$ROOT_DIR/pdf-code-wrap.lua" \
+  --include-in-header "$ROOT_DIR/pdf-header.tex" \
   -V mainfont="DejaVu Serif" \
   -V monofont="DejaVu Sans Mono" \
   -V monofontoptions=Scale=0.85 \

@@ -41,6 +41,7 @@ contents.
 - `build.sh`: Concatenates installation, usage, pre-processing, input
   reference, theory, examples, tools and development pages (front matter stripped) behind a single title block, then renders HTML and
   PDF with table of contents and citation processing via Pandoc.
+- `pdf-code-wrap.lua`, `pdf-header.tex`: PDF-only helpers that let inline code and code blocks wrap.
 - `_config.yml`, `_includes/head_custom.html`: Jekyll/just-the-docs
   configuration for the GitHub Pages site (theme, nav, search, MathJax).
 
@@ -57,8 +58,10 @@ Outputs:
 - `docs/build/dopamine_manual.html`
 - `docs/build/dopamine_manual.pdf`
 
-Requires `pandoc`, and `lualatex` (e.g. from a TeX Live install) for the PDF
-target.
+Requires `pandoc`, and `lualatex` with the `fvextra` package (e.g. from a TeX
+Live install) for the PDF target. The build rewrites Jekyll-only syntax
+(`$$..$$` inline math, `{{ site.baseurl }}` paths) for Pandoc; the page sources
+are left untouched.
 
 ## Preview the GitHub Pages site locally
 

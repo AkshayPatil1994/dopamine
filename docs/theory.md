@@ -53,7 +53,7 @@ exchange for ghost states.
 
 ### Explicit transport updates
 
-The explicit transport integrator is `TIME_RK3W`: Wray low-storage third-order Runge-Kutta (Williamson 1980) [@williamson1980].
+The explicit transport integrator is `TIME_RK3W`: Wray low-storage third-order Runge-Kutta [@williamson1980].
 
 $$
 \begin{aligned}
@@ -453,6 +453,7 @@ Where $$z_{0h}$$ is not prescribed it follows from $$z_{0m}$$ via the inverse
 Stanton number, $$\mathrm{k}B^{-1} = \ln(z_{0m}/z_{0h}) \approx 2$$.
 
 **Advantages:**
+
 - Single-layer model: no need for synthetic wall-resolved cells
 - Full thermodynamic coupling: temperature-dependent stability corrections
 - Dynamic Obukhov length: self-adjusts to local stratification state, per face
@@ -577,8 +578,10 @@ spacing $$\Delta t_p$$ and replayed with Taylor's hypothesis, i.e. the plane is 
 period $$m$$ uses a randomly chosen stored segment $$k_m$$ shifted by $$s_m$$ nodes,
 
 $$
-\mathbf{u}'(y,z,t) = \sin\theta\;\mathbf{u}_{k_m}(y+s_m\Delta y,\,z,\,t-mP) + \cos\theta\;\mathbf{u}_{k_{m-1}}(y+s_{m-1}\Delta y,\,z,\,t-mP+P),
-\quad \theta=\frac{\pi}{2}\frac{t-mP}{T_x}\ (t-mP<T_x),
+\begin{gathered}
+\mathbf{u}'(y,z,t) = \sin\theta\;\mathbf{u}_{k_m}(y+s_m\Delta y,\,z,\,t-mP) + \cos\theta\;\mathbf{u}_{k_{m-1}}(y+s_{m-1}\Delta y,\,z,\,t-mP+P),\\
+\theta=\frac{\pi}{2}\frac{t-mP}{T_x}\ (t-mP<T_x),
+\end{gathered}
 $$
 
 with $$P = T_{seg}-T_x$$ and $$s_m=\lfloor \mathrm{frac}(\varphi_0 + m/\phi)\,N_y\rfloor$$ ($$\phi$$ the golden ratio).
@@ -621,6 +624,7 @@ user-specified height $$z_{start}$$, permitting localized LES evolution
 in the lower layers while coupling to synoptic-scale motion above.
 
 **Integration:**
+
 - MOST fluxes are computed once per RK stage and used directly as source terms
 - SEM fluctuations are added to inlet boundary conditions
 - Nudging source is integrated into the explicit RHS at each step
@@ -657,6 +661,7 @@ cell count at 1024 ranks, and a bulk-synchronous step is paced by its slowest
 rank.
 
 **Advantages:**
+
 - Single-pass, non-iterative algorithm with O(n log n) time complexity
 - Memory-efficient: no global graph construction, unlike multilevel graph partitioners
 - Scalable to very large rank counts (tested up to >1,000 ranks)
