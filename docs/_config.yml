@@ -10,8 +10,8 @@
 title: DOPAMINE
 description: >-
   DOPAMINE — Discrete Operator-based Parallel Algorithm for Modeling
-  Incompressible Navier-Stokes Equations. Theory, usage, and development
-  documentation.
+  Incompressible Navier-Stokes Equations. Installation, usage, input
+  reference, theory, and development documentation.
 url: "https://akshaypatil1994.github.io"
 baseurl: "/dopamine"
 
@@ -51,7 +51,6 @@ defaults:
 exclude:
   - build/
   - build.sh
-  - build_manual_tmp.md
   - references.bib
   - external-lib-guidance/
   - manual.md

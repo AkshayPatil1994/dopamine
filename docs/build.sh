@@ -10,9 +10,8 @@ TMP_MD="$BUILD_DIR/dopamine_manual_tmp.md"
 # Compose manual from sections in deterministic order.
 cat > "$TMP_MD" <<'EOF'
 ---
-title: "DOPAMINE: Usage and Implemented Theory"
+title: "DOPAMINE: User and Developer Manual"
 author: "DOPAMINE Project"
-date: "2026-04-05"
 link-citations: true
 numbersections: true
 reference-section-title: "References"
@@ -27,11 +26,10 @@ strip_front_matter() {
   awk 'BEGIN{n=0} /^---$/{n++; if(n<=2) next} {if(n>=2) print}' "$1"
 }
 
-strip_front_matter "$ROOT_DIR/usage.md" >> "$TMP_MD"
-printf "\n\n" >> "$TMP_MD"
-strip_front_matter "$ROOT_DIR/theory.md" >> "$TMP_MD"
-printf "\n\n" >> "$TMP_MD"
-strip_front_matter "$ROOT_DIR/development.md" >> "$TMP_MD"
+for page in installation usage preprocessing input-reference theory examples tools development; do
+  strip_front_matter "$ROOT_DIR/$page.md" >> "$TMP_MD"
+  printf "\n\n" >> "$TMP_MD"
+done
 
 CSL_FILE=""
 if [[ -f /usr/share/pandoc/data/csl/ieee.csl ]]; then
@@ -55,7 +53,7 @@ pandoc "$TMP_MD" \
   --bibliography "$ROOT_DIR/references.bib" \
   --citeproc \
   "${CSL_ARGS[@]}" \
-  --metadata title="DOPAMINE: Usage and Implemented Theory" \
+  --metadata title="DOPAMINE: User and Developer Manual" \
   --output "$BUILD_DIR/dopamine_manual.html"
 
 pandoc "$TMP_MD" \

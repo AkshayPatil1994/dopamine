@@ -11,20 +11,26 @@ published in two independent ways from the same source files:
    [just-the-docs](https://just-the-docs.com) theme (`_config.yml`).
 2. **A standalone PDF/HTML manual**, built locally with Pandoc (`build.sh`).
 
-Both outputs are generated from the same three pages, so a heading added to
+Both outputs are generated from the same pages, so a heading added to
 one of them shows up in both the Pages sidebar and the manual's table of
 contents.
 
 ## Files
 
-- `index.md`: GitHub Pages home page (not included in the Pandoc manual).
+- `index.md`: GitHub Pages home page and task-to-page router (not in the Pandoc manual).
+- `installation.md`: Dependencies, CPU/PETSc/offline/CUDA/OpenACC builds, verification, troubleshooting.
+- `input-reference.md`: Every input namelist parameter with default, units and meaning.
+- `preprocessing.md`: Boundary patch names, mesh formats, direct vs. pre-decomposed meshes, `dopamine-decompose`.
+- `examples.md`: Overview of the example cases and the regression suite.
+- `tools.md`: Executables and helper scripts.
+- `references.md`: Bibliography page (Pages only).
 - `theory.md`: Governing equations, time integration, advection/gradient/
   diffusion methods, SGS/wall modeling, atmospheric boundary layer (MOST,
   SEM, Davies relaxation), mesh partitioning, and pressure backend details
   with method-specific citations.
-- `usage.md`: Build/run workflow, input structure, advection naming,
-  recommended numerics, ABL setup (MOST wall model, SEM inflow, nudging),
-  and long-time stability checks.
+- `usage.md`: Running, restart, GPU runs, boundary condition types, outputs,
+  advection naming, recommended numerics, ABL setup (MOST wall model, SEM
+  inflow, nudging), and long-time stability checks.
 - `development.md`: Code layout, build system internals, testing, coding
   style, how to add a scheme/BC/ABL feature, git workflow, and how to report
   bugs.
@@ -32,8 +38,8 @@ contents.
   actual manual content is assembled directly by `build.sh` (see below), not
   by processing this file.
 - `references.bib`: DOI-backed bibliography used by Pandoc citeproc.
-- `build.sh`: Concatenates `usage.md` + `theory.md` + `development.md`
-  (front matter stripped) behind a single title block, then renders HTML and
+- `build.sh`: Concatenates installation, usage, pre-processing, input
+  reference, theory, examples, tools and development pages (front matter stripped) behind a single title block, then renders HTML and
   PDF with table of contents and citation processing via Pandoc.
 - `_config.yml`, `_includes/head_custom.html`: Jekyll/just-the-docs
   configuration for the GitHub Pages site (theme, nav, search, MathJax).

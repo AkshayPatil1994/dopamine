@@ -1,6 +1,6 @@
 ---
 title: Input Reference
-nav_order: 3
+nav_order: 4
 ---
 
 <!-- SPDX-FileCopyrightText: 2026 DOPAMINE contributors -->
@@ -54,7 +54,7 @@ parameter is omitted. Values written in `reference.input` are example values and
 
 ## &dopamine_domain
 
-Mesh location and reader. See [Usage: Choosing a mesh path](usage.md#choosing-a-mesh-path).
+Mesh location and reader. See [Pre-processing: Choosing a mesh path](preprocessing.md#choosing-a-mesh-path).
 
 | Parameter | Default | Meaning / how to use |
 |---|---|---|
@@ -415,7 +415,7 @@ Time-resolved sampling of fields along analytic or file-defined geometry. Up to 
 | Case | Parameters to set |
 |---|---|
 | Periodic DNS (Taylor-Green) | `use_sgs = .false.`, `advection_scheme = 'KEP'`, `ic_type = 'taylor_green'`, all patches `periodic` |
-| Wall-modelled channel LES | `sgs_model = 'AMD'` or `'VREMAN'`, `wall_model = 'loglaw'`, `constant_mass_flux_forcing = .true.` with `Ux_constant`, `wallModel` walls, `periodic` x and y |
+| Wall-modelled channel LES | `sgs_model = 'AMD'` or `'VREMAN'`, `wall_model = 'loglaw'`, `fx` (u_tau drive) or `constant_mass_flux_forcing = .true.` with `Ux_constant`, `wallModel` walls, `periodic` x and y |
 | Neutral ABL over roughness | `wall_model = 'most'`, `z0_m`, `u_ref`, `z_ref`, `ablInlet` patch with `use_sem = .true.`, `outlet` patch |
 | Stratified ABL | as above plus `boussinesq = .true.`, `gz = -9.80665`, `T_surface`, `compute_L = .true.` |
 | Large-scale forced ABL | add `use_nudging = .true.`, `nudging_file`, `nudging_tau`, `nudging_z_start` |

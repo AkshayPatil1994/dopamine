@@ -1,6 +1,6 @@
 ---
 title: Development
-nav_order: 5
+nav_order: 9
 ---
 
 <!-- SPDX-FileCopyrightText: 2026 DOPAMINE contributors -->
@@ -46,7 +46,7 @@ reader can see the contract before the implementation.
 
 CMake drives everything, including fetching and building PETSc, hypre,
 METIS/GKlib, and NetCDF when not found on the system
-(`-DDOPAMINE_FETCH_PETSC=ON`, etc. — see [usage.md](usage.md#build) for the
+(`-DDOPAMINE_FETCH_PETSC=ON`, etc. — see [installation.md](installation.md) for the
 full flag list, offline/HPC builds, and the PETSc standalone recipe). Two
 points that matter during development:
 
@@ -57,7 +57,7 @@ points that matter during development:
   rebuilding PETSc from scratch costs minutes.
 - The CUDA (`build-gpu/`) and OpenACC (`build-acc26/`) paths use
   separate build/external directories so they don't disturb a CPU build
-  sharing the same source tree. Follow [usage.md](usage.md#gpu-cuda-build)'s
+  sharing the same source tree. Follow [installation.md](installation.md#gpu-cuda-build)'s
   "GPU (CUDA) build" / "OpenACC (nvfortran) build" sections rather than
   reusing `build/`.
 
@@ -239,7 +239,7 @@ producing a single PDF/HTML manual via Pandoc — see
 [docs/README.md](README.md)) and published as a GitHub Pages site directly
 from the `docs/` folder (Jekyll + [just-the-docs](https://just-the-docs.com),
 configured in `docs/_config.yml`). When you add a new `##`-level section to
-theory.md, usage.md, or this file, no extra step is needed for either output:
+any page, no extra step is needed for either output:
 Pandoc's `--toc` and just-the-docs' page nav both derive structure from
 heading levels and each page's `nav_order` front matter.
 
