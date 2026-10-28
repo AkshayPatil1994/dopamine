@@ -65,6 +65,9 @@ pandoc "$TMP_MD" \
   --citeproc \
   "${CSL_ARGS[@]}" \
   --pdf-engine=lualatex \
+  -V mainfont="DejaVu Serif" \
+  -V monofont="DejaVu Sans Mono" \
+  -V monofontoptions=Scale=0.85 \
   --output "$BUILD_DIR/dopamine_manual.pdf"
 
 echo "Generated:"

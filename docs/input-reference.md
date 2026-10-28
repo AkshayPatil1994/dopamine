@@ -57,7 +57,7 @@ parameter is omitted. Values written in `reference.input` are example values and
 Mesh location and reader. See [Pre-processing: Choosing a mesh path](preprocessing.md#choosing-a-mesh-path).
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `mesh_file` | `required` | `gmsh`: path to the `.msh` file. `openfoam`: path to the `polyMesh` directory. `preprocessed`: directory written by `dopamine-decompose`. |
 | `mesh_type` | `'gmsh'` | `'gmsh'`, `'openfoam'` (alias `'foam'`), or `'preprocessed'`. `preprocessed` must be run with exactly the rank count it was decomposed for. An unrecognised value prints a warning and aborts at mesh read. |
 
@@ -68,7 +68,7 @@ Discretisation, time stepping, pressure solve and SGS model. Theory: [theory.md]
 ### Advection
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `advection_scheme` | `'CENTRAL'` | Momentum advection. `'CENTRAL'`/`'CDS'` lowest dissipation; `'KEP'`/`'SKEW'` kinetic-energy preserving (preferred for LES); `'QUICK'` quadratic upwind, unlimited; `'KOREN_TVD'`, `'VANLEER_TVD'` bounded MUSCL. |
 | `temperature_scheme` | `'VANLEER_TVD'` | Temperature advection: `'KOREN_TVD'`, `'VANLEER_TVD'`, `'QUICK'`, `'CDS'`/`'CENTRAL'`. Only active when `boussinesq = .true.`. |
 | `use_skew_symmetric_advection` | `.false.` | Deprecated and ignored; set `advection_scheme = 'KEP'` instead. |
@@ -78,7 +78,7 @@ Discretisation, time stepping, pressure solve and SGS model. Theory: [theory.md]
 ### Time stepping
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `time_integrator` | `'RK3W'` | Wray low-storage RK3 (three stages, three pressure solves). The only integrator. |
 | `time_scheme` | `'RK3W'` | Legacy alias of `time_integrator`; do not use in new inputs. |
 | `dt` | `1.0e-3` s | Time step. With `adapt_dt = .true.` it is a **ceiling**: the step is `min(dt_cfl, dt)`, so too small a value defeats adaptive stepping. |
@@ -90,7 +90,7 @@ Discretisation, time stepping, pressure solve and SGS model. Theory: [theory.md]
 ### Pressure projection
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `pressure_solver` | `'boomeramg'` | `'boomeramg'` (hypre AMG; needs PETSc built with hypre) or `'gamg'` (PETSc native AMG). Tune further with [`&dopamine_PetscParams`](#dopamine_petscparams). |
 | `p_tol` | `1.0e-10` | Poisson relative residual tolerance. |
 | `p_max_iter` | `1000` | Maximum Krylov iterations per solve. |
@@ -101,7 +101,7 @@ Discretisation, time stepping, pressure solve and SGS model. Theory: [theory.md]
 ### Subgrid-scale model and wall-model filtering
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `use_sgs` | `.true.` | `.false.` runs without an SGS model (DNS). |
 | `sgs_model` | `'VREMAN'` | `'VREMAN'`, `'SMAGORINSKY'` (Cs fixed at 0.1), `'DYNAMIC_SMAG'` (Germano-Lilly, local), `'AMD'` (anisotropic minimum dissipation). |
 | `c_amd` | `1/3` | AMD model constant. Only used by `sgs_model = 'AMD'`. |
@@ -113,7 +113,7 @@ Discretisation, time stepping, pressure solve and SGS model. Theory: [theory.md]
 ### Diagnostics
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `solver_stats_frequency` | `0` | Also accepted here; see [`&dopamine_stats`](#dopamine_stats) (that group wins if both are set). |
 | `calc_stats_frequency` | `0` | Same as above. |
 | `debug_diagnostics` | `.false.` | Verbose runtime diagnostics: projection-idempotency check, interface KE budget, worst-divergence cell report. |
@@ -123,7 +123,7 @@ Discretisation, time stepping, pressure solve and SGS model. Theory: [theory.md]
 Raw PETSc options injected into the PETSc options database before `KSPSetFromOptions`.
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `n_petsc_options` | `0` | Number of entries used in `petsc_options_tmp` (maximum 32). |
 | `petsc_options_tmp(i)` | none | One PETSc option string per entry, exactly as on the command line, e.g. `'-pc_hypre_boomeramg_strong_threshold 0.6'`. Multi-GPU settings: [Usage: Multi-GPU](usage.md#multi-gpu-one-mpi-rank-per-gpu). |
 
@@ -132,7 +132,7 @@ Raw PETSc options injected into the PETSc options database before `KSPSetFromOpt
 Cadence of the on-screen/CSV monitor and default cadence of the sampling objects. A value of `0` disables.
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `solver_stats_frequency` | `0` | Monitor row every N steps (screen and CSV). |
 | `calc_stats_frequency` | `0` | Fallback used when `solver_stats_frequency` is `0`. |
 | `slice_write_frequency` | `0` | Default write cadence of [sampling planes](#sampling-groups). |
@@ -145,7 +145,7 @@ Cadence of the on-screen/CSV monitor and default cadence of the sampling objects
 ## &dopamine_physics
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `nu` | `1.0e-5` m²/s | Kinematic viscosity. |
 | `alpha_T` | `1.4e-5` m²/s | Thermal diffusivity. |
 | `beta` | `3.4e-3` 1/K | Thermal expansion coefficient (Boussinesq). |
@@ -170,8 +170,8 @@ Workflow: [Usage: ABL module](usage.md#atmospheric-boundary-layer-abl-module).
 ### Wall model and surface
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
-| `wall_model` | `''` (`'loglaw'`) | Treatment on `wallModel` patches: `'loglaw'` smooth-wall (first cell in the log layer, y+ ≳ 30), `'most'` Monin-Obukhov rough/stratified (stops if the first-cell height ≤ `z0_m`), `'none'` no wall stress. When empty, `use_abl = .true.` selects `'most'`, otherwise `'loglaw'`. |
+|--------------------------|----------|------------------------------------------|
+| `wall_model` | `''` (`'loglaw'`) | Treatment on `wallModel` patches: `'loglaw'` smooth-wall (first cell in the log layer, y+ of about 30 or more), `'most'` Monin-Obukhov rough/stratified (stops if the first-cell height ≤ `z0_m`), `'none'` no wall stress. When empty, `use_abl = .true.` selects `'most'`, otherwise `'loglaw'`. |
 | `use_abl` | `.false.` | Legacy alias for `wall_model = 'most'` when `wall_model` is unset. Does not gate SEM or nudging. |
 | `u_ref` | `8.0` m/s | Reference wind speed at `z_ref`. |
 | `z_ref` | `100.0` m | Reference height of `u_ref`. |
@@ -186,7 +186,7 @@ Workflow: [Usage: ABL module](usage.md#atmospheric-boundary-layer-abl-module).
 ### Synthetic Eddy Method (inflow at `ablInlet` patches)
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `use_sem` | `.true.` | Generate inflow turbulence at `ablInlet` patches. |
 | `sem_type` | `'dfsem'` | `'dfsem'` divergence-free eddies with full Reynolds tensor; `'jarrin'` original tent-kernel SEM (not divergence-free). |
 | `n_eddies` | `500` | Eddies in the recycling box. Too few makes the field intermittent. |
@@ -203,7 +203,7 @@ Workflow: [Usage: ABL module](usage.md#atmospheric-boundary-layer-abl-module).
 ### Davies nudging
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `use_nudging` | `.false.` | Relax toward time-varying reference profiles. |
 | `nudging_file` | `''` | CSV (or netCDF) with rows `time, z, u, v, w, T`: all levels of one time, then the next. |
 | `nudging_tau` | `1800.0` s | Relaxation time scale; clamped internally for stability at the current `dt`. |
@@ -216,7 +216,7 @@ Workflow: [Usage: ABL module](usage.md#atmospheric-boundary-layer-abl-module).
 Source of inlet fluctuations at `ablInlet` patches. Details: [Usage: Inflow-plane databases](usage.md#inflow-plane-databases-precursor-and-successor).
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `inflow_source` | `'sem'` | `'sem'` online eddies (see `&dopamine_abl`) or `'planes'` replay of a pre-computed database (needs a spanwise-periodic domain). |
 | `inflow_file` | `''` | Database file for `'planes'`. |
 | `inflow_seed` | `1` | Seeds segment order and spanwise shifts; restarts reproduce the replay. |
@@ -229,7 +229,7 @@ Source of inlet fluctuations at `ablInlet` patches. Details: [Usage: Inflow-plan
 Read only by `dopamine-inflow-gen`; the eddy description comes from `&dopamine_abl`.
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `gen_file` | `'inflow_planes.nc'` | Output database. |
 | `gen_grid_file` | `''` | Plane grid exported by the solver (`inflow_export_grid`). If empty, define the grid below. |
 | `gen_W` | `0.0` m | Spanwise period. |
@@ -250,7 +250,7 @@ Read only by `dopamine-inflow-gen`; the eddy description comes from `&dopamine_a
 Precursor run: record a plane of cell centres into an inflow database.
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `record_enabled` | `.false.` | Enable recording. |
 | `record_file` | `'inflow_record.nc'` | Output database. |
 | `record_point` | `0 0 0` | A point on the recording plane. |
@@ -265,7 +265,7 @@ Precursor run: record a plane of cell centres into an inflow database.
 One entry per boundary patch; names must match the patch names in the mesh. Arrays are indexed by patch (maximum 32).
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `n_patches` | `0` | Number of entries used below. |
 | `patch_name(i)` | `''` | Boundary patch name from the mesh (gmsh physical group or OpenFOAM patch). |
 | `patch_type(i)` | `'zeroGradient'` | Boundary type, see the table below. |
@@ -281,7 +281,7 @@ One entry per boundary patch; names must match the patch names in the mesh. Arra
 `patch_type` aliases:
 
 | Aliases | Meaning |
-|---|---|
+|--------------|------------------------------------------------|
 | `velocity`, `inlet`, `fixedValue` | Velocity inlet (`patch_U`). |
 | `outlet`, `fixedPressure`, `outflow` | Pressure outlet (`patch_p`). |
 | `zeroGradient` | Zero gradient. |
@@ -296,7 +296,7 @@ One entry per boundary patch; names must match the patch names in the mesh. Arra
 ## &dopamine_initial_condition
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `ic_type` | `'uniform'` | Initial field: `'uniform'`, `'taylor_green'`, `'linear'`/`'channel_linear'`, `'parabolic'`/`'channel_parabolic'`/`'poiseuille'`, `'loglaw'`/`'channel_loglaw'`, `'boundary_layer'`/`'channel_boundary_layer'`, `'scalar_gauss'`/`'scalar_pulse'`. |
 | `ic_uref` | `1.0` m/s | Reference velocity for initialisations that need one. |
 | `ic_lref` | `0.0` m | Reference length for initialisations that need one. |
@@ -307,7 +307,7 @@ One entry per boundary patch; names must match the patch names in the mesh. Arra
 ## &dopamine_output
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `prefix` | `'dopamine'` | Prefix of the output files (XMF, NetCDF) and output directory. |
 | `write_interval` | `100` | Field output every N steps. Ignored when negative (see `write_time`). |
 | `write_time` | `0.0` s | Physical-time output cadence, active when `write_interval < 0` and `write_time > 0`. The step is snapped down (never up) to land on multiples. |
@@ -320,7 +320,7 @@ One entry per boundary patch; names must match the patch names in the mesh. Arra
 Per-rank binary checkpoints; restart and repartitioning workflow: [Usage: Checkpoint and restart](usage.md#checkpoint-and-restart).
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `checkpoint_interval` | `0` | Write a checkpoint every N steps; `0` disables. |
 | `restart_enabled` | `.false.` | Start from a checkpoint. |
 | `restart_dir` | `''` | Directory holding `processorR/checkpoint_XXXXXXXX.bin`. |
@@ -331,7 +331,7 @@ Per-rank binary checkpoints; restart and repartitioning workflow: [Usage: Checkp
 Passive scalars (maximum 16).
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `n_scalars` | `0` | Number of scalars to solve. |
 | `scalar_name(s)` | `''` | Name used for output variables. |
 | `scalar_diffusivity(s)` | `0.0` m²/s | Molecular diffusivity. |
@@ -343,7 +343,7 @@ Passive scalars (maximum 16).
 Injection sources for passive scalars (maximum 128). Each source is indexed by `i`.
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `n_scalar_sources` | `0` | Number of sources. |
 | `source_scalar_id(i)` | `1` | Scalar the source feeds. |
 | `source_name(i)` | `''` | Label. |
@@ -367,7 +367,7 @@ Time-resolved sampling of fields along analytic or file-defined geometry. Up to 
 ### &dopamine_sampling_planes
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `n_planes` | `0` | Number of planes. |
 | `plane_name(i)` | `''` | Label. |
 | `plane_origin(i,1:3)` | `0.0` | A point on the plane. |
@@ -380,7 +380,7 @@ Time-resolved sampling of fields along analytic or file-defined geometry. Up to 
 ### &dopamine_sampling_lines
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `n_lines` | `0` | Number of lines. |
 | `line_name(i)` | `''` | Label. |
 | `line_p0(i,1:3)`, `line_p1(i,1:3)` | `0.0` | End points. |
@@ -390,7 +390,7 @@ Time-resolved sampling of fields along analytic or file-defined geometry. Up to 
 ### &dopamine_sampling_curves
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `n_curves` | `0` | Number of curves. |
 | `curve_name(i)` | `''` | Label. |
 | `curve_file(i)` | `''` | ASCII xyz (one point per line), OBJ vertices, or ASCII STL vertices. |
@@ -399,7 +399,7 @@ Time-resolved sampling of fields along analytic or file-defined geometry. Up to 
 ### &dopamine_sampling_surfaces
 
 | Parameter | Default | Meaning / how to use |
-|---|---|---|
+|--------------------------|----------|------------------------------------------|
 | `n_surfaces` | `0` | Number of surfaces. |
 | `surface_name(i)` | `surface_<i>` | Label. |
 | `surface_file(i)` | `''` | OBJ/STL/xyz point cloud sampled on the fly. |
@@ -413,7 +413,7 @@ Time-resolved sampling of fields along analytic or file-defined geometry. Up to 
 ## Recipes
 
 | Case | Parameters to set |
-|---|---|
+|--------------|------------------------------------------------|
 | Periodic DNS (Taylor-Green) | `use_sgs = .false.`, `advection_scheme = 'KEP'`, `ic_type = 'taylor_green'`, all patches `periodic` |
 | Wall-modelled channel LES | `sgs_model = 'AMD'` or `'VREMAN'`, `wall_model = 'loglaw'`, `fx` (u_tau drive) or `constant_mass_flux_forcing = .true.` with `Ux_constant`, `wallModel` walls, `periodic` x and y |
 | Neutral ABL over roughness | `wall_model = 'most'`, `z0_m`, `u_ref`, `z_ref`, `ablInlet` patch with `use_sem = .true.`, `outlet` patch |

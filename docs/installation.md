@@ -72,7 +72,7 @@ option that changes how PETSc itself is configured.
 `cmake -D<option>=<value>`:
 
 | Option | Default | Effect |
-|---|---|---|
+|----------------|-----|--------------------------------|
 | `DOPAMINE_ENABLE_OPENMP` | `ON` | OpenMP threading in the Fortran loops |
 | `DOPAMINE_ENABLE_PETSC` | `ON` | PETSc pressure backend when available |
 | `DOPAMINE_FETCH_PETSC` | `ON` | Download and build PETSc automatically |

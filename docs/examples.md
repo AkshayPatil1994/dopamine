@@ -27,7 +27,7 @@ directly. Output is `<prefix>.nc` plus `<prefix>.xmf` for ParaView.
 ## Overview
 
 | Case | Physics | Key settings | Reference / check |
-|---|---|---|---|
+|-------|-----------|-------------------|-------------|
 | `taylor_green` | Periodic Taylor-Green vortex, Re = 1600 | `nu = 6.25e-4`, `advection_scheme = 'QUICK'`, `ic_type = 'taylor_green'`, `t_end = 20` | Kinetic energy and dissipation against DNS (figure in the repository `figures/tgv_validation.png`) |
 | `lid_driven_cavity` | Lid-driven cavity, Re = 1000 | `nu = 1e-3`, `advection_scheme = 'KEP'`, `sgs_model = 'VREMAN'`, `t_end = 100` | Centreline profiles; `compare_grids.py` compares resolutions |
 | `channel_flow_retau395` | Wall-modelled LES channel, Re_tau = 395 | `nu = 2.5316e-3`, `fx = 1`, `advection_scheme = 'KEP'`, `ic_type = 'channel_loglaw'`, `t_end = 20` | Mean profile and stresses against channel DNS |

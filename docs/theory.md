@@ -56,11 +56,11 @@ exchange for ghost states.
 The explicit transport integrator is `TIME_RK3W`: Wray low-storage third-order Runge-Kutta (Williamson 1980) [@williamson1980].
 
 $$
-\begin{align*}
+\begin{aligned}
   \alpha &= (8/15,\; 5/12,\; 3/4), \\
   \beta  &= (0,\; -17/60,\; -5/12), \\
   \gamma &= \alpha + \beta = (8/15,\; 2/15,\; 1/3).
-\end{align*}
+\end{aligned}
 $$
 
 Three stages, three pressure projections per step.
