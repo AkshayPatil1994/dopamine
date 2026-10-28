@@ -366,6 +366,7 @@ program dopamine_main
   call solver%to_device(gpu_aware_mpi=device_mpi_gpu_aware)
 
   if (rank == 0) write(*, '(A)') ' Starting time loop...'
+  call stats_mark_start(stats, restart_step)
   call MPI_Barrier(MPI_COMM_WORLD, ierr)  ! Synchronize all ranks before time loop
 
   dt = config%params%dt
@@ -437,8 +438,9 @@ program dopamine_main
       call output_writer_write(writer, solver, solver%time, step)
     end if
 
-    if (do_stats) then
-      call stats_sample(stats, solver, solver%time, step, rank, dt=dt, output_written=do_write)
+    ! A write between monitor steps still gets a (screen-only) row so it is announced; the CSV keeps its cadence.
+    if (do_stats .or. (do_write .and. config%stats_global_frequency > 0)) then
+      call stats_sample(stats, solver, solver%time, step, rank, dt=dt, output_written=do_write, write_csv=do_stats)
     end if
 
     call sampling_maybe_sample(sampler, solver, solver%time, step)
