@@ -1,6 +1,6 @@
 ---
 title: Usage
-nav_order: 3
+nav_order: 4
 ---
 
 <!-- SPDX-FileCopyrightText: 2026 DOPAMINE contributors -->
@@ -572,8 +572,10 @@ The solver reads these namelists:
 - `&dopamine_sampling_lines` (optional)
 - `&dopamine_sampling_curves` (optional)
 - `&dopamine_sampling_surfaces` (optional)
+- `&dopamine_inflow`, `&dopamine_inflow_gen`, `&dopamine_inflow_record` (optional, see the inflow-database sections)
 
-See `reference.input` for the complete option list.
+Every parameter, with its default, units and allowed values, is listed in the
+[Input Reference](input-reference.md). `reference.input` is an annotated template.
 
 ## Boundary Condition Types
 
@@ -1022,7 +1024,7 @@ DOPAMINE uses a projection method [@chorin1968; @kim1985] with a PETSc-backed pr
 
 Practical settings:
 
-- Keep `p_tol` strict enough for long-time runs (`1e-8` is a robust default in many LES cases).
+- Keep `p_tol` strict enough for long-time runs (`1e-8` works in many LES cases; the built-in default is `1e-10`).
 - Increase `p_max_iter` if pressure residuals stagnate before tolerance.
 - In parallel runs, monitor both pressure residual trend and `max|divU|`.
 - With a CUDA-enabled PETSc this linear solve can run on GPU — see "GPU (CUDA)

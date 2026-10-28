@@ -3,8 +3,10 @@
 
 ! dopamine reference input file
 ! =============================================================================
-! This file documents all currently supported namelist options in mod_input_parser.
-! Any namelist block can be omitted; internal defaults will be used.
+! This file shows every namelist group in mod_input_parser with example values.
+! Any namelist block can be omitted; internal defaults will be used. The values
+! below are examples and need not equal the defaults; docs/input-reference.md
+! lists the default of every parameter.
 !
 ! OFFLINE MESH DECOMPOSITION (dopamine-decompose)
 ! -----------------------------------------------------------------------------
@@ -93,7 +95,7 @@
   ! ===========================================================================
   ! Convection/advection discretization for momentum:
   !   'CENTRAL' | 'CDS' | 'KEP' | 'SKEW' | 'QUICK' | 'KOREN_TVD' | 'VANLEER_TVD'
-  ! Recommended default: 'QUICK' (geometry-aware quadratic upwind; stable, accurate baseline).
+  ! Parser default: 'CENTRAL'. Example value below: 'QUICK' (geometry-aware quadratic upwind).
   ! 'CDS', 'KEP' and 'QUICK' are 2nd order on refined/snapped meshes: each applies a
   ! skewness correction from the cell gradient, so they stay exact for linear fields
   ! at hanging-node interfaces. QUICK is unlimited (can overshoot) and its upwind bias
@@ -119,6 +121,8 @@
   ! Time integrator: 'RK3W' (default and only stable option).
   !   'RK3W' - Wray low-storage RK3 (3 stages, 3 pressure solves); 3rd-order accurate, stable.
   time_integrator = 'RK3W'
+  ! Legacy alias of time_integrator; do not use in new inputs.
+  ! time_scheme = 'RK3W'
 
   ! Deprecated and ignored. Set advection_scheme = 'KEP' for the energy-conserving form.
   use_skew_symmetric_advection = .false.
@@ -166,16 +170,16 @@
   ! End time for simulation
   t_end = 100.0
 
-  ! CFL cap used when adapt_dt = .true. Recommended: 0.5 for RK3W.
+  ! CFL target for adaptive stepping (parser default 0.4). Recommended: 0.5 for RK3W.
   cfl_max = 0.5
 
   ! Enable adaptive time stepping
   adapt_dt = .false.
 
-  ! Pressure Poisson residual tolerance
+  ! Pressure Poisson residual tolerance (parser default 1.0e-10)
   p_tol = 1.0e-8
 
-  ! Maximum pressure solver iterations per time step
+  ! Maximum pressure solver iterations per time step (parser default 1000)
   p_max_iter = 500
 
   ! Pressure preconditioner.
@@ -331,7 +335,7 @@
   ! Thermal diffusivity [m^2/s]
   alpha_T = 1.4e-5
 
-  ! Thermal expansion coefficient [1/K] for Boussinesq term
+  ! Thermal expansion coefficient [1/K] for Boussinesq term (parser default 3.4e-3)
   beta = 0.0
 
   ! Reference temperature [K]
@@ -340,7 +344,7 @@
   ! Turbulent Prandtl number for SGS scalar flux model
   Pr_t = 0.85
 
-  ! Gravity vector used by the Boussinesq buoyancy term [m/s^2]
+  ! Gravity vector used by the Boussinesq buoyancy term [m/s^2] (parser default 0 0 0)
   gx = 0.0
   gy = 0.0
   gz = -9.80665
