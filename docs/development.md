@@ -30,13 +30,13 @@ backend. Source is organized by responsibility under `src/`:
 | `src/io/` | Input namelist parsing, NetCDF/XMF output, checkpoint I/O, runtime environment, warning log |
 | `src/stats/` | Runtime statistics and advanced sampling (planes/lines/curves/surfaces) |
 | `src/init/` | Initial condition assembly |
-| `src/tools/` | Standalone executables: `dopamine-decompose`, `dopamine-checkpoint-partition` |
+| `src/tools/` | Standalone executables: `dopamine-decompose`, `dopamine-checkpoint-partition`, `dopamine-inflow-gen` |
 
 `src/main.f90` is the solver entry point. Everything except `main.f90` and the
 `src/tools/*_main.f90` drivers is built into `dopamine_lib`
 ([CMakeLists.txt:559](../CMakeLists.txt)), which the `dopamine`,
-`dopamine-decompose`, and `dopamine-checkpoint-partition` executables link
-against.
+`dopamine-decompose`, `dopamine-checkpoint-partition`, and
+`dopamine-inflow-gen` executables link against.
 
 Module naming follows `mod_<area>.f90` → module `mod_<area>`. Keep a module's
 public interface at the top of the file (a `public ::`/`private` block) so a
@@ -129,12 +129,12 @@ in `tests/CMakeLists.txt`.
 
 `examples/` holds runnable cases used for physical validation beyond unit
 tests (Taylor-Green vortex, channel flow at Re_τ=395, lid-driven cavity, ABL
-SEM-driven channel, etc. — see [examples/README.md](../examples/README.md)).
+SEM-driven channel, etc. — see [examples/README.md](https://github.com/AkshayPatil1994/dopamine/blob/main/examples/README.md)).
 There is no CI workflow running these automatically today; validating a
 numerics or physics change against the relevant example case before opening a
-PR is a manual step. `tools/` has analysis scripts
-(`convergence_analysis.py`, `analyze_channel_profiles.py`,
-`compare_cavity.py`) for post-processing those runs.
+PR is a manual step. Each example directory carries its own analysis scripts
+(for example `examples/channelAMDvalidation/postprocess.py` and
+`examples/convergence_test/plot_convergence.py`).
 
 ## Style
 

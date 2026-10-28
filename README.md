@@ -218,7 +218,11 @@ See `examples/` for ready-to-run input files:
 - Channel flow (`channel_flow_retau395/`)
 - Lid-driven cavity (`lid_driven_cavity/`)
 - Taylor-Green vortex (`taylor_green/`)
-- Thermal convection (`thermal_convection/`)
+- Rayleigh-Benard convection (`RayleighBernard/`)
+- AMD wall-modelled channel validation (`channelAMDvalidation/`)
+- Spatial/temporal convergence suite (`convergence_test/`)
+
+See [`examples/README.md`](examples/README.md) for an overview.
 
 ---
 
