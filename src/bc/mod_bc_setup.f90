@@ -196,7 +196,7 @@ contains
 
       if (best_q == 0) then
         if (allocated(map)) deallocate(map)
-        error stop 'build_periodic_pairs: unable to find periodic counterpart for patch '//trim(msh%patches(p)%name)
+        error stop 'build_periodic_pairs: no periodic partner for patch '//trim(msh%patches(p)%name)
       end if
 
       ! Use map from best match found in search loop
@@ -389,10 +389,10 @@ contains
     call MPI_Allreduce(local_missing_metric, global_missing_metric, 1, MPI_INTEGER, MPI_SUM, msh%comm, ierr)
 
     if (global_faces > 0 .and. global_unresolved > 0) then
-      error stop 'validate_periodic_mapping_mpi: unresolved periodic neighbor mapping on distributed mesh'
+      error stop 'periodic_mapping_mpi: unresolved neighbor mapping'
     end if
     if (global_faces > 0 .and. global_missing_metric > 0) then
-      error stop 'validate_periodic_mapping_mpi: periodic partner metric (periodic_pair_dcf) is missing'
+      error stop 'periodic_mapping_mpi: periodic_pair_dcf is missing'
     end if
   end subroutine validate_periodic_mapping_mpi
 

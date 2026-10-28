@@ -207,7 +207,7 @@ contains
       read(iunit) global_id_ckpt
       if (allocated(msh%global_id)) then
         if (any(global_id_ckpt /= msh%global_id(1:nc))) &
-          error stop 'read_checkpoint: global_id mismatch (checkpoint was written for a different partition)'
+          error stop 'read_checkpoint: global_id mismatch (different partition)'
       end if
       deallocate(global_id_ckpt)
     end if

@@ -356,7 +356,7 @@ contains
         if (zf < hd%z(1) - 1.0e-6_rp * zr .or. zf > hd%z(nz) + 1.0e-6_rp * zr) then
           write(*,'(A,ES11.4,A,ES11.4,A,ES11.4,A)') 'ERROR: inlet face at z = ', zf, ' m lies outside the database heights [', &
             hd%z(1), ', ', hd%z(nz), '] m.'
-          error stop 'inflow planes: database does not cover the inlet heights; regenerate with a taller plane'
+          error stop 'inflow planes: database does not cover the inlet heights'
         end if
         u = 0
         do j = 1, fp%nuy

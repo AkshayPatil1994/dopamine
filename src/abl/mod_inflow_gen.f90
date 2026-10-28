@@ -125,7 +125,7 @@ contains
     else
       W = gp%W; y0 = gp%y0; ny = gp%ny; nz = gp%nz
       if (W <= 0.0_rp .or. ny < 2 .or. nz < 2 .or. gp%z_max <= gp%z_min) &
-        error stop 'inflow_gen: set gen_W, gen_ny >= 2, gen_nz >= 2 and gen_z_max > gen_z_min (or gen_grid_file)'
+        error stop 'inflow_gen: set gen_W/gen_ny/gen_nz/gen_z_* or gen_grid_file'
       allocate(z(nz))
       do k = 1, nz
         z(k) = gp%z_min + (gp%z_max - gp%z_min) * real(k - 1, rp) / real(nz - 1, rp)

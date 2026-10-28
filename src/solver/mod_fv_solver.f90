@@ -3131,7 +3131,7 @@ contains
     if (self%params%p_max_iter <= 0) &
       error stop 'solver_to_device: OpenACC builds need the pressure solver (p_max_iter > 0)'
     if (self%mesh%n_colors <= 0 .or. self%psolver%n_colors <= 0) &
-      error stop 'solver_to_device: face colouring is missing (a rank with no faces?); the device kernels need it'
+      error stop 'solver_to_device: face colouring is missing'
     call stage_static_on_device(self)
     !$acc enter data copyin(self%U, self%p, self%p_old, self%T, self%nu_sgs, self%U_bnd, self%p_bnd, &
     !$acc      self%phi_prev, self%phi_prev_bnd, self%T_bnd, self%tau_w_bnd, self%sem_fluc_bnd, &

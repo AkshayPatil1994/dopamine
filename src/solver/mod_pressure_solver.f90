@@ -114,7 +114,7 @@ contains
     integer(ip) :: rank, nranks
 
     if (fvm_petsc_backend_available() == 0_c_int) then
-      error stop 'pressure_solver_init: PETSc backend unavailable (build with DOPAMINE_ENABLE_PETSC=ON and valid PETSc path)'
+      error stop 'pressure_solver_init: PETSc backend unavailable'
     end if
     if (.not. petsc_runtime_active) then
       if (fvm_petsc_backend_initialize() /= 0_c_int) then

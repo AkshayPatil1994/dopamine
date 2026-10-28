@@ -81,7 +81,7 @@ contains
     real(rp), allocatable :: yy(:)
 
     if (h%ny < 2 .or. h%nz < 2 .or. h%nt < 4 .or. h%nseg < 1) &
-      error stop 'inflow_db_create: need ny >= 2, nz >= 2, nt >= 4 (cubic time interpolation), nseg >= 1'
+      error stop 'inflow_db_create: need ny>=2, nz>=2, nt>=4, nseg>=1'
     if (h%W <= 0.0_rp .or. h%dt_p <= 0.0_rp) error stop 'inflow_db_create: W and dt_p must be positive'
     if (.not. allocated(h%z)) error stop 'inflow_db_create: header has no z levels'
     ny = h%ny; nz = h%nz

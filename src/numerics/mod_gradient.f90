@@ -53,7 +53,7 @@ contains
     real(rp),    pointer :: pbnd(:), gprev(:,:)
 
     if (.not. msh%soa_ready .and. msh%n_faces > 0) &
-      error stop 'green_gauss_gradient_scalar: msh%soa_ready is false; call mesh%build_soa_mirror first'
+      error stop 'green_gauss_scalar: soa mirror not built'
 
     nc = msh%n_cells
     nf = msh%n_faces
@@ -187,7 +187,7 @@ contains
     real(rp),    pointer :: ubnd(:,:), gprev(:,:,:)
 
     if (.not. msh%soa_ready .and. msh%n_faces > 0) &
-      error stop 'green_gauss_gradient_vector: msh%soa_ready is false; call mesh%build_soa_mirror first'
+      error stop 'green_gauss_vector: soa mirror not built'
 
     nc = msh%n_cells
     nf = msh%n_faces
@@ -324,7 +324,7 @@ contains
     real(rp),    pointer :: ls_w(:,:), pbnd(:)
 
     if (.not. allocated(msh%ls_stencil_face)) &
-      error stop 'ls_gradient_scalar: ls_stencil_face not allocated; call mesh%build_ls_stencil first'
+      error stop 'ls_gradient_scalar: LS stencil not built'
 
     nvals = size(phi)
     nc = msh%n_cells
@@ -444,7 +444,7 @@ contains
     real(rp),    pointer :: ls_w(:,:), ubnd(:,:)
 
     if (.not. allocated(msh%ls_stencil_face)) &
-      error stop 'ls_gradient_vector: ls_stencil_face not allocated; call mesh%build_ls_stencil first'
+      error stop 'ls_gradient_vector: LS stencil not built'
 
     nvals = size(U, 2)
     nc = msh%n_cells

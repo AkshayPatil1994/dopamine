@@ -518,7 +518,7 @@ contains
     real(rp),    pointer :: ppair_dcf_soa(:), fdcf_soa(:), fnorm_soa(:,:), pbnd(:)
 
     if (.not. msh%soa_ready .and. msh%n_faces > 0) &
-      error stop 'advection_rhs_scalar_recon_soa: msh%soa_ready is false; call mesh%build_soa_mirror first'
+      error stop 'advection_rhs_scalar_recon_soa: soa mirror not built'
 
     nc = msh%n_cells
     nf = msh%n_faces
@@ -1434,7 +1434,7 @@ contains
     integer(ip) :: kk
 
     if (.not. msh%soa_ready .and. msh%n_faces > 0) &
-      error stop 'advection_rhs_vector_recon_soa: msh%soa_ready is false; call mesh%build_soa_mirror first'
+      error stop 'advection_rhs_vector_recon_soa: soa mirror not built'
 
     nc = msh%n_cells
     nf = msh%n_faces

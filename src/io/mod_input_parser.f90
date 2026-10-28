@@ -412,7 +412,7 @@ contains
     ! Constant pressure-gradient (fx/fy/fz) and constant mass-flux forcing are mutually exclusive.
     if (constant_mass_flux_forcing .and. &
         (abs(fx) > SMALL .or. abs(fy) > SMALL .or. abs(fz) > SMALL)) &
-      error stop 'dopamine_physics: fx/fy/fz must be zero when constant_mass_flux_forcing = .true.'
+      error stop 'physics: fx/fy/fz must be 0 with constant_mass_flux_forcing'
 
     associate(p => config%params)
       p%nu         = nu
@@ -760,7 +760,7 @@ contains
     if (inflow_crossfade_time < 0.0_rp) error stop 'inflow_crossfade_time must be >= 0'
     if (record_enabled) then
       if (record_dt <= 0.0_rp .or. record_segment_time <= 0.0_rp .or. record_n_segments < 1) &
-        error stop 'record_enabled needs record_dt > 0, record_segment_time > 0 and record_n_segments >= 1'
+        error stop 'inflow_record: need record_dt, segment_time > 0, n_segments >= 1'
       if (sqrt(sum(record_normal**2)) <= 0.0_rp) error stop 'record_normal must be non-zero'
     end if
 

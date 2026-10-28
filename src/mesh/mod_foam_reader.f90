@@ -109,7 +109,7 @@ contains
     end do
 
     if (n_assigned /= msh%n_bnd_faces) then
-      error stop 'foam_read: boundary connectivity invalid (some boundary faces are not mapped to a patch)'
+      error stop 'foam_read: boundary faces not mapped to a patch'
     end if
 
     n_periodic = 0
@@ -118,13 +118,13 @@ contains
         error stop 'foam_read: boundary connectivity invalid (patch has invalid start_face/n_faces)'
       end if
       if (msh%patches(p)%start_face + msh%patches(p)%n_faces - 1 > msh%n_bnd_faces) then
-        error stop 'foam_read: boundary connectivity invalid (patch face range exceeds boundary face count)'
+        error stop 'foam_read: patch face range exceeds boundary faces'
       end if
       if (msh%patches(p)%bc_id == BC_PERIODIC) n_periodic = n_periodic + 1
     end do
 
     if (mod(n_periodic, 2_ip) /= 0_ip) then
-      error stop 'foam_read: periodic boundary connectivity invalid (odd number of periodic patches)'
+      error stop 'foam_read: odd number of periodic patches'
     end if
 
     write(*, '(A,I0,A,I0,A,I0)') ' FOAM boundary summary: patches=', msh%n_patches, &
@@ -731,7 +731,7 @@ contains
       call foam_skip_ws_and_comments_bytes(bytes, pos)
       if (pos > size(bytes)) error stop 'foam_read_faces_binary: unexpected EOF before compact connectivity list'
       ch = achar(int(iand(int(bytes(pos), int32), int(z'FF', int32))))
-      if (ch /= '(') error stop 'foam_read_faces_binary: expected opening parenthesis for compact connectivity list'
+      if (ch /= '(') error stop 'foam_read_faces_binary: expected opening paren in list'
       pos = pos + 1
       call foam_skip_ws_bytes(bytes, pos)
 
@@ -743,7 +743,7 @@ contains
 
       if (n_compact_pts < 0) error stop 'foam_read_faces_binary: negative compact-face payload size'
       if (compact_off(n_faces + 1) /= n_compact_pts) then
-        error stop 'foam_read_faces_binary: compact-face offset terminator does not match connectivity count'
+        error stop 'foam_read_faces_binary: compact offsets mismatch'
       end if
 
       allocate(face_pts(n_compact_pts))
