@@ -197,7 +197,10 @@ contains
     character(16)  :: time_scheme = 'RK3W'  ! legacy; use time_integrator instead
     character(16)  :: time_integrator = 'RK3W'  ! RK3W is the only integrator
     logical        :: use_skew_symmetric_advection = .false.
-    character(16)  :: sgs_model = 'VREMAN'  ! VREMAN | SMAGORINSKY | DYNAMIC_SMAG
+    character(16)  :: sgs_model = 'VREMAN'  ! VREMAN | SMAGORINSKY | DYNAMIC_SMAG | AMD
+    real(rp)       :: c_amd = AMD_C_DEFAULT         ! AMD constant
+    logical        :: amd_wall_gradient = .true.  ! AMD: log-law wall-normal gradient in wall-model cells
+    real(rp)       :: wall_model_filter_tf_fac = 0.0_rp  ! > 0: adaptive filter T_f = f*y/(kappa*u_tau)
     real(rp)       :: wall_model_height = 0.0_rp       ! <= 0 uses the wall-adjacent cell
     real(rp)       :: wall_model_filter_time = 0.0_rp  ! <= 0 disables time filtering
     logical        :: debug_diagnostics = .false.  ! verbose runtime diagnostics (off by default)
@@ -209,7 +212,8 @@ contains
                                p_tol, p_max_iter, p_target_divU, gradient_scheme, pressure_solver, &
                                use_rotational_projection, gg_iterations, use_sgs, time_scheme, n_nonortho_corr, &
                                time_integrator, use_skew_symmetric_advection, sgs_model, &
-                               wall_model_height, wall_model_filter_time, debug_diagnostics
+                               wall_model_height, wall_model_filter_time, debug_diagnostics, &
+                               c_amd, amd_wall_gradient, wall_model_filter_tf_fac
 
     read(iunit, nml=dopamine_numerics, iostat=ios)
     if (ios > 0) then
@@ -230,9 +234,9 @@ contains
       call input_fatal('gradient_scheme', gradient_scheme, 'LEAST_SQUARES, GREEN_GAUSS')
     end select
     select case (trim(sgs_model))
-    case ('VREMAN', 'SMAGORINSKY', 'DYNAMIC_SMAG')
+    case ('VREMAN', 'SMAGORINSKY', 'DYNAMIC_SMAG', 'AMD')
     case default
-      call input_fatal('sgs_model', sgs_model, 'VREMAN, SMAGORINSKY, DYNAMIC_SMAG')
+      call input_fatal('sgs_model', sgs_model, 'VREMAN, SMAGORINSKY, DYNAMIC_SMAG, AMD')
     end select
     select case (trim(pressure_solver))
     case ('boomeramg', 'gamg')
@@ -294,9 +298,12 @@ contains
       p%use_skew_symmetric_advection = use_skew_symmetric_advection
       if (use_skew_symmetric_advection) &
         write(*,'(A)') ' [input] use_skew_symmetric_advection is deprecated and ignored; use advection_scheme = KEP'
-      p%sgs_model = sgs_model  ! VREMAN (default), SMAGORINSKY, or DYNAMIC_SMAG
+      p%sgs_model = sgs_model  ! VREMAN (default), SMAGORINSKY, DYNAMIC_SMAG, or AMD
+      p%c_amd = c_amd
+      p%amd_wall_gradient = amd_wall_gradient
       p%wall_model_height = wall_model_height
       p%wall_model_filter_time = wall_model_filter_time
+      p%wall_model_filter_tf_fac = wall_model_filter_tf_fac
       p%debug_diagnostics = debug_diagnostics
     end associate
     ! Propagate PETSc options if present

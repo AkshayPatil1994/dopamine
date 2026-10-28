@@ -17,6 +17,7 @@ being restructured (e.g. the GPU port); they are not validation cases.
 | `hydrowall` | same mesh, all six faces no-slip walls | closed box under `fz = -1`: the wall pressure gradient `dp/dn = f.n`; Umax stays O(dt g) |
 | `inflow` | same mesh | divergence-free SEM (`sem_type = 'dfsem'`, the default) `ablInlet` at x0, outlet at xL, periodic y, slip z, CDS: eddies wrap across the periodic seam; the result must not depend on the rank count (np 1, 2, 3 agree to 1e-14) |
 | `inflow_jarrin` | same mesh | as `inflow` with the original tent-kernel SEM (`sem_type = 'jarrin'`) |
+| `amd` | as `channel` | AMD SGS (`sgs_model = 'AMD'`) with the log-law wall-cell gradient, and the adaptive wall-model filter (`wall_model_filter_tf_fac = 1`); np 1 only |
 
 Run everything through CTest from a build tree (meshes are generated with gmsh on first use):
 

@@ -569,6 +569,7 @@ set(DOPAMINE_FORTRAN_SOURCES
   src/sgs/mod_vreman.f90
   src/sgs/mod_dynamic_smagorinsky.f90
   src/sgs/mod_wall_model.f90
+  src/sgs/mod_amd.f90
   src/abl/mod_abl_types.f90
   src/abl/mod_abl_profiles.f90
   src/abl/mod_sem_inflow.f90
@@ -726,6 +727,7 @@ endif()
 # #ifdef/#else/#endif lines correctly, even though _OPENACC is never defined for it.
 set_source_files_properties(
   src/sgs/mod_vreman.f90
+  src/sgs/mod_amd.f90
   src/sgs/mod_dynamic_smagorinsky.f90
   src/numerics/mod_gradient.f90
   src/numerics/mod_viscous.f90

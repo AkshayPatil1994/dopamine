@@ -55,6 +55,14 @@ where $\alpha_{ij} = \partial U_j / \partial x_i$, $B_\beta = \beta_{11}\beta_{2
 
 **Dynamic Smagorinsky** (`DYNAMIC_SMAG`) — Germano-Lilly dynamic procedure: $C_s^2$ is computed locally every step from a compact test-filtered Germano identity and clipped to $\geq 0$. The mesh is unstructured, so there is no homogeneous direction to plane-average over; a one-ring volume-weighted test filter and one-ring averaging of the Lilly numerator/denominator are used instead, which is noisier than the classic channel-flow formulation.
 
+**Anisotropic minimum dissipation** (`AMD`, Rozema et al. 2015) —
+
+$$
+\nu_t = C_{\mathrm{amd}}\,\frac{\max(0,\,-\beta_{mn}S_{mn})}{\alpha_{ij}\alpha_{ij}},\qquad \beta_{mn} = G_{lk}\,\alpha_{lm}\alpha_{kn},\quad S_{mn} = \tfrac12(\alpha_{mn}+\alpha_{nm}),
+$$
+
+with $C_{\mathrm{amd}} = 1/3$ (`c_amd`) and the same filter-width tensor $G$ as Vreman, so on an axis-aligned hex $\beta_{mn} = \sum_l \Delta_l^2 \alpha_{lm}\alpha_{ln}$. Values below round-off of $\mathrm{tr}(G)\,|\alpha|^3$ are zeroed. With `amd_wall_gradient = .true.` the wall-adjacent cell of a `wallModel` patch uses the log-law gradient $u_\tau/(\kappa y)$ for the wall-parallel velocity. The wall-model input can be filtered with the adaptive time scale $T_f = f\,y/(\kappa u_\tau)$ (`wall_model_filter_tf_fac`). See `examples/channelAMDvalidation`.
+
 ### Wall model options
 
 **Neutral log-law (default):** Equilibrium log-law wall model (high-Re):

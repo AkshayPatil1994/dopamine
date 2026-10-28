@@ -1,0 +1,66 @@
+! Half-channel wall-modelled LES at Re_tau = 2000: AMD subgrid model, adaptive wall-model input filter.
+! Compare with amd_raw.input (no filter) and vreman_filtered.input (Vreman SGS). See README.md.
+! Units: delta = 1, u_tau = 1 (fx = 1), nu = 1/Re_tau.
+
+&dopamine_domain
+  mesh_file = 'channel_amd.msh'
+  mesh_type = 'gmsh'
+/
+
+&dopamine_numerics
+  advection_scheme       = 'KEP'
+  time_integrator        = 'RK3W'
+  dt                     = 2.0e-3
+  t_end                  = 24.0
+  cfl_max                = 0.5
+  adapt_dt               = .true.
+  solver_stats_frequency = 10
+  p_tol                  = 1.0e-8
+  p_max_iter             = 1000
+
+  use_sgs                = .true.
+  sgs_model              = 'AMD'
+  c_amd                  = 0.3333333333
+  amd_wall_gradient      = .true.
+
+  ! Sample the wall law at the wall-adjacent cell (y+ ~ 16); filter T_f = 1 * y / (kappa u_tau).
+  wall_model_height        = 0.0
+  wall_model_filter_tf_fac = 1.0
+/
+
+&dopamine_physics
+  nu = 5.0e-4
+  fx = 1.0
+  fy = 0.0
+  fz = 0.0
+/
+
+&dopamine_bc
+  n_patches     = 6
+  patch_name(1) = 'bottom_wall'
+  patch_type(1) = 'wallModel'
+  patch_name(2) = 'top_slip'
+  patch_type(2) = 'slip'
+  patch_name(3) = 'periodic_x0'
+  patch_type(3) = 'periodic'
+  patch_name(4) = 'periodic_xL'
+  patch_type(4) = 'periodic'
+  patch_name(5) = 'periodic_y0'
+  patch_type(5) = 'periodic'
+  patch_name(6) = 'periodic_yL'
+  patch_type(6) = 'periodic'
+/
+
+&dopamine_initial_condition
+  ic_type               = 'channel_loglaw'
+  ic_uref               = 20.0
+  ic_lref               = 1.0
+  noise_level           = 0.1
+  wall_normal_direction = 3
+/
+
+&dopamine_output
+  prefix         = 'channel'
+  write_interval = -50
+  write_time     = 0.5
+/

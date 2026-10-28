@@ -9,6 +9,7 @@ module mod_wall_model
   private
 
   public :: compute_wall_stress
+  public :: wall_stress_newton
   public :: apply_wall_model_bc
   public :: wall_model_free
   public :: wall_model_get_filter_state
@@ -172,8 +173,11 @@ contains
   end subroutine find_sample_cell
 
   !> Apply the Reichardt wall model to all BC_WALL_MODEL patches.
-  !> h_wm > 0 samples at that wall distance; t_filt > 0 exponentially filters the sampled velocity.
-  subroutine apply_wall_model_bc(U, nu, msh, tau_w_bnd, h_wm, t_filt, dt)
+  !> h_wm > 0 samples at that wall distance; t_filt > 0 exponentially filters the sampled velocity with a
+  !> fixed time constant. tf_fac > 0 instead filters with the adaptive T_f = tf_fac * y_w / (kappa * u_tau)
+  !> (Yang, Park & Moin 2017), u_tau being the previous step's value, re-derived from the filtered velocity so
+  !> the filter carries no extra state; tf_fac takes precedence over t_filt.
+  subroutine apply_wall_model_bc(U, nu, msh, tau_w_bnd, h_wm, t_filt, dt, tf_fac)
     real(rp),   intent(in)    :: U(:,:)  ! (3, n_cells + n_ghost)
     real(rp),   intent(in)    :: nu
     type(Mesh), intent(in), target :: msh
@@ -181,18 +185,21 @@ contains
     real(rp),   intent(in), optional :: h_wm    ! sampling height; <= 0 uses the wall-adjacent cell
     real(rp),   intent(in), optional :: t_filt  ! filter time constant; <= 0 disables filtering
     real(rp),   intent(in), optional :: dt      ! time increment for this filter update
+    real(rp),   intent(in), optional :: tf_fac  ! adaptive filter factor f in T_f = f*y_w/(kappa*u_tau); <= 0 off
 
     integer(ip) :: p, f, f_bnd, f_global, o, c_s, n_int, n_patches, n_cap, patch_id
     real(rp)    :: n1, n2, n3, u1, u2, u3, un, u_par_mag
-    real(rp)    :: y_w, u_tau, tau_mag, h_use, t_use, dt_use, w_filt, scale
+    real(rp)    :: y_w, u_tau, tau_mag, h_use, t_use, dt_use, w_filt, scale, tf_use
+    real(rp)    :: eps_f, u_prev_mag, u_tau_prev, tau_prev
     integer(ip) :: n_bnd
-    logical     :: needs_rebuild, do_filter, seed, capped
+    logical     :: needs_rebuild, do_filter, seed, capped, adaptive, capped_prev
     integer(ip), pointer :: fown(:), fpid(:), pbc(:)
     real(rp),    pointer :: fnrm(:,:)
 
     h_use  = 0.0_rp; if (present(h_wm))   h_use  = h_wm
     t_use  = 0.0_rp; if (present(t_filt)) t_use  = t_filt
     dt_use = 0.0_rp; if (present(dt))     dt_use = dt
+    tf_use = 0.0_rp; if (present(tf_fac)) tf_use = tf_fac
 
     ! Rebuild the sampling cache if uninitialized or the mesh size has changed.
     ! .or. does not guarantee short-circuit in Fortran, so size(y_w_arr) must not be
@@ -236,15 +243,16 @@ contains
     fpid => msh%face_patch_id_soa
     pbc  => msh%patch_bc_id_soa
     fnrm => msh%face_normal_soa
-    do_filter = (t_use > SMALL .and. allocated(u_par_filt))
+    adaptive = (tf_use > SMALL)
+    do_filter = ((t_use > SMALL .or. adaptive) .and. allocated(u_par_filt))
     seed = .not. filt_ready
     w_filt = 0.0_rp
-    if (do_filter) w_filt = dt_use / (t_use + dt_use)
+    if (do_filter .and. .not. adaptive) w_filt = dt_use / (t_use + dt_use)
     n_cap = 0
     if (n_bnd > 0 .and. allocated(sample_cell)) then
       !$acc parallel loop default(present) copyin(U) copy(tau_w_bnd) reduction(+:n_cap) &
       !$acc      private(f_global, patch_id, o, c_s, y_w, n1, n2, n3, u1, u2, u3, un, u_par_mag, &
-      !$acc              u_tau, tau_mag, capped, scale)
+      !$acc              u_tau, tau_mag, capped, scale, eps_f, u_prev_mag, u_tau_prev, tau_prev, capped_prev)
       do f_bnd = 1, n_bnd
         f_global = n_int + f_bnd
         patch_id = fpid(f_global)
@@ -272,9 +280,21 @@ contains
             u_par_filt(2, f_bnd) = u2
             u_par_filt(3, f_bnd) = u3
           else
-            u_par_filt(1, f_bnd) = u_par_filt(1, f_bnd) + w_filt * (u1 - u_par_filt(1, f_bnd))
-            u_par_filt(2, f_bnd) = u_par_filt(2, f_bnd) + w_filt * (u2 - u_par_filt(2, f_bnd))
-            u_par_filt(3, f_bnd) = u_par_filt(3, f_bnd) + w_filt * (u3 - u_par_filt(3, f_bnd))
+            eps_f = w_filt
+            if (adaptive) then
+              ! eps = dt / T_f; the previous call solved the wall law on this same filtered velocity.
+              ! Stages 2 and 3 pass dt = 0, so the filter is advanced once per step.
+              eps_f = 0.0_rp
+              if (dt_use > 0.0_rp) then
+                u_prev_mag = sqrt(u_par_filt(1, f_bnd)**2 + u_par_filt(2, f_bnd)**2 + u_par_filt(3, f_bnd)**2)
+                call wall_stress_newton(u_prev_mag, y_w, nu, u_tau_prev, tau_prev, capped_prev)
+                eps_f = 1.0_rp
+                if (u_tau_prev > SMALL) eps_f = min(1.0_rp, dt_use * KAPPA * u_tau_prev / (tf_use * y_w))
+              end if
+            end if
+            u_par_filt(1, f_bnd) = u_par_filt(1, f_bnd) + eps_f * (u1 - u_par_filt(1, f_bnd))
+            u_par_filt(2, f_bnd) = u_par_filt(2, f_bnd) + eps_f * (u2 - u_par_filt(2, f_bnd))
+            u_par_filt(3, f_bnd) = u_par_filt(3, f_bnd) + eps_f * (u3 - u_par_filt(3, f_bnd))
           end if
           u1 = u_par_filt(1, f_bnd)
           u2 = u_par_filt(2, f_bnd)
@@ -295,7 +315,7 @@ contains
     end if
     utau_cap_count = utau_cap_count + n_cap
 
-    if (t_use > SMALL) filt_ready = .true.
+    if (t_use > SMALL .or. adaptive) filt_ready = .true.
   end subroutine apply_wall_model_bc
 
   subroutine wall_model_reset_cap_count()

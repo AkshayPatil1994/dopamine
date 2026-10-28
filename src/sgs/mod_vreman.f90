@@ -14,12 +14,15 @@ module mod_vreman
   public :: vreman_free
   public :: vreman_filter_tensor
   public :: vreman_grid_delta
+  public :: ensure_filter_tensor
+  public :: g_filt_arr
+  public :: det3x3
 
   ! Vreman (2004) Eq.(15): nu_t = C * sqrt(B_beta / alpha_sq)
   real(rp), parameter :: C_v = C_VREMAN
 
   ! Persistent per-cell filter-width tensor G (Vreman 2004 Eq.5 generalised to polyhedra).
-  real(rp), allocatable, save :: g_filt_arr(:,:,:)  ! (3, 3, n_cells + n_ghost)
+  real(rp), allocatable, target, save :: g_filt_arr(:,:,:)  ! (3, 3, n_cells + n_ghost)
 
   ! Persistent pack buffer for exchange_g_halo; grown as needed instead of alloc/dealloc per call.
   real(rp), allocatable, save :: g_halo_buf(:,:)  ! (6, n_cells + n_ghost)
@@ -155,6 +158,18 @@ contains
     if (allocated(grad_U_local)) deallocate(grad_U_local)
     nullify(grad_U)
   end subroutine vreman_sgs_viscosity
+
+  !> Build G on first use, or again if the mesh size changed; shared with mod_amd.
+  subroutine ensure_filter_tensor(msh)
+    type(Mesh), intent(inout) :: msh
+
+    ! Split IFs: .or. does not short-circuit in Fortran, so size() must not share an expression with allocated().
+    if (.not. allocated(g_filt_arr)) then
+      call build_filter_tensor(msh)
+    else if (size(g_filt_arr, 3) /= msh%n_cells + msh%n_ghost) then
+      call build_filter_tensor(msh)
+    end if
+  end subroutine ensure_filter_tensor
 
   !> Build the per-cell filter-width tensor G; area weighting makes it invariant to face subdivision.
   subroutine build_filter_tensor(msh)

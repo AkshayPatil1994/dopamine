@@ -14,6 +14,7 @@ module mod_stats
   public :: StatsCollector
   public :: stats_init
   public :: stats_sample
+  public :: stats_mark_start
   public :: stats_finalize
 
   type, public :: StatsCollector
@@ -23,6 +24,8 @@ module mod_stats
     logical       :: file_opened = .false.
     integer(ip)   :: file_unit = -1
     real(rp)      :: E0_ref = -1.0_rp
+    real(rp)      :: t_last = 0.0_rp     ! wall time of the last screen row (or of the loop start)
+    integer(ip)   :: step_last = 0       ! step of that row
   end type StatsCollector
 
 contains
@@ -149,8 +152,19 @@ contains
     end if
   end subroutine stats_prepare_restart
 
-  !> Sample statistics and write to screen + CSV.
-  subroutine stats_sample(stats, solver, time, step, rank, E0, dt, output_written)
+  !> Start the wall-clock interval of the screen monitor; call right before the time loop (also on restart).
+  subroutine stats_mark_start(stats, step)
+    type(StatsCollector), intent(inout) :: stats
+    integer(ip),          intent(in)    :: step
+
+    stats%t_last = wall_clock_seconds()
+    stats%step_last = step
+  end subroutine stats_mark_start
+
+  !> Sample statistics and write to screen (+ CSV unless write_csv is false).
+  !> Each screen row reports the wall time per step since the previous row; a row on which a 3D field was
+  !> written carries a '| 3D output saved' note, and that write is included in its wall time.
+  subroutine stats_sample(stats, solver, time, step, rank, E0, dt, output_written, write_csv)
     type(StatsCollector), intent(inout) :: stats
     type(FVSolver),       intent(inout) :: solver
     real(rp),             intent(in)    :: time
@@ -159,12 +173,15 @@ contains
     real(rp), optional,   intent(in)    :: E0
     real(rp), optional,   intent(in)    :: dt
     logical,  optional,   intent(in)    :: output_written
+    logical,  optional,   intent(in)    :: write_csv  ! default .true.; .false. prints the screen row only
 
     real(rp) :: E, eps, umax, max_div, abs_div, cfl
     real(rp) :: max_div_cell, abs_div_cell
     real(rp) :: ubulk, tauw_mean, cf_bulk, nu_sgs_mean, sgs_to_mol
     real(rp) :: E_norm, eps_ref, E0_val, dt_val
-    character(len=16) :: output_tag
+    character(len=24) :: output_tag
+    real(rp) :: t_now, wall_per_step
+    logical  :: do_csv
 
     ! One cell/boundary pass builds every partial sum, settled by a single SUM- and MAX-Allreduce (was 6 separate collectives).
     call compute_stats_sums(solver, E, eps, umax, ubulk, tauw_mean, nu_sgs_mean)
@@ -194,31 +211,40 @@ contains
     eps_ref = eps
     output_tag = ' '
     if (present(output_written)) then
-      if (output_written) output_tag = right_header_col('3D output ok', 16)
+      if (output_written) output_tag = ' | 3D output saved'
     end if
+    do_csv = .true.
+    if (present(write_csv)) do_csv = write_csv
 
     if (rank /= 0) return
+
+    t_now = wall_clock_seconds()
+    wall_per_step = (t_now - stats%t_last) / real(max(step - stats%step_last, 1_ip), rp)
+    stats%t_last = t_now
+    stats%step_last = step
 
     ! ---- screen output -------------------------------------------------------
     if (.not. stats%header_written) then
       write(*, '(A)') ''
-      write(*, '(A)') repeat('-', 104)
+      write(*, '(A)') repeat('-', 106)
       write(*, '(A)') right_header_col('step', 8) // right_header_col('dt', 10) // &
                       right_header_col('time', 14) // right_header_col('CFL', 14) // &
                       right_header_col('max|U|', 14) // right_header_col('max|divU|', 14) // &
-                      right_header_col('<|divU|>V', 14) // right_header_col('output', 16)
-      write(*, '(A)') repeat('-', 104)
+                      right_header_col('<|divU|>V', 14) // right_header_col('wall s/step', 18)
+      write(*, '(A)') repeat('-', 106)
       stats%header_written = .true.
     end if
 
     if (present(dt)) then
-      write(*, '(I8,ES10.3,5ES14.6,A)') step, dt, time, cfl, umax, max_div, abs_div, output_tag
+      write(*, '(I8,ES10.3,5ES14.6,F14.4,A)') step, dt, time, cfl, umax, max_div, abs_div, wall_per_step, &
+        trim(output_tag)
     else
-      write(*, '(I8,A10,5ES14.6,A)') step, '-', time, cfl, umax, max_div, abs_div, output_tag
+      write(*, '(I8,A10,5ES14.6,F14.4,A)') step, '-', time, cfl, umax, max_div, abs_div, wall_per_step, &
+        trim(output_tag)
     end if
 
     ! ---- CSV output ----------------------------------------------------------
-    if (stats%file_opened .and. stats%file_unit /= -1) then
+    if (do_csv .and. stats%file_opened .and. stats%file_unit /= -1) then
       if (present(dt)) then
         write(stats%file_unit, '(I0,16(",",ES18.9))') &
           step, time, E, eps, E_norm, eps_ref, umax, max_div, abs_div, &
@@ -316,6 +342,17 @@ contains
       tauw_mean = 0.0_rp
     end if
   end subroutine compute_stats_sums
+
+  real(rp) function wall_clock_seconds() result(t)
+    integer(ip) :: count, rate
+
+    call system_clock(count, rate)
+    if (rate > 0) then
+      t = real(count, rp) / real(rate, rp)
+    else
+      t = 0.0_rp
+    end if
+  end function wall_clock_seconds
 
   pure function right_header_col(label, width) result(col)
     character(len=*), intent(in) :: label
