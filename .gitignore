@@ -26,8 +26,10 @@ docs/build/
 
 # IDE and editor files
 .vscode/
-.claude/
 .venv/
+
+# Notes files from other tools
+*CLAUDE.md
 
 # macOS
 .DS_Store
