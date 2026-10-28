@@ -1401,7 +1401,9 @@ contains
       do i = lo + 1, hi
         tmp = idx(i)
         j = i - 1
-        do while (j >= lo .and. vert_lt_coord(tmp, idx(j), geom))
+        ! .and. does not short-circuit: idx(j) with j = lo - 1 would be read (out of bounds) if tested together.
+        do while (j >= lo)
+          if (.not. vert_lt_coord(tmp, idx(j), geom)) exit
           idx(j + 1) = idx(j)
           j = j - 1
         end do
