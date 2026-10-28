@@ -147,7 +147,7 @@ contains
     nc = msh%n_cells
     nf_int = msh%n_int_faces
 
-    ! Audit periodic mapping (single-rank and MPI modes); prefers msh%periodic_neighbor.
+    ! Check periodic mapping (single-rank and MPI modes); prefers msh%periodic_neighbor.
     if (present(bc_configs)) then
       call check_periodic_consistency(msh, bc_configs)
     end if

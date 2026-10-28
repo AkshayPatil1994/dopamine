@@ -43,9 +43,6 @@ contents.
   PDF with table of contents and citation processing via Pandoc.
 - `_config.yml`, `_includes/head_custom.html`: Jekyll/just-the-docs
   configuration for the GitHub Pages site (theme, nav, search, MathJax).
-- `external-lib-guidance/`: Reference notes for DOPAMINE's external
-  dependencies (GKlib, METIS, PETSc) and a PETSc GPU porting plan
-  (gitignored; not published to Pages or the manual).
 
 ## Build the standalone manual
 

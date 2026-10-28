@@ -362,7 +362,7 @@ same compact operator: a volume-weighted average of a cell and its immediate
 face-neighbours (periodic partners included). This is noisier than true
 homogeneous-direction averaging, so treat `DYNAMIC_SMAG` as a locally-clipped,
 sanity-tested implementation rather than a fully validated production model —
-see `mod_dynamic_smagorinsky.f90`'s module docstring and `tests/test_dynamic_smagorinsky.f90`.
+see `mod_dynamic_smagorinsky.f90`'s module docstring and the `dynsmag` regression case.
 
 ### Gradient reuse by Vreman and viscous terms
 

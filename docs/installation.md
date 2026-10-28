@@ -44,7 +44,7 @@ Test layout and how to add tests: [Development](development.md#testing).
 - Missing symbols at run time: make sure `LD_LIBRARY_PATH` contains every required library directory.
 - A fetched dependency is stale after changing a PETSc option: run `make cleanall` and rebuild.
 - No internet on the build machine: follow the offline build below.
-- Illegal-instruction crash on compute nodes: the build uses `-march=native`; build on the target architecture.
+- Illegal-instruction crash on compute nodes: the build tunes for the build machine; configure with `-DDOPAMINE_NATIVE_ARCH=OFF` or build on the target architecture.
 
 
 ## Standard build
@@ -83,6 +83,7 @@ option that changes how PETSc itself is configured.
 | `DOPAMINE_OPENACC_GPU_ARCH` | *(empty)* | Optional `-gpu=` target, e.g. `cc86` |
 | `DOPAMINE_FETCH_NETCDF` | `ON` | Auto-build NetCDF C/Fortran when missing |
 | `DOPAMINE_BUILD_TESTS` | `ON` | Build the CTest unit tests |
+| `DOPAMINE_NATIVE_ARCH` | `ON` | Tune for the build machine (`-march=native`); `OFF` for portable binaries |
 | `DOPAMINE_ENABLE_LTO` | `OFF` | Interprocedural/link-time optimization |
 | `DOPAMINE_EXTERNAL_DIR` | `<source>/external` | Where fetched dependencies are built/installed |
 
@@ -147,9 +148,7 @@ solve on-device. In this build nothing outside the pressure solve runs on
 GPU; the explicit kernels are offloaded separately by the OpenACC build
 described below. Validated on a single-GPU workstation (RTX 3060, CUDA 12.0)
 and, in the combined OpenACC + CUDA build, on two RTX A6000 (one rank per GPU,
-see "Multi-GPU" below); multi-node has not been exercised. See
-`docs/external-lib-guidance/PETSc_GPU_porting.md` (local, gitignored) for
-implementation notes.
+see "Multi-GPU" below); multi-node has not been exercised.
 
 ### Requirements
 
@@ -219,8 +218,7 @@ the gradient kernels (Green-Gauss and least-squares, scalar and vector), the
 viscous fluxes (momentum and scalar diffusion), and the advection kernels
 (CDS, QUICK/TVD reconstruction, and KEP), all driven through the mesh's flat
 SoA mirror. See the "OpenACC (nvfortran) Run" section below for the kernel
-list, and `docs/external-lib-guidance/PETSc_GPU_porting.md` (local,
-gitignored) for implementation notes.
+list.
 
 > **Known quirk**: a bare `cmake -S . -B build-acc26` (or `cmake .` from
 > inside the build directory) on an *already-configured* OpenACC build tree

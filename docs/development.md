@@ -76,54 +76,40 @@ Fortran array-bounds checking materially changes hot-loop timings.
 
 ## Testing
 
-Unit and regression tests live in `tests/` and are registered with CTest via
-`tests/CMakeLists.txt`. Each test is a standalone Fortran program
-(`test_*.f90`) built against `dopamine_lib`. Run the suite from the build
-directory:
+Tests are registered with CTest in `tests/CMakeLists.txt`. Unit tests are standalone Fortran programs
+(`tests/unit/test_*.f90`) built against `dopamine_lib`; regression cases are short solver runs compared
+against stored statistics. Unit tests are built on demand (`EXCLUDE_FROM_ALL`), and regression cases need
+`gmsh` on `PATH`:
 
 ```bash
 cmake --build build -j
+cmake --build build --target test_amd test_inflow_db test_inflow_gen test_inflow_planes test_sem_dfsem
 ctest --test-dir build --output-on-failure
 ```
 
-Run a single test by name (names match `add_test(NAME ... COMMAND test_*)` in
-[tests/CMakeLists.txt](../tests/CMakeLists.txt), not the source filename):
+Run a subset by label or by name (names match `add_test(NAME ...)`, not the source filename):
 
 ```bash
-ctest --test-dir build -R RhieChowConsistency --output-on-failure
+ctest --test-dir build -L unit --output-on-failure
+ctest --test-dir build -L regression
+ctest --test-dir build -R regression_tgv_np2 --output-on-failure
 ```
 
 ### What the existing tests cover
 
-The suite is organized around the invariants theory.md calls out, not just
-"does it run":
+- **Unit** (`unit_*`): `unit_amd` (AMD eddy viscosity), `unit_sem_dfsem` (divergence-free eddy field),
+  `unit_inflow_db`, `unit_inflow_gen`, `unit_inflow_planes` (inflow database, generator and replay).
+- **Regression** (`regression_<case>_np<N>`): `tgv`, `channel`, `rb`, `duct`, `dynsmag`, `graded`, `pdrop`,
+  `hydro`, `hydrowall`, `inflow`, `inflow_jarrin` at one and two ranks, and `amd` at one rank. Each run is
+  20 steps whose per-step statistics must match `tests/regression/reference/*.csv`; the np2 runs check
+  that the result does not depend on the decomposition. The cases are described in
+  `tests/regression/README.md`.
+- **Inflow chain** (`inflow_chain`): generate planes with `dopamine-inflow-gen`, replay them in a
+  successor run.
 
-- **Geometry/gradients**: `MeshGeometry`, `Gradient`, `GradientVector`,
-  `GradientRefinement`, `ReconstructionLinearExact` — gradient schemes must
-  reproduce a linear field exactly and behave correctly across non-conforming
-  refinement interfaces.
-- **Advection**: `KEPConservation` (discrete kinetic-energy preservation),
-  `QuickBoundedness` (TVD boundedness), `AdvectionKepSoa`/`AdvectionCdsSoa`/
-  `AdvectionQuickTvdSoa`/`AdvectionVectorQuickTvdSoa` (SoA/GPU-mirror paths
-  match the AoS reference), `AdvectionConvergence`, `Advection2DSnapshot`.
-- **Pressure/projection**: `PressureSolver`, `HelmholtzProjection`,
-  `RhieChowConsistency` — the last one directly checks the discrete duality
-  between the Poisson operator and the velocity-correction stencil described
-  in [theory.md](theory.md#velocity-correction-and-discrete-duality); a
-  regression here is a silent divergence-control bug, not a crash.
-- **SGS/wall models**: `VremanSGS`, `VremanFilter`, `DynamicSmagorinsky`,
-  `WallModel`, `WallModelSelect`, `ABLMost`, `SEMProfile`.
-- **Parallel consistency**: `PeriodicParallelMapping`,
-  `ProcessorFaceConsistency` (MPI-enabled builds only — guarded in
-  `tests/CMakeLists.txt`).
-- **I/O**: `WriteTimeSnap`.
-
-When you touch a numerics or BC path, look for the test in this list that
-already exercises it before writing a new one — several tests were added
-specifically because a bug of that shape shipped once (e.g.
-`RhieChowConsistency`, `PeriodicParallelMapping`). If none fits, add a new
-`test_*.f90` following the pattern of the closest existing one and register it
-in `tests/CMakeLists.txt`.
+When you touch a numerics or BC path, find the case above that already exercises it before writing a
+new one. If none fits, add a `tests/unit/test_*.f90` program or a regression case following the closest
+existing one and register it in `tests/CMakeLists.txt`.
 
 ### Case-level regression
 
@@ -138,12 +124,10 @@ PR is a manual step. Each example directory carries its own analysis scripts
 
 ## Style
 
-- **Comments are one line.** No multi-line `!`/`!>` blocks anywhere, Fortran
-  or C. A module or subroutine docstring is a single `!>` line. If an inline
-  comment needs more than one line to explain, either the code needs a better
-  name/structure, or the rationale belongs in a doc under
-  `docs/external-lib-guidance/` (GPU porting decisions do this today) with a
-  single-line pointer left in the code.
+- **Keep comments short.** No comment blocks of three or more lines, in Fortran or C. A module or
+  subroutine docstring is a short `!>` header. If an inline comment needs a long explanation, the code
+  needs a better name or structure, or the rationale belongs in this documentation with a one-line
+  pointer left in the code.
 - `!$acc`/`!$omp` directive continuation lines are compiler directives, not
   comments, and are exempt.
 - No docstrings on trivial getters/setters.
@@ -158,8 +142,7 @@ PR is a manual step. Each example directory carries its own analysis scripts
   `viscous_rhs_vector`/`viscous_rhs_scalar` in `mod_viscous.f90`, and the CDS/
   reconstruction/KEP paths in `mod_advection.f90`) carry both an
   AoS and an SoA/mirror code path; changes to the math need to land in both or
-  the paths silently diverge (this is exactly what `AdvectionKepSoa` /
-  `AdvectionCdsSoa` / `AdvectionQuickTvdSoa` exist to catch).
+  the paths silently diverge; the np1 and np2 regression cases exercise both.
 
 ## Adding a New Advection Scheme
 
@@ -174,9 +157,9 @@ Advection schemes are selected by name (`advection_scheme`,
    neighbors through the periodic-pairing path — see "TVD far-upwind across
    periodic faces" in [theory.md](theory.md); a scheme that silently drops to
    first-order on periodic boundaries is the historical failure mode here.
-3. Add a boundedness/conservation test modeled on `QuickBoundedness` or
-   `KEPConservation`, and an SoA-consistency test modeled on
-   `AdvectionQuickTvdSoa` if you also add a GPU/SoA path.
+3. Add a boundedness or conservation test for the scheme, and an SoA-consistency
+   check if you also add a GPU/SoA path; model both on the closest test in
+   `tests/unit/` and register them in `tests/CMakeLists.txt`.
 4. Document the scheme in [theory.md](theory.md) (family + citation) and
    [usage.md](usage.md) (name table + when to prefer it), and add it to the
    advection scheme table in the top-level [README.md](../README.md).
@@ -228,9 +211,8 @@ signal a maintainer has to reproduce and triage from. The template asks for:
   numerics from scratch.
 
 Prefer a minimal case built in the style of `examples/` over a large
-production mesh — the existing regression tests (`RhieChowConsistency`,
-`PeriodicParallelMapping`, etc.) were all born from exactly this kind of
-minimal reproduction.
+production mesh — the regression cases in `tests/regression/cases/` (for example
+`pdrop` and `hydro`) are exactly this kind of minimal reproduction.
 
 ## Documentation
 
