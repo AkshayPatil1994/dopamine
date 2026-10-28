@@ -520,6 +520,14 @@ The database holds the **fluctuation only** (mean removed). The successor takes 
 usual `&dopamine_abl` mean-profile options (`sem_profile_file`, `sem_mean_law`).
 The inlet must be periodic in the spanwise direction; the run stops otherwise.
 
+File conventions (NetCDF-4, several independent segments):
+
+- The plane is spanwise periodic and uniform: $$y_j = y_0 + jW/n_y$$, $$j = 0 \ldots n_y-1$$.
+- Heights $$z$$ ascend from the ground and may be graded.
+- Values are the fluctuation in the profile frame; component 1 is streamwise.
+- Frame $$i$$ of a segment is at $$t = (i-1)\,\Delta t_p$$, so a segment spans $$(n_t-1)\Delta t_p$$.
+- The plane position along the normal is implicit: the database is the inlet.
+
 #### 1. Generate planes from the SEM
 
 `dopamine-inflow-gen input` reads the SEM inflow description from `&dopamine_abl` (exactly as for
