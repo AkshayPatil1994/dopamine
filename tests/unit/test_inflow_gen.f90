@@ -1,7 +1,6 @@
 ! SPDX-FileCopyrightText: 2026 DOPAMINE contributors
 ! SPDX-License-Identifier: AGPL-3.0-only
-!> The offline generator: statistics against the targets, independence of segments, temporal
-!> resolution (frame-to-frame continuity), turnover-based length, grid-file round trip.
+!> Unit test of the offline inflow generator: statistics, segments, continuity, grid round trip.
 program test_inflow_gen
   use mod_kinds
   use mod_abl_types

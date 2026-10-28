@@ -1,15 +1,6 @@
 ! SPDX-FileCopyrightText: 2026 DOPAMINE contributors
 ! SPDX-License-Identifier: AGPL-3.0-only
-!> Inflow-plane database: NetCDF-4 file of velocity-fluctuation planes u'(y, z, comp) sampled at a
-!> fixed time step, stored as several independent segments.
-!>
-!> Producers (dopamine-inflow-gen, the precursor recorder) write this format; the successor run
-!> reads it. Conventions:
-!>   - the plane is spanwise periodic: y_j = y0 + j*W/ny, j = 0..ny-1 (uniform), y along `t1`
-!>   - z is height above ground, ascending, any spacing (graded is fine)
-!>   - u holds the FLUCTUATION in the profile frame (columns of `frame`; 1 = streamwise)
-!>   - frame i of a segment is at t = (i-1)*dt_p; a segment spans (nt-1)*dt_p
-!>   - plane position along the normal is implicit: the database is the inlet
+!> Inflow-plane database: NetCDF-4 file of velocity-fluctuation planes in several segments.
 module mod_inflow_db
   use mod_kinds
   use netcdf

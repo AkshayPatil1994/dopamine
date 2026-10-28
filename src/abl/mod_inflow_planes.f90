@@ -1,21 +1,6 @@
 ! SPDX-FileCopyrightText: 2026 DOPAMINE contributors
 ! SPDX-License-Identifier: AGPL-3.0-only
-!> Successor-side reader of an inflow-plane database: replays the stored segments in a
-!> pseudo-random order with spanwise shifts and cross-fades between them, and interpolates the
-!> planes to the inlet faces.
-!>
-!> Replay (a pure function of time and seed, so a restart needs no extra state):
-!>   period P = T_seg - T_x, with T_x the cross-fade length. Period m uses segment k_m (random,
-!>   never the same twice in a row) shifted spanwise by s_m nodes (golden-ratio sequence). During
-!>   the first T_x of a period the previous period's stream fades out: u = sin(th) u_new + cos(th) u_old.
-!>   The weights are uniform in space, so a divergence-free plane stays so; sin^2 + cos^2 = 1
-!>   keeps the variance for decorrelated segments.
-!>
-!> Interpolation:
-!>   time    - Catmull-Rom cubic over four frames
-!>   span    - exact trigonometric (Fourier) interpolation on the periodic uniform nodes; a shift is
-!>             a whole number of nodes, so it costs no accuracy and a matching face is untouched
-!>   height  - six-point Lagrange on the (possibly graded) z nodes; a matching level is untouched
+!> Successor-side replay of an inflow-plane database with shifts, cross-fades and interpolation.
 module mod_inflow_planes
   use mod_kinds
   use mod_parameters, only: BC_PERIODIC

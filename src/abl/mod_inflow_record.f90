@@ -1,15 +1,6 @@
 ! SPDX-FileCopyrightText: 2026 DOPAMINE contributors
 ! SPDX-License-Identifier: AGPL-3.0-only
-!> Precursor-side recorder: samples a plane of the running simulation into an inflow-plane database.
-!>
-!> The plane is a layer of cell centres (all cells whose centroid lies on the plane through
-!> `record_point` with normal `record_normal`), so the stored values are the solver's own cell
-!> values with no interpolation. The layer must form a regular (y, z) lattice, uniform across a
-!> spanwise-periodic domain; otherwise the run stops. Frames are taken at fixed times
-!> t_start + n*dt (linear interpolation between solver steps), so adaptive time stepping is fine.
-!> When the requested segments are complete the mean profile is removed (the database holds
-!> fluctuations only), the measured stresses are stored, and the spanwise-mean waveform shared
-!> by the segments is removed (see inflow_db_decorrelate_span_mean).
+!> Precursor-side recorder: samples a plane of cell centres into an inflow-plane database.
 module mod_inflow_record
   use mod_kinds
   use mod_mesh

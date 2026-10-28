@@ -1,12 +1,6 @@
 ! SPDX-FileCopyrightText: 2026 DOPAMINE contributors
 ! SPDX-License-Identifier: AGPL-3.0-only
 !> Unit test of the divergence-free synthetic eddy kernel (no mesh, no MPI-dependent paths).
-!>  1. one eddy is solenoidal to finite-difference accuracy and has zero volume-integrated velocity;
-!>  2. the eddy ensemble on a doubly periodic inlet plane reproduces the target Reynolds tensor, with and
-!>     without shear stress and for a rotated mean-wind direction (prescribed full-tensor tables);
-!>  3. the Jacobi eigen-solver reconstructs its input;
-!>  4. the binned evaluation equals the all-eddy sum (both kernels; periodic, partly periodic and open inlets,
-!>     two-bin periodic widths, query points outside the box, time look-ahead, after the eddies have moved).
 program test_sem_dfsem
   use mod_kinds
   use mod_abl_types

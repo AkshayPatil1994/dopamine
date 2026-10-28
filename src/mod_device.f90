@@ -1,7 +1,6 @@
 ! SPDX-FileCopyrightText: 2026 DOPAMINE contributors
 ! SPDX-License-Identifier: AGPL-3.0-only
-!> Rank -> GPU binding. One MPI rank per device: node-local rank % ndev, shared by the OpenACC
-!> runtime and PETSc's CUDA backend so a rank's kernels and its pressure solve use the same GPU.
+!> Rank to GPU binding: node-local rank % ndev, shared by OpenACC and PETSc CUDA.
 module mod_device
   use iso_c_binding, only: c_int
   use mod_kinds, only: ip

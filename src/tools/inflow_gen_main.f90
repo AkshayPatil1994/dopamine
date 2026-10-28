@@ -1,8 +1,6 @@
 ! SPDX-FileCopyrightText: 2026 DOPAMINE contributors
 ! SPDX-License-Identifier: AGPL-3.0-only
-!> Offline inflow-plane generator: dopamine-inflow-gen <input>
-!> Reads &dopamine_abl (the SEM inflow description) and &dopamine_inflow_gen, writes a NetCDF
-!> database of spanwise-periodic fluctuation planes for the successor run (inflow_source = 'planes').
+!> Offline inflow-plane generator: dopamine-inflow-gen <input>.
 program dopamine_inflow_gen
   use mod_kinds
   use mod_input_parser

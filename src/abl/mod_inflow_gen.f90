@@ -1,10 +1,6 @@
 ! SPDX-FileCopyrightText: 2026 DOPAMINE contributors
 ! SPDX-License-Identifier: AGPL-3.0-only
 !> Offline generation of an inflow-plane database from the SEM.
-!>
-!> The SEM runs in a box that is exactly one spanwise period wide (minimum-image distances), and
-!> the field is sampled on a fixed (y, z) grid at a fixed frame spacing. Several independent
-!> segments are written; the successor run replays them in a random order with spanwise shifts.
 module mod_inflow_gen
   use mod_kinds
   use mod_abl_types

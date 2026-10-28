@@ -1,12 +1,6 @@
 ! SPDX-FileCopyrightText: 2026 DOPAMINE contributors
 ! SPDX-License-Identifier: AGPL-3.0-only
-!> The successor-side replay of an inflow-plane database:
-!>   1. schedule: deterministic, no immediate repeats, shifts well spread
-!>   2. interpolation order: exact for band-limited (span) x cubic (z) x quadratic (time) fields
-!>   3. mesh-matched faces are an exact copy (no filtering)
-!>   4. cross-fade keeps the variance; time interpolation loses < 1%
-!>   5. no spectral line at the replay period with several segments (and a line with one)
-!>   6. the lateral-periodicity stop check
+!> Unit test of the inflow-plane replay: schedule, interpolation, exact copy, cross-fade, periodicity.
 program test_inflow_planes
   use mod_kinds
   use mod_parameters, only: BC_PERIODIC, BC_SLIP

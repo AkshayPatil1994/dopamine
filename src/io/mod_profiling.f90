@@ -1,7 +1,6 @@
 ! SPDX-FileCopyrightText: 2026 DOPAMINE contributors
 ! SPDX-License-Identifier: AGPL-3.0-only
-!> Named profiler ranges (NVTX, visible in Nsight Systems). Compiled to no-ops unless the
-!> build defines DOPAMINE_NVTX (-DDOPAMINE_ENABLE_NVTX=ON).
+!> Named profiler ranges (NVTX); no-ops unless DOPAMINE_NVTX is defined.
 module mod_profiling
   use iso_c_binding, only: c_char, c_null_char
   implicit none
