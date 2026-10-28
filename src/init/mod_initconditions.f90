@@ -333,10 +333,7 @@ contains
     end if
   end subroutine initialize_taylor_green_ic
 
-  !> Passive-scalar advection test: uniform streamwise velocity uref and a temperature profile
-  !> T = T_ref + f(x) along x on the periodic domain.
-  !>   'scalar_gauss' : Gaussian, centre 0.25 L, sigma 0.05 L (smooth; for order-of-accuracy tests)
-  !>   'scalar_pulse' : the same Gaussian plus a square pulse on [0.55, 0.75] L (for scheme comparison)
+  !> Scalar advection test: uniform uref, T = T_ref + Gaussian ('scalar_gauss') or Gaussian plus square pulse ('scalar_pulse').
   subroutine initialize_scalar_advection_ic(slv, uref, kind)
     type(FVSolver),   intent(inout) :: slv
     real(rp),         intent(in)    :: uref

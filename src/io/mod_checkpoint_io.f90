@@ -51,9 +51,7 @@ contains
     header(6) = 0  ! reserved
     header(7) = 0
     if (solver%u_face_ready .and. allocated(solver%U_face)) header(7) = 1
-    ! header(8) is a bit mask of trailing wall-model records written after U_face:
-    ! 1 = tau_w_bnd, 2 = q_w_bnd, 4 = L_bnd, 8 = wall-stress filter. They carry the wall-stress time filter and the
-    ! Obukhov-length iteration, which restart from zero otherwise (same rank count only).
+    ! header(8) masks trailing wall-model records after U_face: 1 tau_w_bnd, 2 q_w_bnd, 4 L_bnd, 8 stress filter.
     header(8) = 0
     if (allocated(solver%tau_w_bnd)) header(8) = header(8) + 1
     if (allocated(solver%q_w_bnd))   header(8) = header(8) + 2

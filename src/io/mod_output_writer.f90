@@ -686,9 +686,7 @@ contains
       call nc_check(nf90_get_var(writer%ncid, writer%var_step, writer%steps(1:existing_snaps), &
                     start=(/1/), count=(/existing_snaps/)), 'get:step_history')
 
-      ! Snapshots past the checkpoint belong to the abandoned continuation; the next write overwrites
-      ! them in place (the unlimited dimension cannot shrink, so a shorter rerun leaves a stale tail
-      ! that the XDMF index, which only lists snap_count entries, does not reference).
+      ! Snapshots past the checkpoint are overwritten in place; a stale tail is not referenced by the XDMF index.
       if (present(restart_step)) then
         keep = existing_snaps
         do while (keep > 0)
@@ -1014,7 +1012,8 @@ contains
     close(unit_id)
   end subroutine write_temporal_xmf
 
-  subroutine write_xmf_grid(unit_id, nc_file, n_cells, n_verts, n_topo, ntime, tidx, time_val, has_temp, n_scalars, scalar_names, has_nu_sgs)
+  subroutine write_xmf_grid(unit_id, nc_file, n_cells, n_verts, n_topo, ntime, tidx, time_val, has_temp, n_scalars, &
+      scalar_names, has_nu_sgs)
     integer(ip),      intent(in) :: unit_id, n_cells, n_verts, n_topo, ntime, tidx
     character(len=*), intent(in) :: nc_file
     real(rp),         intent(in) :: time_val
@@ -1042,7 +1041,8 @@ contains
     call write_xmf_hyperslab_vector(unit_id, 'velocity', trim(nc_file)//':/U', ntime, tidx, n_cells)
     if (has_nu_sgs) call write_xmf_hyperslab_scalar(unit_id, 'nu_sgs', trim(nc_file)//':/nu_sgs', ntime, tidx, n_cells)
     do s = 1, n_scalars
-      call write_xmf_hyperslab_scalar(unit_id, trim(scalar_names(s)), trim(nc_file)//':/'//trim(scalar_names(s)), ntime, tidx, n_cells)
+      call write_xmf_hyperslab_scalar(unit_id, trim(scalar_names(s)), trim(nc_file)//':/'//trim(scalar_names(s)), &
+          ntime, tidx, n_cells)
     end do
 
     write(unit_id,'(A)') '      </Grid>'

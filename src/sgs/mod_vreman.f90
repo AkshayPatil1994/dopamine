@@ -32,10 +32,7 @@ module mod_vreman
   ! Neighbour blend weight applied in each smoothing pass.
   real(rp),    parameter :: G_SMOOTH_WEIGHT = 0.5_rp
 
-  ! Cap on nu_sgs as a fraction of the explicit diffusive stability limit nu*dt/h^2 ~ O(1):
-  ! viscous_rhs_vector applies (nu+nu_sgs) explicitly in the RK stage, so an uncapped nu_sgs
-  ! can violate that limit locally (observed: nu_sgs spiking 30x at the smallest refined
-  ! cells, feeding back through the rotational pressure correction into a full blowup).
+  ! Cap on nu_sgs as a fraction of the explicit diffusive limit nu*dt/h^2: uncapped spikes at small refined cells blew up the run.
   real(rp), parameter :: NU_SGS_STAB_FRAC = 0.4_rp
 
 contains
@@ -57,9 +54,7 @@ contains
     real(rp),   intent(in), optional :: U_bnd(:,:)  ! (3, n_bnd_faces)
     ! Optionally reuse a pre-computed gradient (e.g. the solver's own grad_U) instead of rebuilding it.
     real(rp),   intent(in), optional, target :: grad_U_ext(:,:,:)  ! (3,3,n_cells[+n_ghost])
-    ! RK-stage dt: if present, caps nu_sgs at NU_SGS_STAB_FRAC * V^(2/3) / dt_stab (see
-    ! NU_SGS_STAB_FRAC) so an anisotropic-gradient spike at a small refined cell can't
-    ! violate the explicit diffusive stability limit viscous_rhs_vector relies on.
+    ! RK-stage dt: if present, caps nu_sgs at NU_SGS_STAB_FRAC * V^(2/3) / dt_stab to respect the explicit diffusive limit.
     real(rp),   intent(in), optional :: dt_stab
 
     real(rp), allocatable, target :: grad_U_local(:,:,:)
@@ -83,9 +78,7 @@ contains
       grad_U => grad_U_local
     end if
 
-    ! Precompute the filter-width tensor G per cell; rebuild if mesh size changed.
-    ! Split into two IFs: .or. does not short-circuit in Fortran, so size(g_filt_arr,...)
-    ! must never be evaluated in the same expression as the allocated() check.
+    ! Precompute the filter-width tensor G per cell, rebuilt if the mesh size changed; split ifs as .or. does not short-circuit.
     if (.not. allocated(g_filt_arr)) then
       call build_filter_tensor(msh)
     else if (size(g_filt_arr, 3) /= msh%n_cells + msh%n_ghost) then

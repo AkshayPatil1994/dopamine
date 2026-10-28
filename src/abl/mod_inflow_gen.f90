@@ -260,8 +260,9 @@ contains
     nz_min = 2.0_rp * st%sig_min / dz
     write(*,'(A,F6.1,A,F6.1,A)') ' inflow-gen: smallest eddy spans ', ny_min, ' nodes across the span and ', nz_min, &
       ' in height'
-    if (min(ny_min, nz_min) < 4.0_rp) write(*,'(A)') ' inflow-gen: NOTE: fewer than 4 nodes per eddy; fine if the successor mesh ' // &
-      'uses this very lattice (gen_grid_file), but interpolating to another mesh would filter the small scales.'
+    if (min(ny_min, nz_min) < 4.0_rp) write(*,'(A)') &
+      ' inflow-gen: NOTE: fewer than 4 nodes per eddy; fine if the successor mesh uses this very lattice ' // &
+      '(gen_grid_file), but interpolating to another mesh would filter the small scales.'
   end subroutine report_eddy_resolution
 
   !> Flow direction unit vector of the wind (horizontal), the direction the eddies are convected.

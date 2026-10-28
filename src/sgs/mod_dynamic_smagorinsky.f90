@@ -131,7 +131,7 @@ contains
     !$omp end parallel do
 #endif
 
-    ! Local averaging of the numerator/denominator over the compact stencil (Lilly's ratio is noisy pointwise), same rationale as mod_vreman's refinement-interface smoothing.
+    ! Local averaging over the compact stencil (Lilly's ratio is noisy pointwise), as in mod_vreman's interface smoothing.
     call msh%exchange_halos_scalars(lm_mm(:, 1:ntot))
     call test_filter(msh, lm_mm, lm_mm_hat, 2_ip)
 

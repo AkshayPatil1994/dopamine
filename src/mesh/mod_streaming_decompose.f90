@@ -59,7 +59,7 @@ contains
     real(rp) :: mem_budget_gb
     logical :: use_staged_geom, vol_weight
     integer(ip) :: writer_threads
-    ! Progress-bar temporaries hoisted out of a `block` (nvfortran rejects BLOCK inside a parallel directive); scoped via !$omp private() instead.
+    ! Progress-bar temporaries sit outside a `block` (nvfortran rejects BLOCK in a parallel directive); scoped via !$omp private().
     integer(ip) :: pct_now
     character(len=32) :: bar_now
     character(len=16) :: rank_str

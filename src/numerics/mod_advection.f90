@@ -40,7 +40,7 @@ module mod_advection
   !> Per-cell discrete divergence sum_f sigma*F_f, rebuilt each KEP call for the split form.
   real(rp), allocatable, save :: div_work(:)
 
-  ! Persistent scratch buffers grown once instead of allocate/deallocate every RK substage, same rationale as mod_gradient.f90/mod_viscous.f90; calls into this module must stay serial, never concurrent, since these buffers are shared mutable state.
+  ! Persistent scratch buffers grown once, as in mod_gradient/mod_viscous; calls into this module must stay serial.
   integer(ip), allocatable, target, save :: fcp_identity_buf(:)
   ! Stand-in bound to an absent phi_bnd in the scalar SoA paths: an absent optional can't be named
   ! inside an !$acc region. Read only behind has_bnd.
@@ -70,9 +70,7 @@ contains
     integer(ip) :: col, idx, n_loops, lo, hi
     logical     :: use_color
 
-    ! GPU/SoA fast path: CDS with grad_phi (eps-correction) and a projected face_flux, the
-    ! production configuration for temperature/scalar transport, has a fixed owner/neighbour
-    ! (+periodic) stencil and no reconstruction-function calls.
+    ! GPU/SoA fast path: CDS with grad_phi and projected face_flux (production scalar setup), fixed stencil, no reconstruction.
     if (scheme == SCHEME_CDS .and. present(grad_phi) .and. present(face_flux) .and. present(inv_vol) &
         .and. msh%soa_ready) then
       call advection_rhs_scalar_cds_soa(phi, msh, rhs, phi_bnd, face_flux, inv_vol, grad_phi)
@@ -265,9 +263,7 @@ contains
     ok = abs(x) <= huge(x)  ! false for NaN (unordered) and Inf
   end function soa_is_finite
 
-  !> CDS fast path via the flat SoA mesh mirror, for scheme=SCHEME_CDS with grad_phi and a
-  !> projected face_flux present (the production configuration): fixed owner/neighbour(+periodic)
-  !> stencil, no reconstruction-function calls, matches face_interpolate_scalar's math exactly.
+  !> CDS fast path on the SoA mirror (CDS with grad_phi and projected face_flux): fixed stencil, matches face_interpolate_scalar.
   subroutine advection_rhs_scalar_cds_soa(phi, msh, rhs, phi_bnd, face_flux, inv_vol, grad_phi)
     real(rp),    intent(in)    :: phi(:)  ! (n_cells + n_ghost)
     type(Mesh),  intent(in), target :: msh
@@ -368,9 +364,7 @@ contains
         bc_id = -1
         nb_per = -1
 
-        ! Face-normal flux: projected face_flux on interior/periodic/outlet faces,
-        ! boundary-velocity flux (zero on walls) elsewhere. Matches advection_rhs_scalar
-        ! exactly for the present(face_flux) case (the only case this fast path handles).
+        ! Face-normal flux: projected face_flux on interior/periodic/outlet faces, boundary-velocity flux elsewhere.
         if (nb >= 1) then
           Fn = face_flux(f)
         else
@@ -393,9 +387,7 @@ contains
           end if
         end if
 
-        ! Reconstruction branch: rich periodic-partner resolution decides interior-style
-        ! (face_interpolate_scalar) vs. boundary (phi_bnd) reconstruction, matching
-        ! face_has_reconstruction_neighbor's own logic.
+        ! Reconstruction branch: periodic-partner resolution picks interior-style or boundary (phi_bnd) reconstruction.
         has_reconstruction = (nb >= 1)
         if (.not. has_reconstruction .and. bc_id == BC_PERIODIC) then
           pair_face = -1
@@ -425,9 +417,7 @@ contains
             nb_simple = -1
             if (f_bnd >= 1 .and. f_bnd <= nbnd) nb_simple = pneigh_soa(f_bnd)
           end if
-          ! periodic_neighbor is not always populated (single rank); without a neighbour the face
-          ! value below falls back to phi(o), which on the inflow side of the seam is the wrong cell.
-          ! nb_per was resolved above through the periodic pair, so use it.
+          ! periodic_neighbor is unset on a single rank and phi(o) is the wrong cell at the seam; use nb_per resolved above.
           if (nb_simple < 1) nb_simple = nb_per
 
           if (nb_simple >= 1 .and. nb_simple <= nc + msh%n_ghost) then
@@ -494,10 +484,7 @@ contains
             ppair_soa, fcentre_soa, ccent_soa, eps_soa, skew_soa)
   end subroutine advection_rhs_scalar_cds_soa
 
-  !> QUICK/VANLEER_TVD/KOREN_TVD fast path via the flat SoA mesh mirror (including the
-  !> cell_face_offset_soa CSR mirror for the upwind-cell stencil walk): matches
-  !> quick_reconstruction/vanleer_tvd_reconstruction/koren_tvd_reconstruction's math exactly,
-  !> minus the tvd_fallback_count diagnostic (dropped, not device-safe to increment).
+  !> QUICK/VANLEER_TVD/KOREN_TVD fast path on the SoA mirror (CSR upwind walk); same math minus tvd_fallback_count.
   subroutine advection_rhs_scalar_recon_soa(phi, msh, scheme, rhs, phi_bnd, face_flux, inv_vol, grad_phi)
     real(rp),    intent(in)    :: phi(:)  ! (n_cells + n_ghost)
     type(Mesh),  intent(in), target :: msh
@@ -1022,9 +1009,7 @@ contains
     end if
   end subroutine advection_rhs_vector
 
-  !> KEP fast path via the flat SoA mesh mirror: fixed owner/neighbour(+periodic) stencil only,
-  !> no reconstruction-function calls, so the colored loop maps directly onto !$acc parallel loop.
-  !> Skips ke_budget diagnostics; caller only dispatches here when ke_budget_on is off.
+  !> KEP fast path on the SoA mirror: fixed stencil, no reconstruction calls; skips ke_budget (dispatched only when it is off).
   subroutine advection_rhs_vector_kep_soa(U, msh, rhs, U_bnd, face_flux, inv_vol)
     real(rp),    intent(in)    :: U(:,:)  ! (3, n_cells + n_ghost)
     type(Mesh),  intent(in), target :: msh
@@ -1084,9 +1069,7 @@ contains
     !$acc      fcp(1:nf)) &
     !$acc      copyout(rhs(:,1:nc)) create(div_work(1:nc)) if(use_color)
 #endif
-    ! rhs and the face-flux divergence accumulator are zeroed, and the split-form term added,
-    ! inside the data region, so the routine works whether the fields are device-resident or
-    ! copied in and out; div_work never leaves the device.
+    ! rhs and flux-divergence accumulator are zeroed inside the data region, so this works device-resident or copied.
     !$acc parallel loop if(use_color) default(present)
     do idx = 1, nc
       rhs(1, idx) = 0.0_rp
@@ -1213,10 +1196,7 @@ contains
     nullify(fo_soa, fn_soa, fcp, sf_soa, gc_soa, pgc_soa, cvol_soa, fpatch_soa, pbc_soa, pneigh_soa, ppair_soa)
   end subroutine advection_rhs_vector_kep_soa
 
-  !> GPU/SoA fast path for velocity CDS: per component the face value is the scalar CDS
-  !> reconstruction (face_interpolate_scalar with the grad_U eps-correction, faded toward
-  !> refinement interfaces), and the face flux follows the vector path's rule: projected flux on
-  !> interior, periodic and outlet faces, zero on walls, U_bnd.Sf on the other open boundaries.
+  !> GPU/SoA velocity CDS: scalar CDS face value per component; flux projected on interior/periodic/outlet, zero on walls.
   subroutine advection_rhs_vector_cds_soa(U, msh, rhs, U_bnd, face_flux, inv_vol, grad_U)
     real(rp),    intent(in)    :: U(:,:)  ! (3, n_cells + n_ghost)
     type(Mesh),  intent(in), target :: msh
@@ -1469,13 +1449,7 @@ contains
       fcp => fcp_identity_buf(1:nf)
     end if
 
-    ! U(k,:) and grad_U(:,k,:) are non-contiguous (stride-3) sections; passed straight into an
-    ! !$acc routine seq dummy they force a per-thread copy scaling with mesh size, which is what
-    ! was overflowing device local memory above ~11k cells. Transpose once here instead so the
-    ! per-component slices handed to the device routines below are contiguous.
-    ! OpenACC builds fill the buffers on the device inside the data region below; the host fill
-    ! is then only for the uncoloured fallback, where the compute loop's if(use_color) runs on the
-    ! host (and must not run otherwise: with device-resident fields the host U is stale).
+    ! Transpose U and grad_U (stride-3 sections) into contiguous buffers: per-thread copies overflowed device memory.
     host_fill = .true.
 #ifdef _OPENACC
     host_fill = .not. use_color
@@ -1492,20 +1466,14 @@ contains
       end do
     end if
     if (scheme == SCHEME_QUICK .and. host_fill) then
-      ! grad_U's 3rd extent is n_cells+n_ghost; only owned cells are read back out of this
-      ! buffer downstream, so slice to 1:nc (a bare `:` here is a non-conforming assignment
-      ! that overruns recon_v_gradt_buf by 3*n_ghost reals).
+      ! grad_U extent is n_cells+n_ghost; slice to 1:nc, as a bare : overruns recon_v_gradt_buf by 3*n_ghost reals.
       do kk = 1, 3
         recon_v_gradt_buf(:, 1:nc, kk) = grad_U(:, kk, 1:nc)
       end do
     end if
 
 #ifdef _OPENACC
-    ! recon_v_Ut_buf/recon_v_gradt_buf are `create`, not `copyin`: filled by the device kernel
-    ! below instead of uploading the host repack above. U/grad_U stay `copyin`, which is a no-op
-    ! refcount bump (no transfer) when this is called from advance_rk3w's outer resident region
-    ! (the common case) and a real upload only when this routine is exercised standalone (e.g.
-    ! unit tests) without an enclosing device data region.
+    ! recon_v buffers are create (filled on device); U/grad_U copyin is a refcount bump inside the resident region.
     !$acc data copyin(U(:,1:nu), grad_U(:,:,1:nc), &
     !$acc      face_flux(1:nf), U_bnd(:,:), inv_vol(1:nc), &
     !$acc      fo_soa(1:nf), fn_soa(1:nf), cvol_soa(1:nc), fpatch_soa(1:nf), &
@@ -1516,9 +1484,7 @@ contains
     !$acc      create(recon_v_Ut_buf(1:nu,1:3), recon_v_gradt_buf(:,1:nc,:)) &
     !$acc      copyout(rhs(:,1:nc)) if(use_color)
 
-    ! Device-side fill: only executes on-device when use_color (matches the compute loop's own
-    ! if(use_color) below); when use_color is false this runs on host and is a harmless redundant
-    ! repeat of the host loop above, since in that branch the compute loop reads the host buffers.
+    ! Device-side fill runs on device only when use_color; otherwise it harmlessly repeats the host loop above.
     !$acc parallel loop if(use_color)
     do idx = 1, nu
       recon_v_Ut_buf(idx, 1) = U(1, idx)
@@ -1893,7 +1859,8 @@ contains
     if (nb == owner) nb = -1
   end function resolve_periodic_nb
 
-  logical function resolve_reconstruction_context(f, Fn, msh, up, down, x_up, x_down, x_face, up_shift, dir_hat, s_face, s_down) result(ok)
+  logical function resolve_reconstruction_context(f, Fn, msh, up, down, x_up, x_down, x_face, up_shift, dir_hat, &
+      s_face, s_down) result(ok)
     integer(ip), intent(in)  :: f
     real(rp),    intent(in)  :: Fn
     type(Mesh),  intent(in)  :: msh
@@ -1974,7 +1941,7 @@ contains
 
   ! QUICK reconstruction
 
-  !> Geometry-aware QUICK: quadratic LS fit on an upwind stencil; public API for tests, hot loop uses quick_reconstruction_ctx instead.
+  !> Geometry-aware QUICK: quadratic LS fit on an upwind stencil; public for tests, the hot loop uses quick_reconstruction_ctx.
   real(rp) function quick_reconstruction(phi, f, Fn, msh, grad_phi) result(phi_f)
     real(rp),    intent(in) :: phi(:)
     integer(ip), intent(in) :: f
@@ -2357,12 +2324,7 @@ contains
     y = min(max(x, l), h)
   end function clamp_value
 
-  ! ==========================================================================
-  ! Device-callable SoA counterparts of the reconstruction-context helpers
-  ! above, for the QUICK/VANLEER_TVD/KOREN_TVD GPU fast path. Diagnostic-only
-  ! side effects (tvd_fallback_count) are dropped; everything numerically
-  ! relevant is preserved.
-  ! ==========================================================================
+  ! Device-callable SoA counterparts of the reconstruction helpers for the QUICK/TVD GPU path (tvd_fallback_count dropped).
 
   !> Device-callable SoA counterpart of resolve_periodic_nb.
   integer(ip) function soa_resolve_periodic_nb_dev(f_bnd, owner, n_int, nf, pneigh_soa, ppair_soa, fo_soa, fn_soa) &

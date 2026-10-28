@@ -118,9 +118,7 @@ module mod_mesh
     real(rp),    allocatable :: ls_weights(:,:)  ! (3, size(ls_stencil))
     integer(ip), allocatable :: ls_stencil_face(:)  ! face index per stencil entry; -1 for non-boundary
 
-    ! -- vertex-adjacent owned/ghost cell pairs across partition cuts. Face neighbours are not enough
-    ! for the least-squares stencil: without these a cut cell loses the vertex neighbours that the
-    ! single-rank stencil has, so the gradient would depend on the decomposition.
+    ! -- vertex-adjacent cell pairs across partition cuts, so the LS stencil matches the single-rank one.
     integer(ip) :: n_vx = 0
     integer(ip), allocatable :: vx_owned(:)  ! (n_vx) local owned cell
     integer(ip), allocatable :: vx_ghost(:)  ! (n_vx) local ghost cell sharing a vertex with it
@@ -150,9 +148,7 @@ module mod_mesh
     !> Pack buffers, n_fields values per cell, cell-major; shared by every exchange kind since
     !> only one exchange is ever in flight (halo_exchange_active). Grow-only.
     real(rp), allocatable      :: halo_sbuf(:), halo_rbuf(:)
-    !> Fields live on the device (set via set_halo_device once the solver makes them resident):
-    !> pack/unpack run there, and MPI gets device buffers when halo_gpu_aware, else the packed
-    !> buffers alone are staged through the host.
+    !> Fields live on the device after set_halo_device; MPI gets device buffers if halo_gpu_aware, else staged via the host.
     logical                    :: halo_on_device = .false.
     logical                    :: halo_gpu_aware = .false.
     !> Device path chosen for the exchange in flight: halo_on_device and the field actually
@@ -221,7 +217,7 @@ contains
     integer(ip) :: i, c, f, cnt
     integer(ip), allocatable :: degree(:)
 
-    if (allocated(self%cell_faces)) deallocate(self%cell_faces)  ! safe to call twice (e.g. after a preprocessed-mesh read that already carried it)
+    if (allocated(self%cell_faces)) deallocate(self%cell_faces)  ! safe to call twice (preprocessed read may carry it)
 
     ! Count faces per cell
     allocate(degree(self%n_cells + self%n_ghost), source=0)
@@ -413,9 +409,7 @@ contains
     if (allocated(self%periodic_pair_dcf)) &
       self%periodic_pair_dcf_soa(1:size(self%periodic_pair_dcf)) = self%periodic_pair_dcf
 
-    ! Owner weight for periodic-pair interpolation: gc_per = d_cf_nb/(d_cf_o+d_cf_nb), matching the
-    ! interior-face gc convention. faces(:)%gc is hard-coded to 1 on boundary/periodic faces (see
-    ! mesh_compute_geometry) so consumers must read this array instead for BC_PERIODIC faces.
+    ! Owner weight d_cf_nb/(d_cf_o+d_cf_nb) for periodic pairs; faces(:)%gc is 1 there, so BC_PERIODIC consumers read this.
     allocate(self%periodic_gc_soa(max(self%n_bnd_faces, 1_ip)))
     self%periodic_gc_soa = 0.5_rp
     do f = 1, self%n_bnd_faces
@@ -579,9 +573,7 @@ contains
       end do
     end do
 
-    ! Optional second pass: add vertex-adjacent cells to improve LS conditioning near walls.
-    ! Split into nested ifs: .and. does not short-circuit in Fortran, so size(self%cell_offsets)
-    ! must never be evaluated in the same expression as the allocated() check.
+    ! Optional second pass adds vertex-adjacent cells; nested ifs because .and. does not short-circuit.
     use_vertex_ext = .false.
     if (allocated(self%cell_offsets) .and. allocated(self%cell_vertices) &
         .and. self%n_vertices > 0) then
@@ -769,9 +761,7 @@ contains
     n = ls_degenerate_count
   end function mesh_ls_degenerate_count
 
-  !> Switch halo pack/unpack to the device (fields must stay device-resident from now on).
-  !> gpu_aware: MPI accepts device buffers directly; otherwise only the packed buffers are
-  !> staged through the host.
+  !> Switch halo pack/unpack to the device; gpu_aware passes device buffers to MPI, else they are staged via the host.
   subroutine mesh_set_halo_device(self, on_device, gpu_aware)
     class(Mesh), intent(inout) :: self
     logical,     intent(in)    :: on_device, gpu_aware
@@ -1051,9 +1041,7 @@ contains
       !$acc update device(U(:, self%n_cells+1:self%n_cells+self%n_ghost), &
       !$acc      p(self%n_cells+1:self%n_cells+self%n_ghost), &
       !$acc      T(self%n_cells+1:self%n_cells+self%n_ghost)) if(self%n_ghost > 0) if_present
-      ! C is optional: referencing it in an !$acc clause when absent is invalid regardless of the
-      ! clause's own runtime if(), since data clauses are resolved statically -- guard with a plain
-      ! Fortran present() check instead (see mod_gradient.f90 for the same constraint on U_bnd).
+      ! C is optional: guard with a plain present() check, as !$acc data clauses are resolved statically.
       if (present(C)) then
         !$acc update device(C(:, self%n_cells+1:self%n_cells+self%n_ghost)) if(self%n_ghost > 0 .and. n_scalars > 0) if_present
       end if

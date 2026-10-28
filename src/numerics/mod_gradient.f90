@@ -25,9 +25,7 @@ module mod_gradient
   ! Persistent scratch buffer grown once instead of allocate/deallocate every RK substage.
   integer(ip), allocatable, target, save :: fcp_identity_buf(:)     ! shared by both Green-Gauss routines
 
-  ! Stand-ins bound to absent optional arguments (phi_bnd, grad_*_prev): an absent optional can't
-  ! be named inside an !$acc region, so the kernels always see a real, device-resident array.
-  ! They are only ever read behind the matching has_* guard.
+  ! Stand-ins for absent optional arguments (an absent optional can't be named in !$acc); only read behind the matching has_* guard.
   real(rp), target, save :: grad_dummy_s(1)       = 0.0_rp
   real(rp), target, save :: grad_dummy_v(3, 1)    = 0.0_rp
   real(rp), target, save :: grad_dummy_t(3, 3, 1) = 0.0_rp
@@ -342,9 +340,7 @@ contains
     n_bnd = size(pbnd)
 
 #ifdef _OPENACC
-    ! GPU path only: spreads the stencil walk across a gang's vector threads with a manual reduction (nsys: 97.5% of kernel time otherwise, one thread crawling the whole list).
-    ! Owned cells are fully overwritten below and ghost slots zeroed (filled later by the halo
-    ! exchange), so copyout -- not copy -- avoids uploading a value the kernel never uses.
+    ! GPU path: vector-thread stencil walk with a manual reduction; copyout as owned cells are overwritten and ghosts get the halo.
     ng = size(grad_phi, 2)
     !$acc data copyin(phi(1:nvals), pbnd, stencil_offset(1:nc+1), &
     !$acc              stencil(1:n_stencil), stencil_face(1:n_stencil), ls_w(:,1:n_stencil)) &
@@ -462,10 +458,7 @@ contains
     n_bnd = size(ubnd, 2)
 
 #ifdef _OPENACC
-    ! GPU path only, same rationale as ls_gradient_scalar above (97.5% of measured GPU kernel time); CPU loop below is untouched.
-    ! Unrolled into 9 scalar accumulators, not a g(3,3) array reduction: the array form hit an nvfortran 26.5 shared-memory codegen bug.
-    ! Owned cells are fully overwritten below and ghost slots zeroed (filled later by the halo
-    ! exchange), so copyout -- not copy -- avoids uploading a value the kernel never uses.
+    ! GPU path: 9 scalar accumulators (g(3,3) array reduction hit an nvfortran 26.5 codegen bug); copyout as in ls_gradient_scalar.
     ng = size(grad_U, 3)
     !$acc data copyin(U(:,1:nvals), ubnd, stencil_offset(1:nc+1), &
     !$acc              stencil(1:n_stencil), stencil_face(1:n_stencil), ls_w(:,1:n_stencil)) &

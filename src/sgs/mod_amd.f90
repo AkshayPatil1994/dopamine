@@ -65,10 +65,7 @@ contains
     end if
   end subroutine amd_point_viscosity
 
-  !> Compute the AMD SGS viscosity at all owned cells.
-  !> With wall_gradient, cells owning a BC_WALL_MODEL face replace the wall-normal gradient of the
-  !> wall-parallel velocity by the log-law value u_tau/(kappa y), u_tau being re-solved from the
-  !> cell-centre velocity, because the resolved gradient overshoots there at y+ ~ 50-100.
+  !> Compute the AMD SGS viscosity at owned cells; wall_gradient uses the log-law gradient u_tau/(kappa y) in wall-model cells.
   subroutine amd_sgs_viscosity(U, msh, nu_sgs, nu, c_amd, wall_gradient, U_bnd, grad_U_ext, dt_stab)
     real(rp),   intent(in)    :: U(:,:)  ! (3, n_cells+n_ghost)
     type(Mesh), intent(inout), target :: msh  ! inout: the shared filter-tensor build halo-exchanges G

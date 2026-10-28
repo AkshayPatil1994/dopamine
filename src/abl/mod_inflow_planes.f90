@@ -437,12 +437,7 @@ contains
   end subroutine inflow_planes_bind
 
 
-  !> Resolution report for the stored data: how well the frame spacing and the (possibly graded)
-  !> height spacing resolve the signal. Rank 0 only; reads a few frames of the first segment.
-  !>   time   - correlation of consecutive frames (the cubic interpolation needs it near 1)
-  !>   height - predict every interior level from its six nearest neighbours (omitting it, so a
-  !>            gap twice the node spacing, i.e. worse than any real offset) and report the
-  !>            smallest variance retained
+  !> Resolution report (rank 0): time = consecutive-frame correlation; height = variance kept predicting a level from neighbours.
   subroutine inflow_planes_diagnose(fp, check_z)
     type(InflowPlanes), intent(inout) :: fp
     logical,            intent(in)    :: check_z   ! only heights that are interpolated are worth reporting

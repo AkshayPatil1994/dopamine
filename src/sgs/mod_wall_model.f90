@@ -172,11 +172,7 @@ contains
     end do
   end subroutine find_sample_cell
 
-  !> Apply the Reichardt wall model to all BC_WALL_MODEL patches.
-  !> h_wm > 0 samples at that wall distance; t_filt > 0 exponentially filters the sampled velocity with a
-  !> fixed time constant. tf_fac > 0 instead filters with the adaptive T_f = tf_fac * y_w / (kappa * u_tau)
-  !> (Yang, Park & Moin 2017), u_tau being the previous step's value, re-derived from the filtered velocity so
-  !> the filter carries no extra state; tf_fac takes precedence over t_filt.
+  !> Apply the Reichardt wall model on BC_WALL_MODEL patches; tf_fac > 0 (adaptive T_f, Yang 2017) overrides t_filt.
   subroutine apply_wall_model_bc(U, nu, msh, tau_w_bnd, h_wm, t_filt, dt, tf_fac)
     real(rp),   intent(in)    :: U(:,:)  ! (3, n_cells + n_ghost)
     real(rp),   intent(in)    :: nu
@@ -201,9 +197,7 @@ contains
     dt_use = 0.0_rp; if (present(dt))     dt_use = dt
     tf_use = 0.0_rp; if (present(tf_fac)) tf_use = tf_fac
 
-    ! Rebuild the sampling cache if uninitialized or the mesh size has changed.
-    ! .or. does not guarantee short-circuit in Fortran, so size(y_w_arr) must not be
-    ! evaluated in the same expression as the allocated() check.
+    ! Rebuild the sampling cache if uninitialised or the mesh size changed; split ifs as .or. does not short-circuit.
     n_bnd = msh%n_faces - msh%n_int_faces
     needs_rebuild = .not. allocated(y_w_arr)
     if (.not. needs_rebuild) needs_rebuild = (size(y_w_arr) /= n_bnd)

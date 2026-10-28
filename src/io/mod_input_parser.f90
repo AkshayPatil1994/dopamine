@@ -731,7 +731,8 @@ contains
     namelist /dopamine_inflow/ inflow_source, inflow_file, inflow_t_offset, inflow_crossfade_time, &
                                inflow_seed, inflow_export_grid
     namelist /dopamine_inflow_gen/ gen_file, gen_grid_file, gen_W, gen_y0, gen_ny, gen_nz, gen_z_min, gen_z_max, &
-                               gen_dt, gen_n_turnovers, gen_T_turnover, gen_n_segments, gen_n_sigma, gen_seed, gen_verify, gen_decorrelate
+                               gen_dt, gen_n_turnovers, gen_T_turnover, gen_n_segments, gen_n_sigma, gen_seed, &
+                                   gen_verify, gen_decorrelate
     namelist /dopamine_inflow_record/ record_enabled, record_file, record_point, record_normal, record_dt, &
                                record_t_start, record_segment_time, record_n_segments
 

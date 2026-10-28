@@ -89,7 +89,7 @@ module mod_pressure_solver
     real(c_double), allocatable :: dirichlet_values(:)  ! c_b * p_val per outlet face
     integer(ip), allocatable :: face_mesh_idx(:)
     integer(ip), allocatable :: face_neighbor_ext(:)
-    ! Own idx-space coloring for mod_fv_solver's scatter-add loops; idx doesn't line up with msh%face_color_perm (periodic edges are compacted).
+    ! Own idx-space coloring for fv_solver's scatter-add loops; idx differs from msh%face_color_perm (periodic edges compacted).
     integer(ip)              :: n_colors = 0
     integer(ip), allocatable :: color_offsets(:)     ! size n_colors+1
     integer(ip), allocatable :: idx_color_perm(:)    ! permutation of 1..n_faces
@@ -284,10 +284,7 @@ contains
           else
             handle%face_neighbor_global(idx) = int(nb, c_int)
           end if
-          ! Both sides of a periodic edge must see the identical coefficient: same-rank pairs
-          ! contribute one edge, cross-rank pairs one edge per rank, and the flux correction
-          ! reuses this coefficient. Use the un-projected centroid-to-face distances d_cf(own)
-          ! + d_cf(partner), the metric the periodic gradient/viscous/advection operators use.
+          ! One coefficient for both sides of a periodic edge: un-projected d_cf(own) + d_cf(partner), like the periodic operators.
           pair_dcf = 0.0_rp
           if (allocated(msh%periodic_pair_dcf)) then
             if (f_bnd >= 1 .and. f_bnd <= size(msh%periodic_pair_dcf)) pair_dcf = msh%periodic_pair_dcf(f_bnd)
@@ -628,7 +625,7 @@ contains
     integer(ip),          optional, intent(in)    :: max_iter
     integer(ip),          optional, intent(out)   :: n_iter
     real(rp),             optional, intent(out)   :: residual
-    real(rp),             optional, intent(in)    :: atol_in  ! absolute floor; when present, used alongside rtol (not instead of it)
+    real(rp),             optional, intent(in)    :: atol_in  ! absolute floor, used alongside rtol when present
     !> p is the whole pressure (initial projection): outlet faces then carry p_val. Default: p is the
     !> increment phi, which is zero on the outlet because the boundary pressure already equals p_val.
     logical,              optional, intent(in)    :: p_is_total

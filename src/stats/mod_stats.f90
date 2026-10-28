@@ -158,9 +158,7 @@ contains
     stats%t_last = wall_clock_seconds()
   end subroutine stats_mark_start
 
-  !> Sample statistics and write to screen (+ CSV unless write_csv is false).
-  !> Each screen row reports the wall time elapsed since the previous row; a row on which a 3D field was
-  !> written carries a '| 3D output saved' note, and that write is included in its wall time.
+  !> Sample statistics to screen (+ CSV unless write_csv is false); rows show wall time since the previous row.
   subroutine stats_sample(stats, solver, time, step, rank, E0, dt, output_written, write_csv)
     type(StatsCollector), intent(inout) :: stats
     type(FVSolver),       intent(inout) :: solver

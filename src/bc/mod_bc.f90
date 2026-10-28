@@ -38,10 +38,10 @@ module mod_bc
     logical     :: abl_wall       = .false.  ! MOST wall model flag
   end type BCConfig
 
-  ! Periodic-partner cell cache, keyed by boundary-face index; resolved once instead of once per field per RK stage. Rebuilt if n_bnd_faces changes.
+  ! Periodic-partner cell cache keyed by boundary-face index, resolved once per mesh; rebuilt if n_bnd_faces changes.
   integer(ip), allocatable, save :: periodic_nb_cache(:)
 
-  ! Flattened, allocatable-component-free mirror of bc_configs(:); rebuilt only when n_patches changes, so bc_configs must never be mutated post-init without also changing patch count.
+  ! Flattened mirror of bc_configs(:) without allocatable components; rebuilt only when n_patches changes.
   real(rp),    allocatable, save :: bc_U_val_soa(:,:), bc_a_wall_soa(:,:)  ! (3, n_patches)
   real(rp),    allocatable, save :: bc_T_val_soa(:), bc_p_val_soa(:)
   real(rp),    allocatable, save :: bc_abl_z0_m_soa(:), bc_abl_z0_h_soa(:), bc_abl_u_ref_soa(:), &
@@ -59,9 +59,7 @@ module mod_bc
   real(rp), target, save :: bc_dummy_vec(3, 1) = 0.0_rp
   real(rp), target, save :: bc_dummy_grad_s(3, 1) = 0.0_rp
 
-  ! Device copies follow the host arrays: allocate/deallocate mirror automatically, contents are
-  ! pushed with update device once each cache is (re)built. The fields and mesh SoA arrays the
-  ! kernels read are resident for the whole run (see solver_init / main).
+  ! Device copies mirror the host arrays; contents are pushed once each cache is (re)built.
   !$acc declare create(periodic_nb_cache, bc_U_val_soa, bc_a_wall_soa, bc_T_val_soa, bc_p_val_soa, &
   !$acc      bc_abl_z0_m_soa, bc_abl_z0_h_soa, bc_abl_wind_dir_soa, bc_abl_T_surface_soa, &
   !$acc      bc_scalar_mode_soa, bc_scalar_value_soa, bc_scalar_flux_soa, bc_scalar_flux_omega_soa, &
@@ -168,9 +166,7 @@ contains
     bc_soa_n_patches = n_patches
   end subroutine ensure_bc_config_soa
 
-  !> Apply velocity BC: sets U_bnd, uses grad_U for O(h^2) extrapolation on zero-gradient faces.
-  !> OpenACC builds run the face loop on the device (field arguments are copied in/out unless
-  !> already present; mesh SoA and the module caches here are always resident).
+  !> Apply velocity BC: sets U_bnd, grad_U gives O(h^2) extrapolation on zero-gradient faces; device loop in OpenACC builds.
   subroutine apply_velocity_bc(U, U_bnd, bc_configs, msh, periodic_only, grad_U, u_fluc_bnd, u_mean_bnd)
     real(rp),      intent(inout) :: U(:,:)  ! (3, n_cells + n_ghost)
     real(rp),      intent(inout) :: U_bnd(:,:)  ! (3, n_bnd_faces)
@@ -179,7 +175,7 @@ contains
     logical, optional, intent(in) :: periodic_only
     real(rp), optional, intent(in), target :: grad_U(:,:,:)  ! (3, 3, n_cells+n_ghost)
     real(rp), optional, intent(in), target :: u_fluc_bnd(:,:)  ! (3, n_bnd_faces) SEM inflow fluctuation
-    real(rp), optional, allocatable, intent(in), target :: u_mean_bnd(:,:)  ! (3, n_bnd_faces) prescribed inlet mean, overrides the log law
+    real(rp), optional, allocatable, intent(in), target :: u_mean_bnd(:,:)  ! (3, n_bnd_faces) inlet mean, overrides the log law
 
     integer(ip) :: p, f_bnd, f_global, o, nb, patch_id, bc_id, n_int, n_bnd, n_patches, n_grad, n_u
     real(rp)    :: n1, n2, n3, u1, u2, u3, un, d1, d2, d3, u_mag, wdir, w
@@ -252,9 +248,7 @@ contains
       n1 = fnrm(1, f_global)
       n2 = fnrm(2, f_global)
       n3 = fnrm(3, f_global)
-      ! Components are kept as scalars and stored once below: nvfortran cannot translate
-      ! array-section assignments inside this select case on the device. Patch types with no
-      ! velocity rule (e.g. fixedTemperature) keep their current U_bnd.
+      ! Components stay scalars: nvfortran cannot translate array-section assignments here; types without a rule keep U_bnd.
       u1 = U_bnd(1, f_bnd)
       u2 = U_bnd(2, f_bnd)
       u3 = U_bnd(3, f_bnd)
@@ -447,9 +441,7 @@ contains
     end do
   end subroutine apply_pressure_bc
 
-  !> Apply temperature boundary conditions.
-  !> If grad_T is provided, the zero-gradient (default) case uses linear extrapolation.
-  !> OpenACC builds run on the device, like apply_velocity_bc.
+  !> Apply temperature BCs; zero-gradient uses linear extrapolation when grad_T is given; device loop in OpenACC builds.
   subroutine apply_temperature_bc(T, T_bnd, bc_configs, msh, periodic_only, grad_T)
     real(rp),      intent(inout) :: T(:)
     real(rp),      intent(inout) :: T_bnd(:)
@@ -542,10 +534,7 @@ contains
     end do
   end subroutine apply_temperature_bc
 
-  !> Apply boundary conditions for passive scalar scalar_id, row scalar_id of C/C_bnd.
-  !> Neumann mode expects scalar_flux in units of scalar-flux per area.
-  !> Takes the full (n_scalars, :) arrays rather than a row section so OpenACC builds can map
-  !> the arrays directly (a strided section would force a host temporary).
+  !> Apply BCs for passive scalar scalar_id (row of C/C_bnd); Neumann takes flux per area; full arrays let OpenACC map them.
   subroutine apply_passive_scalar_bc(C, C_bnd, bc_configs, msh, scalar_id, alpha_mol, nu_sgs, Pr_t, time, periodic_only)
     real(rp), intent(inout) :: C(:,:)      ! (n_scalars, n_cells + n_ghost)
     real(rp), intent(inout) :: C_bnd(:,:)  ! (n_scalars, n_bnd_faces)

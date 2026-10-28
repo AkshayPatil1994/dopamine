@@ -437,8 +437,10 @@ contains
           nb = face_nei(f)
           if (o < 1) cycle
           if (nb >= 1) then
-            if (part(o) == target_rank .and. part(nb) /= target_rank) call append_dynamic_int(ghost_candidates, n_ghost_candidates, nb)
-            if (part(nb) == target_rank .and. part(o) /= target_rank) call append_dynamic_int(ghost_candidates, n_ghost_candidates, o)
+            if (part(o) == target_rank .and. part(nb) /= target_rank) call append_dynamic_int(ghost_candidates, &
+                n_ghost_candidates, nb)
+            if (part(nb) == target_rank .and. part(o) /= target_rank) call append_dynamic_int(ghost_candidates, &
+                n_ghost_candidates, o)
           end if
         end do
       end do
@@ -453,8 +455,10 @@ contains
       o = face_owner(f)
       nb_global = face_owner(pair_face)
       if (o < 1 .or. nb_global < 1) cycle
-      if (part(o) == target_rank .and. part(nb_global) /= target_rank) call append_dynamic_int(ghost_candidates, n_ghost_candidates, nb_global)
-      if (part(nb_global) == target_rank .and. part(o) /= target_rank) call append_dynamic_int(ghost_candidates, n_ghost_candidates, o)
+      if (part(o) == target_rank .and. part(nb_global) /= target_rank) call append_dynamic_int(ghost_candidates, &
+          n_ghost_candidates, nb_global)
+      if (part(nb_global) == target_rank .and. part(o) /= target_rank) call append_dynamic_int(ghost_candidates, &
+          n_ghost_candidates, o)
     end do
 
     ! Vertex-adjacent cells across a cut join the ghost layer (no face to them, so they carry no faces).
@@ -1089,9 +1093,7 @@ contains
     deallocate(tmp)
   end subroutine build_halos_from_partition
 
-  !> Cell pairs that share a vertex but live in different partitions. They are the cross-cut stencil
-  !> the least-squares gradient needs on top of the face neighbours. A pair seen through several shared
-  !> vertices (or also a face neighbour) may repeat: every consumer deduplicates.
+  !> Cell pairs sharing a vertex across partitions (the cross-cut LS stencil); duplicates may repeat, so consumers deduplicate.
   subroutine build_vertex_cut_pairs(nc, nv, part, cell_offsets, cell_vertices, pair_a, pair_b, n_pairs)
     integer(ip), intent(in) :: nc, nv
     integer(ip), intent(in) :: part(nc), cell_offsets(nc + 1), cell_vertices(:)

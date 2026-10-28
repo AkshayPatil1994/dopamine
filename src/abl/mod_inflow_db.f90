@@ -255,15 +255,7 @@ contains
   end subroutine inflow_db_read_frame
 
 
-  !> Remove the part of the signal that spanwise shifts cannot hide.
-  !>
-  !> A spanwise shift moves every structure sideways, but the spanwise-mean (k_y = 0) component
-  !> of the plane is shift-invariant. Replaying K stored segments in random order still leaves
-  !> the average waveform of those K segments repeating every replay period: a spectral line at
-  !> 1/P holding about 1/K of the spanwise-mean variance. Subtracting, at every frame index, the
-  !> mean over segments of that component (and restoring its variance by sqrt(K/(K-1))) makes the
-  !> repeating part exactly zero. Needs K >= 2; K >= 4 is recommended, since at K = 2 the two
-  !> segments' spanwise means become mirror images of each other.
+  !> Remove the spanwise-mean waveform shifts cannot hide: subtract the per-frame mean over K >= 2 segments (rescaled).
   subroutine inflow_db_decorrelate_span_mean(filename, span_var_fraction)
     character(len=*), intent(in)  :: filename
     real(rp),         intent(out) :: span_var_fraction  ! spanwise-mean share of the plane variance (before)

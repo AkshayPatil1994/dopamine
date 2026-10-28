@@ -357,11 +357,7 @@ contains
     call sem_bins_fill(state)
   end subroutine sem_advance
 
-  !> Sort the eddies into bins over (t1, t2, n_in) (counting sort). The bin width is at least the support
-  !> radius rsup in every direction, so everything that can touch a point lies in its 3x3x3 neighbourhood.
-  !> Periodic in-plane directions wrap; elsewhere eddies (and later query points) outside the box are
-  !> clamped into the end bins, which keeps them within one bin of anything they can touch.
-  !> The count is coarsened to O(n_eddies) bins, which only widens the bins.
+  !> Counting-sort eddies into (t1, t2, n_in) bins >= rsup wide, so a point only meets its 3x3x3 neighbourhood; ends are clamped.
   subroutine sem_bins_fill(state)
     type(SEMState), intent(inout) :: state
 
@@ -504,12 +500,7 @@ contains
     end do
   end function count_tokens
 
-  !> Read prescribed inflow profiles (heights need not be sorted; '#' comments allowed).
-  !>
-  !> fmt = 'stress' (default):  z U uu vv ww uw            6 columns, wind-aligned
-  !>                            z U V W uu vv ww uv uw vw  10 columns, global axes
-  !> fmt = 'ti':                z U Iu Iv Iw [rho_uw]      5-6 columns, wind-aligned; I = sigma/U
-  !> Length-scale columns are not used: the eddy sizes follow from sem_sigma and the principal stresses.
+  !> Read prescribed inflow profiles (any height order, # comments): fmt stress = 6/10 columns, fmt ti = z U Iu Iv Iw [rho_uw].
   subroutine sem_read_profile(filename, state, verbose, fmt, rho_uw)
     character(len=*), intent(in)    :: filename
     type(SEMState),   intent(inout) :: state
@@ -735,9 +726,7 @@ contains
     call sem_target_at(state, abl_cfg, z, u_mean, R6)
   end subroutine sem_mean_at
 
-  !> Target Reynolds tensor at height z as a symmetric matrix Rm in the stress frame, and the matrix Wr
-  !> whose columns are the stress-frame axes in global coordinates (R_global = Wr Rm Wr^T). The stress
-  !> frame is the mean-wind frame (e_s, e_n, e_z) except for 10-column tables, which are already global.
+  !> Target Reynolds tensor at height z in the stress frame (Rm) and the frame axes Wr, so R_global = Wr Rm Wr^T.
   subroutine sem_stress_at(state, abl_cfg, z, Rm, Wr)
     type(SEMState),  intent(in)  :: state
     type(ABLConfig), intent(in)  :: abl_cfg
@@ -807,10 +796,7 @@ contains
     lam = [A(1,1), A(2,2), A(3,3)]
   end subroutine sem_eigen3
 
-  !> Largest principal stress over the inflow (sets the eddy sizes). Eddy half-extents are
-  !> sigma_i = sigma * max(DF_FMIN, sqrt(lam_i / lam_ref)): the longest eddy is along the strongest principal
-  !> stress, which keeps the eddy intensities real for any positive-definite tensor. The ellipsoidal support
-  !> reaches at most sigma along any direction, so rsup = sigma.
+  !> Largest principal stress over the inflow (sets eddy sizes); sigma_i = sigma*max(DF_FMIN, sqrt(lam_i/lam_ref)), rsup = sigma.
   subroutine sem_reference_scales(state, abl_cfg)
     type(SEMState),  intent(inout) :: state
     type(ABLConfig), intent(in)    :: abl_cfg
@@ -856,9 +842,7 @@ contains
     deallocate(zl)
   end subroutine sem_reference_scales
 
-  !> Warn when the smallest eddy is poorly resolved by the inlet cells. The first cell's convective term has an
-  !> O(dx) closure error at the inlet face (the interior's two face errors cancel, the exact inlet value does
-  !> not), which the pressure absorbs: roughly p ~ ((k dx)^2 / 8) U u', i.e. (dx/sigma)^1.5-2.
+  !> Warn when the smallest eddy is poorly resolved by the inlet cells: the inlet-face convective error gives p ~ (dx/sigma)^1.5-2.
   subroutine sem_check_resolution(state, msh)
     type(SEMState), intent(in) :: state
     type(Mesh),     intent(in) :: msh
@@ -888,11 +872,7 @@ contains
         'roughly as (dx/sigma)^2 - raise sem_sigma or refine the inlet (>= 8 cells keeps it near the nonlinear floor)'
   end subroutine sem_check_resolution
 
-  !> Derive the per-eddy principal frame, half-extents and intensities from the target stress at each eddy
-  !> centre. The independent random signs make the cross-stresses vanish in the principal frame and give
-  !> lam_1 = K sigma_1^2 (A_2 + A_3) and cyclic, with A_i = alpha_i^2 and
-  !> K = N sigma_1 sigma_2 sigma_3 DF_I / V_box, so A_1 = (b_2 + b_3 - b_1)/2 with b_i = lam_i/(K sigma_i^2).
-  !> Cheap (O(N_eddies)); call after the eddies move or are restored.
+  !> Derive each eddy principal frame, half-extents and intensities from the target stress at its centre; call after eddies move.
   subroutine sem_prepare(state, abl_cfg)
     type(SEMState),  intent(inout) :: state
     type(ABLConfig), intent(in)    :: abl_cfg
@@ -921,10 +901,7 @@ contains
     end do
   end subroutine sem_prepare
 
-  !> Velocity of one divergence-free eddy at offset d from its centre (global axes), Poletto et al. Eq. 8 in
-  !> the principal frame, then rotated back: u_b = sigma_b (1 - d^2) (r x alpha)_b, r_j = d.e_j / sigma_j.
-  !> Zero outside the ellipsoid d < 1. Exactly solenoidal: du_b/dx_b = -2 r_b (r x alpha)_b (no sum),
-  !> and the three terms cancel.
+  !> Velocity of one divergence-free eddy at offset d (Poletto et al. Eq. 8 in the principal frame, rotated back); zero if d >= 1.
   pure function sem_dfsem_eddy_velocity(d, frame, sig, ampl) result(u)
     real(rp), intent(in) :: d(3), frame(9), sig(3), ampl(3)
     real(rp) :: u(3)
@@ -946,9 +923,7 @@ contains
     u = up(1) * frame(1:3) + up(2) * frame(4:6) + up(3) * frame(7:9)
   end function sem_dfsem_eddy_velocity
 
-  !> Mean velocity and synthetic fluctuation at an inlet face centre.
-  !> tau (default 0) is a time look-ahead from the eddy state: the eddies are convected rigidly, so the field
-  !> at time t + tau is the field at t sampled upstream by u_convect * tau along the inward normal.
+  !> Mean velocity and synthetic fluctuation at an inlet face centre; tau samples upstream by u_convect*tau along the normal.
   subroutine sem_velocity_at_face(state, abl_cfg, face_centre, u_mean, u_fluc_out, tau)
     type(SEMState),  intent(in)  :: state
     type(ABLConfig), intent(in)  :: abl_cfg

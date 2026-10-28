@@ -69,7 +69,7 @@ module mod_fv_solver
     real(rp)    :: write_time     = 0.0_rp
     real(rp)    :: p_tol        = 1.0e-10_rp
     integer(ip) :: p_max_iter   = 1000
-    real(rp)    :: p_target_divU = 1.0e-8_rp  ! parsed but currently unused; atol is computed from a fixed machine-precision floor (see p_atol_factor)
+    real(rp)    :: p_target_divU = 1.0e-8_rp  ! parsed but unused; atol comes from a fixed floor (see p_atol_factor)
     character(32) :: pressure_solver = 'boomeramg'  ! boomeramg | gamg
     logical     :: boussinesq   = .false.
     logical     :: adapt_dt     = .false.
@@ -233,7 +233,7 @@ module mod_fv_solver
     real(rp)    :: perf_t_rhs_sources = 0.0_rp
     !> Predictor->pre-correction gap (velocity update, BC/halo, pre-correction projection, grad_U refresh); previously untimed.
     real(rp)    :: perf_t_predictor = 0.0_rp
-    !> Sub-split of perf_t_predictor: _bc = update+BC/halo, _precorrect = projection, _regrad = the second compute_all_gradients call.
+    !> Sub-split of perf_t_predictor: _bc = update+BC/halo, _precorrect = projection, _regrad = second gradient call.
     real(rp)    :: perf_t_predictor_bc = 0.0_rp
     real(rp)    :: perf_t_predictor_precorrect = 0.0_rp
     real(rp)    :: perf_t_predictor_regrad = 0.0_rp
@@ -277,13 +277,7 @@ contains
 
 contains
 
-  !> Explicit component-wise copy of solver_params_t, replacing plain `dst = src`: nvfortran's
-  !> compiler-generated intrinsic assignment for this type corrupts the heap (observed as a
-  !> stray malloc() abort later in solver_init), likely from the deferred-length allocatable
-  !> character array component mixed among the others.
-  !> Intrinsic assignment copies every component, allocatables included, so a field added to
-  !> solver_params_t can no longer be forgotten here (the old per-field copy was guarded only by a
-  !> hand-kept count that compared constants).
+  !> Explicit component-wise copy of solver_params_t: nvfortran's intrinsic assignment for this type corrupts the heap.
   subroutine copy_solver_params(dst, src)
     type(solver_params_t), intent(inout) :: dst
     type(solver_params_t), intent(in)    :: src
@@ -345,10 +339,7 @@ contains
     do c = 1, nc
       self%inv_vol(c) = 1.0_rp / max(self%mesh%cells(c)%volume, SMALL)
     end do
-    ! Persistent device residency: inv_vol never changes after setup, U_face is refreshed via
-    ! !$acc update device at each write site instead of re-copyin on every advection_rhs_* call.
-    ! Both are rank-local with no ghost/halo concept (inv_vol sized nc, U_face sized n_faces,
-    ! neither ever exchanged across ranks), so this is safe for any nranks, not just nranks<=1.
+    ! Persistent device residency for inv_vol (fixed) and U_face (updated at each write site); both rank-local, safe for any nranks.
 #ifdef _OPENACC
     !$acc enter data copyin(self%inv_vol, self%U_face)
 #endif
@@ -598,10 +589,7 @@ contains
     self%w_gp_rc      = gprc_save
   end subroutine solver_projection_idempotency
 
-  !> Rebuild the boundary values and gradients a restored state needs before its first step. The first
-  !> stage extrapolates inflow/outlet/slip/wall values with the gradients of the previous stage, which a
-  !> checkpoint does not hold (they would triple its size); zeros there made the first step differ from
-  !> an uninterrupted run. Recomputing them from the restored fields recovers all but the O(dt) part.
+  !> Rebuild boundary values and gradients a restored state needs (checkpoints omit them), or step 1 differs from a straight run.
   subroutine solver_refresh_after_restart(self)
     class(FVSolver), intent(inout) :: self
 
@@ -612,10 +600,7 @@ contains
     call compute_all_gradients(self)
   end subroutine solver_refresh_after_restart
 
-  !> Rebuild U_face from the current U after a checkpoint that carries none (e.g. one written by
-  !> dopamine-checkpoint-partition, whose cell layout no longer matches the old face numbering).
-  !> Without it the first RK stage advects with a zero mass flux. Only U_face is kept: every other
-  !> field project_once touches is restored, so the restored U and p are unchanged.
+  !> Rebuild U_face from U after a checkpoint without one (e.g. from dopamine-checkpoint-partition); U and p stay unchanged.
   subroutine solver_rebuild_face_flux(self, dt_proj)
     class(FVSolver), intent(inout) :: self
     real(rp), optional, intent(in) :: dt_proj
@@ -670,9 +655,7 @@ contains
     integer     :: ierr
 
     nc  = self%mesh%n_cells
-    ! Divergence of the corrected face fluxes: what the projection actually achieved. Uses its
-    ! own buffer (not w_rhs_p) since the caller still needs w_rhs_p = div(u*) for the rotational
-    ! projection correction after this diagnostic runs.
+    ! Divergence of the corrected face fluxes (what the projection achieved), in its own buffer as w_rhs_p is still needed.
     call face_flux_divergence(self, self%w_div_diag(1:nc))
 
     loc = 0.0_rp
@@ -711,9 +694,7 @@ contains
     call MPI_Allreduce(n_local, n_global, 1, MPI_INTEGER, MPI_SUM, self%mesh%comm, ierr)
 
     self%diag_interface = (n_global > 0)
-    ! The KE budget accumulates in the host array-of-structs advection loops only. Under OpenACC the
-    ! fields live on the device, so enabling it would route KEP/CDS through a host path that reads
-    ! stale data; the budget is a debug diagnostic, so it stays off in device builds.
+    ! The KE budget only accumulates in host AoS loops; under OpenACC it would read stale data, so it stays off in device builds.
 #ifdef _OPENACC
     call advection_set_ke_budget(.false.)
 #else
@@ -963,10 +944,7 @@ contains
     end if
   end subroutine solver_advance
 
-  !> Constant mass flux forcing: recompute the uniform body force each step so the volume-averaged
-  !> velocity tracks U_bulk_target. Uniform forces survive the pressure projection on a periodic
-  !> domain (grad of a periodic potential has zero mean), so f = (U_target - <U>) / dt drives the
-  !> bulk velocity to target over successive steps.
+  !> Constant mass flux forcing: f = (U_target - <U>)/dt each step, uniform forces survive the periodic projection.
   subroutine update_mass_flux_forcing(self, dt)
     class(FVSolver), intent(inout), target :: self
     real(rp), intent(in) :: dt
@@ -1186,8 +1164,7 @@ contains
     call self%mesh%exchange_halos_scalar(self%nu_sgs)
   end subroutine exchange_nu_sgs_halo
 
-  ! Wray RK3 (Williamson 1980), incremental projection each stage; alpha={8/15,5/12,3/4}, beta={0,-17/60,-5/12}, gamma={8/15,2/15,1/3}.
-  ! Stage k: u*=u^k+dt*(alpha_k*H^k+beta_k*H_prev)-gamma_k*dt*grad(p^{k-1/2}); phi=solve(div(u*)); u+=...; p+=phi. w_U0/w_T0/w_C0=H_prev.
+  ! Wray RK3 (Williamson 1980) with an incremental projection per stage; coefficients are in docs/theory.md.
   subroutine advance_rk3w(self, dt)
     class(FVSolver), intent(inout), target :: self
     real(rp),        intent(in)    :: dt
@@ -1360,9 +1337,7 @@ contains
 #endif
       end if
 
-      ! The stage ends at t_n + (c_k + gamma_k) dt, where the projected velocity must meet the inlet data: the
-      ! SEM eddies convect rigidly, so evaluate them there (a held-over value is a one-stage-old normal flux that
-      ! the pressure has to absorb: p ~ dx du_n/dt, whatever dt). The next stage starts from this same value.
+      ! The stage ends at t_n + (c_k + gamma_k) dt, so evaluate the convecting SEM eddies there, not a stale value.
       if ((self%abl_config%use_sem .and. self%sem_state%initialized) .or. self%inflow_planes_on) then
         call update_sem_inflow(self, time_n + (RK3W_C(k) + RK3W_GAMMA(k)) * dt, (RK3W_C(k) + RK3W_GAMMA(k)) * dt)
         !$acc update device(self%sem_fluc_bnd) if(self%on_device)
@@ -1464,10 +1439,7 @@ contains
           call MPI_Allreduce(divU_local, divU_norm_curr, 1, MPI_DOUBLE_PRECISION, &
                              MPI_MAX, self%mesh%comm, ierr_tol)
           if (self%diag_interface) self%diag_nonortho_iters = jno
-          ! self%p enters this loop holding p^{k-1/2} (needed by compute_face_fluxes_and_rhs
-          ! above for the jno==1 gradient), but the KSP solves for the increment phi. Seeding
-          ! its nonzero initial guess with O(1) p^{k-1/2} instead of the O(dt*div u*) increment
-          ! wastes iterations and loosens the effective (relative) convergence tolerance.
+          ! self%p holds p^{k-1/2} here but the KSP solves for the increment phi; seeding with p^{k-1/2} wastes iterations.
           if (jno == 1) then
             !$acc parallel loop default(present)
             do c = 1, nc
@@ -2043,9 +2015,7 @@ contains
     end do
   end subroutine apply_all_bc_subset
 
-  !> Refresh the inflow fluctuation (and, when prescribed, the mean) on every ABL inlet face for
-  !> physical time t. The source is the online SEM or the inflow-plane database.
-  !> The patch-mean normal component is removed so the inlet mass flux is unchanged.
+  !> Refresh the inflow fluctuation (and prescribed mean) on every ABL inlet face at time t, minus the patch-mean normal part.
   subroutine update_sem_inflow(self, t, tau)
     class(FVSolver), intent(inout) :: self
     real(rp),        intent(in)    :: t    ! physical time of the evaluation (inflow-plane replay)
@@ -2600,11 +2570,7 @@ contains
       rhs_p(o) = rhs_p(o) - flux
     end do
 
-    ! Periodic boundary faces that are not explicitly represented in the pressure-face list must
-    ! still receive a valid convective mass flux. Prefer paired-face anti-symmetry when the companion
-    ! was built, else the midpoint flux from the resolved partner cell; for an unbuilt pair both
-    ! routes give the same value (the partner's midpoint flux is exactly the negation), so the
-    ! faces can be done in any order.
+    ! Periodic faces missing from the pressure-face list still need a convective flux: paired antisymmetry, else partner midpoint.
     !$acc parallel loop default(present) private(f_bnd, f_glob, o, nb, pair_bnd, pair_face)
     do ib = 1, n_per
       f_bnd = per(ib)
@@ -2693,9 +2659,7 @@ contains
 #endif
       end do
 
-      ! Jasak deferred non-orthogonal correction on Dirichlet pressure boundary faces (BC_OUTLET),
-      ! which are not in psolver%n_faces. Owner-cell gradient is the best available estimate of
-      ! grad_p at the face (no off-cell information across the BC).
+      ! Jasak non-orthogonal correction on Dirichlet pressure faces (BC_OUTLET) outside psolver%n_faces, from the owner gradient.
       !$acc parallel loop default(present) private(f_bnd, f_glob, o, q, cross)
       do ib = 1, n_nper
         f_bnd = nper(ib)
@@ -3025,9 +2989,7 @@ contains
 #endif
     end do
 
-    ! Fixed-flux patches (walls, symmetry, inlets) get no flux correction, so their
-    ! normal pressure gradient is zero; only Dirichlet-p outlets contribute. Outlet faces
-    ! can share an owner cell, hence the atomics.
+    ! Fixed-flux patches get no flux correction (zero normal pressure gradient); only Dirichlet-p outlets contribute, hence atomics.
     !$acc parallel loop default(present) private(f_bnd, f_glob, o, q, sn, d_orth, coeff, g_f, d1, d2, d3, g1, g2, g3)
     do ib = 1, n_nper
       f_bnd  = nper(ib)
@@ -3060,10 +3022,7 @@ contains
       gpc(3, o) = gpc(3, o) + g3
     end do
 
-    ! Pre-correction of the total pressure only: a wall, slip, symmetry or inlet face carries
-    ! dp/dn = f.n (the body force the face flux cannot balance). Without that face term a wall
-    ! cell sees only the interior half of the gradient and a fluid at rest is accelerated there
-    ! (hydrostatic closed box: Umax 6e-3). The increment phi has zero flux and needs no term.
+    ! Pre-correct total pressure only: wall/slip/symmetry/inlet faces carry dp/dn = f.n, else a fluid at rest accelerates at walls.
     if (.not. do_cross) then
       fb = body_force_now(self)
       bous_beta = 0.0_rp
@@ -3119,10 +3078,7 @@ contains
     !$acc end data
   end subroutine correct_velocity_psolver_dual
 
-  !> Move every field and work array of the time step to the device (OpenACC builds; a no-op
-  !> otherwise). Call once, after initial/restart conditions are set and before the time loop:
-  !> from here on the device copy is authoritative and the host copy is refreshed only by
-  !> sync_host (output, statistics, sampling, checkpoints).
+  !> Move all time-step fields to the device (OpenACC; no-op otherwise); call once before the time loop, host synced by sync_host.
   subroutine solver_to_device(self, gpu_aware_mpi)
     class(FVSolver), intent(inout) :: self
     logical,         intent(in)    :: gpu_aware_mpi
@@ -3641,10 +3597,7 @@ contains
     ! to a centred owner-side dot(U,sf) so the convective CFL reflects the
     have_uface = allocated(self%U_face) .and. self%u_face_ready
 
-    ! Explicit stability depends on the SUM of every face's contribution into a cell
-    ! (mod_advection/mod_viscous accumulate over the full face loop), not any single
-    ! face alone: a per-face max undercounts polyhedral buffer cells at deep
-    ! snappyHexMesh refinement interfaces, which can carry far more than 6 faces.
+    ! Explicit stability depends on the SUM of face contributions into a cell; a per-face max undercounts refinement buffer cells.
 #ifdef _OPENACC
     !$acc parallel loop if(dev) default(present) &
     !$acc      private(o, nb, sf1, sf2, sf3, area, u_face_use, nu_eff, patch_id, bc_id, w, gc)
@@ -3704,10 +3657,7 @@ contains
           dt_diff_sum_buf(nb) = dt_diff_sum_buf(nb) + nu_eff * w
         end if
       else if (nb < 1 .and. o >= 1 .and. o <= nc) then
-        ! No-slip/Dirichlet boundary faces apply a real explicit viscous stress at the
-        ! owner-face distance (mod_viscous.f90); excluding them let near-wall cells with a
-        ! thin wall-normal spacing (thinner than volume^(1/3)) run at an unstable dt.
-        ! Wall-model faces are excluded: their stress is applied via a separate limiter.
+        ! No-slip/Dirichlet faces apply a real explicit viscous stress at the owner-face distance; wall-model faces use a limiter.
         patch_id = fpid(f)
         bc_id = -1
         if (patch_id >= 1 .and. patch_id <= n_patches) bc_id = pbc(patch_id)
@@ -3784,10 +3734,7 @@ contains
     hit_boundary = .false.
     if (write_time <= 0.0_rp .or. dt <= 0.0_rp) return
 
-    ! The +REL_TOL guards against a prior exact snap leaving solver_time a hair below
-    ! n*write_time (floating-point residue), which would otherwise re-target the same
-    ! boundary instead of advancing to the next one.
-    ! floor(...) uses int64 (lp): int32 would overflow for a long run with a small write_time.
+    ! +REL_TOL guards a solver_time a hair below n*write_time; floor() uses int64 (lp) to avoid overflow for small write_time.
     t_next = write_time * real(floor(solver_time / write_time + REL_TOL, lp) + 1_lp, rp)
 
     if (solver_time + dt >= t_next - REL_TOL * write_time) then
@@ -3970,19 +3917,32 @@ contains
     if (self%mesh%rank == 0) then
       denom = real(max(1_ip, steps_global), rp)
       write(*,'(A)') '--- Performance Snapshot (sec/step; max-rank and rank-average) ---'
-      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') 'step_total   max', t_step_max/denom, 'avg', (t_step_avg_sum/real(self%mesh%nranks, rp))/denom
-      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') 'halo+bc      max', t_halo_max/denom, 'avg', (t_halo_avg_sum/real(self%mesh%nranks, rp))/denom
-      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') 'rhs          max', t_rhs_max/denom, 'avg', (t_rhs_avg_sum/real(self%mesh%nranks, rp))/denom
-      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') '  rhs_sgs       max', t_rhs_sgs_max/denom, 'avg', (t_rhs_sgs_avg_sum/real(self%mesh%nranks, rp))/denom
-      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') '  rhs_grad      max', t_rhs_grad_max/denom, 'avg', (t_rhs_grad_avg_sum/real(self%mesh%nranks, rp))/denom
-      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') '  rhs_transport max', t_rhs_transport_max/denom, 'avg', (t_rhs_transport_avg_sum/real(self%mesh%nranks, rp))/denom
-      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') '  rhs_sources   max', t_rhs_sources_max/denom, 'avg', (t_rhs_sources_avg_sum/real(self%mesh%nranks, rp))/denom
-      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') 'predictor    max', t_predictor_max/denom, 'avg', (t_predictor_avg_sum/real(self%mesh%nranks, rp))/denom
-      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') '  pred_bc         max', t_predictor_bc_max/denom, 'avg', (t_predictor_bc_avg_sum/real(self%mesh%nranks, rp))/denom
-      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') '  pred_precorrect max', t_predictor_precorrect_max/denom, 'avg', (t_predictor_precorrect_avg_sum/real(self%mesh%nranks, rp))/denom
-      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') '  pred_regrad     max', t_predictor_regrad_max/denom, 'avg', (t_predictor_regrad_avg_sum/real(self%mesh%nranks, rp))/denom
-      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') 'pressure     max', t_pressure_max/denom, 'avg', (t_pressure_avg_sum/real(self%mesh%nranks, rp))/denom
-      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') 'projection   max', t_proj_max/denom, 'avg', (t_proj_avg_sum/real(self%mesh%nranks, rp))/denom
+      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') 'step_total   max', t_step_max/denom, 'avg', &
+          (t_step_avg_sum/real(self%mesh%nranks, rp))/denom
+      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') 'halo+bc      max', t_halo_max/denom, 'avg', &
+          (t_halo_avg_sum/real(self%mesh%nranks, rp))/denom
+      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') 'rhs          max', t_rhs_max/denom, 'avg', &
+          (t_rhs_avg_sum/real(self%mesh%nranks, rp))/denom
+      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') '  rhs_sgs       max', t_rhs_sgs_max/denom, 'avg', &
+          (t_rhs_sgs_avg_sum/real(self%mesh%nranks, rp))/denom
+      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') '  rhs_grad      max', t_rhs_grad_max/denom, 'avg', &
+          (t_rhs_grad_avg_sum/real(self%mesh%nranks, rp))/denom
+      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') '  rhs_transport max', t_rhs_transport_max/denom, 'avg', &
+          (t_rhs_transport_avg_sum/real(self%mesh%nranks, rp))/denom
+      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') '  rhs_sources   max', t_rhs_sources_max/denom, 'avg', &
+          (t_rhs_sources_avg_sum/real(self%mesh%nranks, rp))/denom
+      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') 'predictor    max', t_predictor_max/denom, 'avg', &
+          (t_predictor_avg_sum/real(self%mesh%nranks, rp))/denom
+      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') '  pred_bc         max', t_predictor_bc_max/denom, 'avg', &
+          (t_predictor_bc_avg_sum/real(self%mesh%nranks, rp))/denom
+      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') '  pred_precorrect max', t_predictor_precorrect_max/denom, 'avg', &
+          (t_predictor_precorrect_avg_sum/real(self%mesh%nranks, rp))/denom
+      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') '  pred_regrad     max', t_predictor_regrad_max/denom, 'avg', &
+          (t_predictor_regrad_avg_sum/real(self%mesh%nranks, rp))/denom
+      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') 'pressure     max', t_pressure_max/denom, 'avg', &
+          (t_pressure_avg_sum/real(self%mesh%nranks, rp))/denom
+      write(*,'(A,1X,ES12.4,1X,A,1X,ES12.4)') 'projection   max', t_proj_max/denom, 'avg', &
+          (t_proj_avg_sum/real(self%mesh%nranks, rp))/denom
       if (p_solves_sum > 0) then
         write(*,'(A,1X,F10.3,1X,A,1X,F10.3)') 'p_iters/solve max', p_iters_per_solve_max, 'avg', &
           p_iters_per_solve_avg_sum/real(self%mesh%nranks, rp)
@@ -4174,10 +4134,7 @@ contains
           end if
         end if
 
-        ! T = sum_f |Sf| n_f(x)n_f recovered from its stored inverse; its condition number
-        ! (lambda_max/lambda_min) measures how ill-posed the cell-velocity reconstruction is.
-        ! Split into nested ifs: .and. does not short-circuit in Fortran, so size()
-        ! must never be evaluated in the same expression as the allocated() check.
+        ! T = sum_f |Sf| n_f n_f from its stored inverse; its condition number gauges the reconstruction; nested ifs for .and.
         if (allocated(slv%nu_sgs)) then
           if (ic <= size(slv%nu_sgs)) buf(13) = slv%nu_sgs(ic)
         end if

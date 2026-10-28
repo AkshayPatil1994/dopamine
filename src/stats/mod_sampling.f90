@@ -53,7 +53,8 @@ module mod_sampling
 
 contains
 
-  subroutine sampling_init(sampler, prefix, msh, rank, n_planes, planes, n_lines, lines, n_curves, curves, n_surfaces, surfaces, restart_time)
+  subroutine sampling_init(sampler, prefix, msh, rank, n_planes, planes, n_lines, lines, n_curves, curves, n_surfaces, &
+      surfaces, restart_time)
     type(SamplingCollector), intent(inout) :: sampler
     character(len=*),        intent(in)    :: prefix
     type(Mesh),              intent(in)    :: msh
@@ -400,11 +401,14 @@ contains
     call check_nc(nf90_def_dim(obj%ncid, 'vec', 3, obj%dim_vec), 'nf90_def_dim(vec)')
 
     call check_nc(nf90_def_var(obj%ncid, 'time', nf90_double, (/obj%dim_time/), obj%var_time), 'nf90_def_var(time)')
-    call check_nc(nf90_def_var(obj%ncid, 'coords', nf90_double, (/obj%dim_xyz, obj%dim_point/), obj%var_coords), 'nf90_def_var(coords)')
-    call check_nc(nf90_def_var(obj%ncid, 'U', nf90_double, (/obj%dim_vec, obj%dim_point, obj%dim_time/), obj%var_u), 'nf90_def_var(U)')
+    call check_nc(nf90_def_var(obj%ncid, 'coords', nf90_double, (/obj%dim_xyz, obj%dim_point/), obj%var_coords), &
+        'nf90_def_var(coords)')
+    call check_nc(nf90_def_var(obj%ncid, 'U', nf90_double, (/obj%dim_vec, obj%dim_point, obj%dim_time/), obj%var_u), &
+        'nf90_def_var(U)')
     call check_nc(nf90_def_var(obj%ncid, 'p', nf90_double, (/obj%dim_point, obj%dim_time/), obj%var_p), 'nf90_def_var(p)')
     call check_nc(nf90_def_var(obj%ncid, 'T', nf90_double, (/obj%dim_point, obj%dim_time/), obj%var_t), 'nf90_def_var(T)')
-    call check_nc(nf90_def_var(obj%ncid, 'nu_sgs', nf90_double, (/obj%dim_point, obj%dim_time/), obj%var_nu_sgs), 'nf90_def_var(nu_sgs)')
+    call check_nc(nf90_def_var(obj%ncid, 'nu_sgs', nf90_double, (/obj%dim_point, obj%dim_time/), obj%var_nu_sgs), &
+        'nf90_def_var(nu_sgs)')
 
     call check_nc(nf90_put_att(obj%ncid, nf90_global, 'sampler_kind', trim(obj%kind)), 'nf90_put_att(kind)')
     call check_nc(nf90_put_att(obj%ncid, nf90_global, 'sampler_name', trim(obj%name)), 'nf90_put_att(name)')
@@ -413,9 +417,7 @@ contains
     call check_nc(nf90_put_var(obj%ncid, obj%var_coords, obj%points), 'nf90_put_var(coords)')
   end subroutine open_object_netcdf
 
-  !> Continue an existing sample file after a restart: keep the records up to restart_time and let the
-  !> next samples overwrite the rest. Returns .false. (caller creates a fresh file) when the file is
-  !> missing or was written for a different point set.
+  !> Continue a sample file after restart (keep records up to restart_time); .false. if missing or for a different point set.
   logical function reopen_object_netcdf(obj, fname, restart_time) result(ok)
     type(SampleObjectRuntime), intent(inout) :: obj
     character(len=*),          intent(in)    :: fname
@@ -480,7 +482,8 @@ contains
     call check_nc(nf90_put_var(obj%ncid, obj%var_u, u, start=(/1, 1, tidx/), count=(/3, obj%n_points, 1/)), 'nf90_put_var(U)')
     call check_nc(nf90_put_var(obj%ncid, obj%var_p, p, start=(/1, tidx/), count=(/obj%n_points, 1/)), 'nf90_put_var(p)')
     call check_nc(nf90_put_var(obj%ncid, obj%var_t, t, start=(/1, tidx/), count=(/obj%n_points, 1/)), 'nf90_put_var(T)')
-    call check_nc(nf90_put_var(obj%ncid, obj%var_nu_sgs, nu_sgs, start=(/1, tidx/), count=(/obj%n_points, 1/)), 'nf90_put_var(nu_sgs)')
+    call check_nc(nf90_put_var(obj%ncid, obj%var_nu_sgs, nu_sgs, start=(/1, tidx/), count=(/obj%n_points, 1/)), &
+        'nf90_put_var(nu_sgs)')
 
     obj%samples_written = tidx
   end subroutine write_object_sample

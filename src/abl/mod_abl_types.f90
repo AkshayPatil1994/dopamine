@@ -93,9 +93,7 @@ module mod_abl_types
     integer(ip) :: n_eddies       = 0
     real(rp), allocatable :: pos(:,:)  ! (3, n_eddies) - eddy positions [m]
     real(rp), allocatable :: amp(:,:)  ! (3, n_eddies) - eddy intensity signs (+1/-1)
-    ! Divergence-free eddies (sem_type = 'dfsem', Poletto et al. 2013): ellipsoidal eddies whose axes are the
-    ! principal axes of the Reynolds tensor at their centre. The three arrays below are derived from pos and
-    ! amp (not checkpointed) by sem_prepare.
+    ! Divergence-free eddies (dfsem, Poletto 2013): ellipsoids on the Reynolds-tensor axes; arrays below derive from pos/amp.
     logical     :: dfsem           = .true.  ! divergence-free eddy kernel (else Jarrin tent kernel)
     real(rp)    :: lam_ref         = 1.0_rp  ! largest principal stress over the inflow [m2/s2]; sets sigma_i
     real(rp)    :: sig_min         = 0.0_rp  ! smallest principal eddy half-extent over the energetic inflow [m]
@@ -123,9 +121,7 @@ module mod_abl_types
     real(rp)    :: period2         = 0.0_rp  ! period along t2 [m]
     real(rp)    :: per1_lo         = 0.0_rp  ! t1 of the lower periodic plane, relative to x_inlet [m]
     real(rp)    :: per2_lo         = 0.0_rp
-    ! Prescribed inflow profile; empty means the analytic law from the namelist.
-    ! Spatial bins over (t1, t2, n_in) for the evaluation: bin width >= rsup, so a point only meets the
-    ! eddies of its own bin and the neighbouring ones. Rebuilt whenever the eddies move.
+    ! Prescribed inflow profile (empty = analytic law); bins over (t1, t2, n_in) of width >= rsup, rebuilt as eddies move.
     logical     :: bins_ready      = .false.
     integer(ip) :: nbin(3)         = 1
     real(rp)    :: bin_lo(3)       = 0.0_rp  ! lower edge of the binned box along t1, t2, n_in [m]

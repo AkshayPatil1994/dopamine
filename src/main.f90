@@ -128,10 +128,7 @@ program dopamine_main
       call mesh_global%build_connectivity()
       call mesh_global%compute_geometry()
 
-      ! Build periodic face pairing on the global mesh before partitioning.
-      ! Local (post-partition) geometry cannot always infer cross-rank periodic pairs.
-      ! Only rank 0 gets here, so the global mesh must not run its collectives on
-      ! MPI_COMM_WORLD (the other ranks are already waiting in partition_mesh).
+      ! Build the periodic face pairing on the global mesh before partitioning, off MPI_COMM_WORLD (others wait in partition_mesh).
       if (nranks > 1) then
         mesh_global%comm   = MPI_COMM_SELF
         mesh_global%nranks = 1
@@ -238,7 +235,7 @@ program dopamine_main
   ! SoA mirror of face/cell geometry: needed by !$acc kernels that can't map the AoS mesh type.
   call mesh_local%build_soa_mirror()
 
-  ! Static mesh/stencil geometry never changes; staging it once means every !$acc kernel's own copyin (checked "if not already present") finds it already resident and skips the transfer.
+  ! Static mesh/stencil geometry is staged once, so each !$acc kernel's copyin finds it resident and skips the transfer.
 #ifdef _OPENACC
   !$acc enter data copyin(mesh_local%face_owner_soa, mesh_local%face_neighbour_soa, &
   !$acc      mesh_local%face_sf_soa, mesh_local%face_gc_soa, mesh_local%face_eps_soa, &
@@ -378,9 +375,7 @@ program dopamine_main
         ' Reached nstep_max=', config%params%nstep_max, '; stopping time loop.'
       exit
     end if
-    ! Natural dt for this step: adaptive (check CFL from step 1 to catch overshoots
-    ! early) or fixed. Recomputed fresh every iteration -- write_time snapping below
-    ! only ever shrinks dt, so a fixed dt must not be left shrunk on later steps.
+    ! Natural dt for this step, recomputed each iteration since write_time snapping only shrinks dt.
     if (config%params%adapt_dt) then
       dt = solver%compute_dt()
     else
