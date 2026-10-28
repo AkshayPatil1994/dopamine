@@ -35,6 +35,7 @@ option(DOPAMINE_ENABLE_NVTX      "NVTX profiler ranges for Nsight Systems (needs
 set(DOPAMINE_OPENACC_GPU_ARCH "" CACHE STRING "Optional -gpu= target for OpenACC (e.g. cc86); empty lets nvfortran pick defaults")
 option(DOPAMINE_FETCH_NETCDF      "Auto-build NetCDF C/Fortran when missing"  ON)
 option(DOPAMINE_BUILD_TESTS       "Build unit tests"                          ON)
+option(DOPAMINE_NATIVE_ARCH       "Tune for the build machine (-march=native / -xHost); turn OFF for portable binaries" ON)
 option(DOPAMINE_ENABLE_LTO        "Enable interprocedural/link-time optimization (GNU: -flto, Intel: -ipo)" OFF)
 
 # External build directory
@@ -682,20 +683,20 @@ if(DOPAMINE_ENABLE_OPENACC AND OpenACC_Fortran_FOUND)
 endif()
 target_compile_options(dopamine_lib PRIVATE
   $<$<AND:$<COMPILE_LANGUAGE:Fortran>,$<Fortran_COMPILER_ID:GNU>>:
-    -O3 -march=native -Wall -Wextra
+    -O3 $<$<BOOL:${DOPAMINE_NATIVE_ARCH}>:-march=native> -Wall -Wextra
     -ffree-line-length-none -fbacktrace
     $<$<CONFIG:Debug>:-fcheck=all -g>>
   $<$<AND:$<COMPILE_LANGUAGE:Fortran>,$<Fortran_COMPILER_ID:Intel,IntelLLVM>>:
-    -O3 -xHost -warn all -traceback
+    -O3 $<$<BOOL:${DOPAMINE_NATIVE_ARCH}>:-xHost> -warn all -traceback
     $<$<CONFIG:Debug>:-check bounds -g>>
   $<$<AND:$<COMPILE_LANGUAGE:Fortran>,$<Fortran_COMPILER_ID:NVHPC>>:
     -O3 -Minfo=accel
     $<$<BOOL:${DOPAMINE_ENABLE_OPENMP}>:-mp>
     $<$<AND:$<BOOL:${DOPAMINE_ENABLE_OPENACC}>,$<BOOL:${DOPAMINE_OPENACC_GPU_ARCH}>>:-gpu=${DOPAMINE_OPENACC_GPU_ARCH}>>
   $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:GNU,Clang,AppleClang>>:
-    -O3 -march=native -Wall>
+    -O3 $<$<BOOL:${DOPAMINE_NATIVE_ARCH}>:-march=native> -Wall>
   $<$<AND:$<COMPILE_LANGUAGE:C>,$<C_COMPILER_ID:GNU,Clang,AppleClang>>:
-    -O3 -march=native -Wall>)
+    -O3 $<$<BOOL:${DOPAMINE_NATIVE_ARCH}>:-march=native> -Wall>)
 
 # nvfortran 23.3 hits an internal compiler error (ICE) in resolve_reconstruction_context
 # at -O2/-O3 ("NVFORTRAN-S-0000-Internal compiler error. bad cc 11") on a trivial array-
@@ -839,8 +840,10 @@ add_custom_target(cleanall
 # ============================================================================
 install(TARGETS dopamine dopamine-decompose dopamine-checkpoint-partition dopamine-inflow-gen RUNTIME DESTINATION bin)
 install(TARGETS dopamine_lib ARCHIVE DESTINATION lib)
+install(DIRECTORY "${CMAKE_BINARY_DIR}/mod/" DESTINATION include/dopamine
+        FILES_MATCHING PATTERN "*.mod")
 install(DIRECTORY src/ DESTINATION include/dopamine
-        FILES_MATCHING PATTERN "*.f90" PATTERN "*.hpp")
+        FILES_MATCHING PATTERN "*.hpp")
 
 # ============================================================================
 # Summary
