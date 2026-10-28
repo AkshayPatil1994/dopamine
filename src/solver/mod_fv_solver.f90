@@ -12,6 +12,7 @@ module mod_fv_solver
   use mod_viscous
   use mod_vreman
   use mod_dynamic_smagorinsky
+  use mod_amd
   use mod_wall_model
   use mod_abl_types
   use mod_abl_profiles
@@ -85,11 +86,18 @@ module mod_fv_solver
     integer(ip)   :: n_nonortho_corr = 1  ! Jasak non-orthogonal corrector outer iterations
     logical     :: use_rotational_projection = .true.  ! Brown-Cortez-Minion rotational correction (-nudiv u*)
     logical     :: use_sgs = .true.   ! enable SGS model; set false for no-model/ILES runs
-    character(16) :: sgs_model = 'VREMAN'  ! VREMAN (default), SMAGORINSKY, or DYNAMIC_SMAG
+    character(16) :: sgs_model = 'VREMAN'  ! VREMAN (default), SMAGORINSKY, DYNAMIC_SMAG, or AMD
+    real(rp)    :: c_amd = AMD_C_DEFAULT  ! AMD model constant (1/3 for second-order central differences)
+    !> AMD only: in wall-adjacent cells of wall-model patches replace the wall-normal gradient of the tangential
+    !> velocity by the log-law value u_tau/(kappa y), since the resolved one is unreliable at y+ ~ 50-100.
+    logical     :: amd_wall_gradient = .true.
     !> Wall-model sampling height; <= 0 samples the wall-adjacent cell (Larsson: set h independent of the grid).
     real(rp)    :: wall_model_height = 0.0_rp
     !> Wall-model velocity filter time constant; <= 0 disables filtering. Try ~ delta/u_tau.
     real(rp)    :: wall_model_filter_time = 0.0_rp
+    !> Adaptive wall-model filter factor f in T_f = f*y_w/(kappa*u_tau) (Yang, Park & Moin 2017); <= 0 disables it
+    !> and leaves the fixed wall_model_filter_time in charge.
+    real(rp)    :: wall_model_filter_tf_fac = 0.0_rp
     !> Gates verbose runtime diagnostics (projection idempotency, interface KE budget, worst-divergence-cell report).
     logical     :: debug_diagnostics = .false.
     character(len=:), allocatable :: petsc_options(:)
@@ -1266,6 +1274,10 @@ contains
         case ('DYNAMIC_SMAG')  ! Germano-Lilly dynamic procedure, see mod_dynamic_smagorinsky
           call dynamic_smagorinsky_sgs(self%U, self%grad_U, self%mesh, self%nu_sgs, &
                                        U_bnd=self%U_bnd, dt_stab=gk_dt)
+        case ('AMD')  ! Rozema et al. (2015), see mod_amd
+          call amd_sgs_viscosity(self%U, self%mesh, self%nu_sgs, self%params%nu, self%params%c_amd, &
+                                 self%params%amd_wall_gradient, U_bnd=self%U_bnd, &
+                                 grad_U_ext=self%grad_U, dt_stab=gk_dt)
         case default  ! 'VREMAN' or unknown
           call vreman_sgs_viscosity(self%U, self%mesh, self%nu_sgs, U_bnd=self%U_bnd, &
                                     grad_U_ext=self%grad_U, dt_stab=gk_dt)
@@ -1299,7 +1311,8 @@ contains
         call apply_wall_model_bc(self%U, self%params%nu, self%mesh, self%tau_w_bnd, &
                                  h_wm=self%params%wall_model_height, &
                                  t_filt=self%params%wall_model_filter_time, &
-                                 dt=merge(dt, 0.0_rp, k == 1))
+                                 dt=merge(dt, 0.0_rp, k == 1), &
+                                 tf_fac=self%params%wall_model_filter_tf_fac)
       end select
       call prof_pop()
       call prof_pop()

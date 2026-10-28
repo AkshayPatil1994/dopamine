@@ -19,6 +19,9 @@ module mod_parameters
   ! Vreman constant c = 2.5*Cs^2; 0.025 is the wall-bounded value (Cs = 0.1).
   real(rp), parameter, public :: C_VREMAN = 0.025_rp
 
+  ! AMD (Rozema et al. 2015) constant: the Poincare constant of second-order central differences.
+  real(rp), parameter, public :: AMD_C_DEFAULT = 1.0_rp / 3.0_rp
+
   ! Standard gravity
   real(rp), parameter, public :: G_STD = 9.81_rp
 

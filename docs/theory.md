@@ -311,6 +311,30 @@ area-weighted neighbour blend (`smooth_filter_tensor`) so the filter width ramps
 smoothly across a refinement interface instead of stepping discontinuously, which
 would otherwise show up as a spurious $$\nu_t$$ jump at the interface.
 
+### Anisotropic minimum dissipation (`sgs_model = 'AMD'`)
+
+The AMD model [@rozema2015] uses the same $$\alpha_{ij}$$ and filter-width tensor $$G$$ as Vreman:
+
+$$\nu_t = C_{\mathrm{amd}}\,\frac{\max(0,\,-\beta_{mn} S_{mn})}{\alpha_{ij}\alpha_{ij}},\qquad \beta_{mn} = G_{lk}\,\alpha_{lm}\alpha_{kn},$$
+
+with $$C_{\mathrm{amd}} = 1/3$$, the Poincare constant of second-order central differences. It is one-sided
+(no backscatter) and vanishes for pure shear and solid-body rotation. Because the numerator cancels to round-off
+in near-irrotational flow, values below $$10^{-12}\,\mathrm{tr}(G)\,|\alpha|^3$$ are dropped. Scalars keep
+$$\nu_t/\mathrm{Pr}_t$$; the scalar AMD closure and buoyancy production of the finite-difference code are not ported.
+
+With `amd_wall_gradient = .true.`, in a cell that owns a `wallModel` face the wall-normal derivative of the
+wall-parallel velocity is replaced by $$u_\tau/(\kappa y)$$ (direction of the cell's wall-parallel velocity,
+$$u_\tau$$ re-solved from the cell-centre velocity) before $$\beta$$ and $$S$$ are formed, since the resolved gradient
+overshoots there at $$y^+ \sim 50\text{--}100$$. This follows the finite-difference code (`dopamine-fdm`, `dev`).
+
+### Adaptive wall-model filter
+
+`wall_model_filter_tf_fac` $$f > 0$$ filters the wall-parallel velocity given to the wall model with
+$$\bar u^n = (1-\varepsilon)\bar u^{n-1} + \varepsilon u^n$$, $$\varepsilon = \min(1, \Delta t/T_f)$$,
+$$T_f = f\,y/(\kappa u_\tau)$$ [@yang2017]. $$u_\tau$$ is that of the previous step, re-derived from the filtered
+velocity, so no extra state is stored or checkpointed. It advances once per step (stages 2 and 3 pass $$\Delta t = 0$$)
+and takes precedence over the fixed `wall_model_filter_time`.
+
 ### Dynamic Smagorinsky (`sgs_model = 'DYNAMIC_SMAG'`)
 
 An alternative to Vreman: the Germano-Lilly dynamic procedure
@@ -351,13 +375,11 @@ flux react to the same gradient definition near boundaries and across patches.
 
 ### Wall-model / SGS dissipation partition
 
-Cells adjacent to `BC_WALL_MODEL` faces are now forced to `nu_sgs = 0`.
-
-Rationale: in equilibrium WMLES, wall stress and SGS stress should not both be
-used to model the same unresolved wall-layer dissipation budget. Keeping Vreman
-active in first-off-wall model cells can double-count dissipation and damp
-resolved near-wall structures. The partition is consistent with standard
-wall-modeled LES philosophy [@piomelli2002].
+The SGS viscosity is **not** zeroed in cells adjacent to `BC_WALL_MODEL` faces: Vreman, Smagorinsky and
+dynamic Smagorinsky keep their resolved-gradient value there (an earlier version of this page stated the
+opposite; the code has no such step). For AMD, `amd_wall_gradient = .true.` instead evaluates the closure in
+that cell with the log-law wall-normal gradient $$u_\tau/(\kappa y)$$, which limits the double-counting of
+the unresolved wall-layer stress between the wall stress and the SGS stress [@piomelli2002].
 
 ### Wall-velocity sampling strategy
 

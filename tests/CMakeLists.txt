@@ -21,12 +21,27 @@ foreach(_case tgv channel rb duct dynsmag graded pdrop hydro hydrowall inflow in
   endforeach()
 endforeach()
 
+# AMD + adaptive wall-model filter, serial only (np 2 cannot be run on every host yet).
+add_test(NAME regression_amd_np1
+         COMMAND "${_regression_dir}/check_case.sh" amd 1 "${_regression_work}")
+set(_env "DOPAMINE_BIN=$<TARGET_FILE:dopamine>" "MPIRUN=${MPIEXEC_EXECUTABLE}")
+if(DOPAMINE_GMSH)
+  list(APPEND _env "GMSH=${DOPAMINE_GMSH}")
+endif()
+set_tests_properties(regression_amd_np1 PROPERTIES ENVIRONMENT "${_env}" LABELS regression PROCESSORS 1 TIMEOUT 900)
+
 # Unit test of the divergence-free synthetic eddy kernel (no mesh, serial).
 add_executable(test_sem_dfsem unit/test_sem_dfsem.f90)
 target_link_options(test_sem_dfsem PRIVATE -Wl,--no-as-needed)
 target_link_libraries(test_sem_dfsem PRIVATE dopamine_lib MPI::MPI_Fortran MPI::MPI_C dl)
 add_test(NAME unit_sem_dfsem COMMAND test_sem_dfsem)
 set_tests_properties(unit_sem_dfsem PROPERTIES LABELS unit TIMEOUT 300)
+
+add_executable(test_amd unit/test_amd.f90)
+target_link_options(test_amd PRIVATE -Wl,--no-as-needed)
+target_link_libraries(test_amd PRIVATE dopamine_lib MPI::MPI_Fortran MPI::MPI_C dl)
+add_test(NAME unit_amd COMMAND test_amd)
+set_tests_properties(unit_amd PROPERTIES LABELS unit TIMEOUT 60)
 
 add_executable(test_inflow_db unit/test_inflow_db.f90)
 target_link_options(test_inflow_db PRIVATE -Wl,--no-as-needed)
