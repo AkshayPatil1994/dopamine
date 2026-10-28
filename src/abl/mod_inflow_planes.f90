@@ -249,7 +249,7 @@ contains
   subroutine heap_sort(a, n)
     real(rp),    intent(inout) :: a(:)
     integer,     intent(in)    :: n
-    integer :: i, j, k, m
+    integer :: i, m
     real(rp) :: t
     if (n < 2) return
     do i = n / 2, 1, -1

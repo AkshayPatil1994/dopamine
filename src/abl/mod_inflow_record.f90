@@ -58,7 +58,7 @@ contains
     type(InflowRecordConfig), intent(in) :: cfg
 
     type(Mesh), pointer :: msh
-    integer(ip) :: c, i, n_loc, j, k, ierr, jy, kz
+    integer(ip) :: c, i, n_loc, j, ierr, jy, kz
     real(rp) :: n_in(3), t1(3), s, sabs_loc, sabs, h_loc, h, tol, s_layer, s_loc, W
     real(rp), allocatable :: al(:), zl(:), ua(:), uz(:)
     integer(ip), allocatable :: hits(:,:), hits_g(:,:)
