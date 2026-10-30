@@ -5,7 +5,7 @@ find_program(DOPAMINE_GMSH gmsh)
 set(_regression_dir "${CMAKE_CURRENT_SOURCE_DIR}/regression")
 set(_regression_work "${CMAKE_BINARY_DIR}/regression")
 
-foreach(_case tgv tgv_skew tgv_skew_chk channel rb duct dynsmag graded pdrop hydro hydrowall inflow inflow_jarrin)
+foreach(_case tgv tgv_skew tgv_skew_chk tgv_skew_exact hydro_exact duct_exact channel rb duct dynsmag graded pdrop hydro hydrowall inflow inflow_jarrin)
   foreach(_np 1 2)
     add_test(NAME regression_${_case}_np${_np}
              COMMAND "${_regression_dir}/check_case.sh" ${_case} ${_np} "${_regression_work}")
@@ -87,3 +87,12 @@ target_link_options(test_nonortho_limiter PRIVATE -Wl,--no-as-needed)
 target_link_libraries(test_nonortho_limiter PRIVATE dopamine_lib MPI::MPI_Fortran MPI::MPI_C dl)
 add_test(NAME unit_nonortho_limiter COMMAND test_nonortho_limiter)
 set_tests_properties(unit_nonortho_limiter PROPERTIES LABELS unit TIMEOUT 60)
+
+# Exact cell projection on a skewed box (mesh from mk_box_mesh.py, no gmsh needed).
+add_executable(test_cell_projection unit/test_cell_projection.f90)
+target_link_options(test_cell_projection PRIVATE -Wl,--no-as-needed)
+target_link_libraries(test_cell_projection PRIVATE dopamine_lib MPI::MPI_Fortran MPI::MPI_C dl)
+add_test(NAME unit_cell_projection
+         COMMAND sh -c "python3 ${CMAKE_CURRENT_SOURCE_DIR}/regression/mk_box_mesh.py 6 0.03 cp_box.msh && $<TARGET_FILE:test_cell_projection> cp_box.msh"
+         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+set_tests_properties(unit_cell_projection PROPERTIES LABELS unit TIMEOUT 120)

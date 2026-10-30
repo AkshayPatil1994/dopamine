@@ -197,6 +197,8 @@ contains
     real(rp)       :: pressure_min_cos_theta = 0.0_rp  ! > 0 floors cos(theta) in the Poisson operator
     logical        :: rhie_chow_dual = .false.  ! consistent Rhie-Chow on non-orthogonal faces
     logical        :: nonortho_check = .false.  ! corrector loop exits on the increment of phi, not on |rhs_p|
+    character(8)   :: cell_projection = 'LS'  ! LS (reconstructed face correction) or EXACT (V-orthogonal)
+    real(rp)       :: cell_projection_tol = 1.0e-1_rp  ! EXACT: relative velocity-energy tolerance of the PCG
     character(16)  :: time_scheme = 'RK3W'  ! legacy; use time_integrator instead
     character(16)  :: time_integrator = 'RK3W'  ! RK3W is the only integrator
     logical        :: use_skew_symmetric_advection = .false.
@@ -214,7 +216,7 @@ contains
              solver_stats_frequency, calc_stats_frequency, &
                                p_tol, p_max_iter, p_target_divU, gradient_scheme, pressure_solver, &
                                use_rotational_projection, gg_iterations, use_sgs, time_scheme, n_nonortho_corr, pressure_min_cos_theta, rhie_chow_dual, &
-                               nonortho_check, &
+                               nonortho_check, cell_projection, cell_projection_tol, &
                                time_integrator, use_skew_symmetric_advection, sgs_model, &
                                wall_model_height, wall_model_filter_time, debug_diagnostics, &
                                c_amd, amd_wall_gradient, wall_model_filter_tf_fac
@@ -300,6 +302,8 @@ contains
       p%pressure_min_cos_theta = min(max(0.0_rp, pressure_min_cos_theta), 1.0_rp)
       p%rhie_chow_dual = rhie_chow_dual
       p%nonortho_check = nonortho_check
+      p%cell_projection = upper_case(adjustl(cell_projection))
+      p%cell_projection_tol = max(cell_projection_tol, 1.0e-8_rp)
       p%time_integrator = time_integrator  ! RK3W 
       ! Parsed for input compatibility only; KEP already supplies the energy-conserving form.
       p%use_skew_symmetric_advection = use_skew_symmetric_advection

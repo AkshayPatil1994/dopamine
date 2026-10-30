@@ -1,0 +1,50 @@
+! Regression case (cell_projection = EXACT): Taylor-Green vortex on a 45 degree skewed box; blows up without rhie_chow_dual.
+&dopamine_domain
+  mesh_file = 'mesh.msh'
+  mesh_type = 'gmsh'
+/
+&dopamine_numerics
+  cell_projection = 'EXACT'
+  advection_scheme = 'KEP'
+  time_integrator  = 'RK3W'
+  use_sgs          = .false.
+  dt               = 2.0e-2
+  t_end            = 100.0
+  nstep_max        = 30
+  cfl_max          = 0.6
+  adapt_dt         = .false.
+  p_tol            = 1.0e-10
+  p_max_iter       = 1000
+  n_nonortho_corr  = 3
+  rhie_chow_dual   = .true.
+/
+&dopamine_physics
+  nu = 6.25e-4
+/
+&dopamine_bc
+  n_patches = 6
+  patch_name(1) = 'x0'
+  patch_type(1) = 'periodic'
+  patch_name(2) = 'xL'
+  patch_type(2) = 'periodic'
+  patch_name(3) = 'y0'
+  patch_type(3) = 'periodic'
+  patch_name(4) = 'yL'
+  patch_type(4) = 'periodic'
+  patch_name(5) = 'z0'
+  patch_type(5) = 'periodic'
+  patch_name(6) = 'zL'
+  patch_type(6) = 'periodic'
+/
+&dopamine_initial_condition
+  ic_type = 'taylor_green'
+  ic_uref = 1.0
+  ic_lref = 1.0
+/
+&dopamine_output
+  prefix         = 'case'
+  write_interval = 100000
+/
+&dopamine_stats
+  solver_stats_frequency = 1
+/

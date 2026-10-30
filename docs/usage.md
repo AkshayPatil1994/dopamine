@@ -681,6 +681,10 @@ Practical settings:
 - On meshes with non-orthogonality above about 40 degrees (snappyHexMesh or skewed Gmsh meshes), a velocity that
   grows by a constant factor every step, independent of `dt`, points at the Rhie-Chow inconsistency. Set
   `rhie_chow_dual = .true.` (default `.false.`) in `&dopamine_numerics`; see Theory.
+- If a low-dissipation momentum scheme (`CENTRAL`, `KEP`, `QUICK`) still grows from a grid-scale pair of cells
+  next to a large size jump (face skewness above 0.5, owner weight near 0 or 1) after `rhie_chow_dual = .true.`,
+  set `cell_projection = 'EXACT'`. It makes the pressure step energy non-increasing on any mesh, costs about two to
+  three times the step time of the default, and is not available in OpenACC builds; see Theory.
 - With the default exit test the non-orthogonal corrector loop never runs more than two passes whatever
   `n_nonortho_corr` is, because it compares `max|rhs_p|` (dominated by div u*) between passes. Set
   `nonortho_check = .true.` to stop on the increment of the pressure instead.

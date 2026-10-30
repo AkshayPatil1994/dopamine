@@ -8,6 +8,7 @@ module mod_fv_solver
   use mod_mesh
   use mod_gradient
   use mod_nonortho
+  use mod_cell_projection
   use mod_advection
   use mod_viscous
   use mod_vreman
@@ -87,6 +88,8 @@ module mod_fv_solver
     real(rp)      :: pressure_min_cos_theta = 0.0_rp  ! > 0 floors cos(theta) in the Poisson coefficient and k
     logical       :: rhie_chow_dual = .false.  ! .true.: Rhie-Chow restores exactly the applied cross-free gradient
     logical       :: nonortho_check = .false.  ! .true.: corrector loop exits on the increment of phi, not on |rhs_p|
+    character(8)  :: cell_projection = 'LS'  ! 'EXACT': cell velocity is the V-orthogonal projection (mod_cell_projection)
+    real(rp)      :: cell_projection_tol = 1.0e-1_rp  ! EXACT: relative velocity-energy tolerance of the PCG
     logical     :: use_rotational_projection = .true.  ! Brown-Cortez-Minion rotational correction (-nudiv u*)
     logical     :: use_sgs = .true.   ! enable SGS model; set false for no-model/ILES runs
     character(16) :: sgs_model = 'VREMAN'  ! VREMAN (default), SMAGORINSKY, DYNAMIC_SMAG, or AMD
@@ -106,6 +109,7 @@ module mod_fv_solver
     character(len=:), allocatable :: petsc_options(:)
   end type solver_params_t
 
+  type(Mesh), pointer, save :: cproj_msh => null()
   !> Relative increment of phi below which the non-orthogonal corrector loop stops (nonortho_check).
   real(rp), parameter :: NONORTHO_PHI_TOL = 1.0e-3_rp
 
@@ -203,6 +207,9 @@ module mod_fv_solver
 
     ! -- Pressure solver backend
     type(pressure_solver_handle_t) :: psolver
+    !> cell_projection = 'EXACT': operators of the V-orthogonal cell-velocity projection.
+    type(cell_proj_t) :: cproj
+    logical :: cproj_on = .false.
     real(rp)    :: V_min_global  = 0.0_rp  ! global minimum cell volume
     real(rp)    :: V_total_global = 0.0_rp  ! global domain volume, for bulk-velocity averaging
     real(rp)    :: p_atol_factor = 1.0e-10_rp  ! set to a machine-precision floor in solver_init; atol = factor/dt
@@ -462,6 +469,7 @@ contains
       call detect_nonortho_skip(self)
       call build_nonortho_cache(self)
       call build_reconstruct_operator(self)
+      call build_cell_projection(self)
       call stage_static_on_device(self)
     end if
 
@@ -887,7 +895,11 @@ contains
     !$acc update device(self%U_face)
 #endif
     call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh)
-    call correct_velocity_psolver_dual(self, dt_use, with_cross=.true., p_is_total=.true.)  ! uses phi
+    if (self%cproj_on) then
+      call project_cells_exact(self, dt_use)
+    else
+      call correct_velocity_psolver_dual(self, dt_use, with_cross=.true., p_is_total=.true.)  ! uses phi
+    end if
     call apply_velocity_bc(self%U, self%U_bnd, &
                            self%bc_configs, self%mesh, u_fluc_bnd=self%sem_fluc_bnd, u_mean_bnd=self%abl_mean_bnd)
 
@@ -1365,7 +1377,11 @@ contains
       do c = 1, nc
         p_old(c) = p(c)
       end do
-      call correct_velocity_psolver_dual(self, gk_dt, with_cross=.false., p_is_total=.true.)  ! p = p^{k-1/2}, whole pressure
+      if (self%cproj_on) then
+        self%w_gp_cell = 0.0_rp  ! the exact projection takes the whole cell correction, nothing to add back
+      else
+        call correct_velocity_psolver_dual(self, gk_dt, with_cross=.false., p_is_total=.true.)  ! p = p^{k-1/2}, whole pressure
+      end if
       ! Rhie-Chow must add back exactly the gradient just removed, so record it here.
       !$acc parallel loop default(present)
       do c = 1, nc
@@ -1523,7 +1539,11 @@ contains
         call solver_sync_host(self)
         call record_divergence_split(self, jno)
       end if
-      call correct_velocity_psolver_dual(self, gk_dt, with_cross=.true.)  ! u^{k+1} = u* - gk_dt*grad(phi)
+      if (self%cproj_on) then
+        call project_cells_exact(self, gk_dt)
+      else
+        call correct_velocity_psolver_dual(self, gk_dt, with_cross=.true.)  ! u^{k+1} = u* - gk_dt*grad(phi)
+      end if
       call self%mesh%begin_halos_vec(self%U)
       call apply_velocity_bc(self%U, self%U_bnd, self%bc_configs, self%mesh, &
                              periodic_only=.false., grad_U=self%grad_U, u_fluc_bnd=self%sem_fluc_bnd, u_mean_bnd=self%abl_mean_bnd)
@@ -3110,6 +3130,108 @@ contains
 #endif
     !$acc end data
   end subroutine correct_velocity_psolver_dual
+
+  subroutine cproj_halo_s(x)
+    real(rp), intent(inout) :: x(:)
+    call cproj_msh%exchange_halos_scalar(x)
+  end subroutine cproj_halo_s
+
+  subroutine cproj_halo_v(x)
+    real(rp), intent(inout) :: x(:,:)
+    if (cproj_msh%n_ghost > 0) call cproj_msh%exchange_halos_vec(x)
+  end subroutine cproj_halo_v
+
+  !> Collect the Poisson face list and outlet faces for the exact cell projection.
+  subroutine build_cell_projection(self)
+    class(FVSolver), intent(inout), target :: self
+    integer(ip) :: idx, o, nb, f_mesh, nc, ntot, n, ib, f_glob, q, nout
+    integer(ip), allocatable :: own(:), nbr(:), bc(:)
+    real(rp),    allocatable :: sf(:,:), gc(:), bsf(:,:)
+
+    self%cproj_on = (trim(self%params%cell_projection) == 'EXACT')
+    if (.not. self%cproj_on) return
+#ifdef _OPENACC
+    error stop 'cell_projection=EXACT is host-only'
+#endif
+    nc = self%mesh%n_cells;  ntot = nc + self%mesh%n_ghost
+    allocate(own(self%psolver%n_faces), nbr(self%psolver%n_faces), sf(3, self%psolver%n_faces), gc(self%psolver%n_faces))
+    n = 0
+    do idx = 1, self%psolver%n_faces
+      if (self%psolver%skip_face(idx) /= 0) cycle
+      o = int(self%psolver%face_owner(idx), ip);  nb = self%psolver%face_neighbor_ext(idx)
+      f_mesh = self%psolver%face_mesh_idx(idx)
+      if (o < 1 .or. o > nc .or. nb < 1 .or. nb > ntot .or. f_mesh < 1 .or. f_mesh > self%mesh%n_faces) cycle
+      n = n + 1
+      own(n) = o;  nbr(n) = nb;  sf(:, n) = self%mesh%face_sf_soa(:, f_mesh)
+      if (f_mesh > self%mesh%n_int_faces) then
+        gc(n) = self%mesh%periodic_gc_soa(f_mesh - self%mesh%n_int_faces)
+      else
+        gc(n) = self%mesh%face_gc_soa(f_mesh)
+      end if
+    end do
+    nout = 0
+    do ib = 1, self%n_nonperiodic_bfaces
+      f_glob = self%mesh%n_int_faces + self%nonperiodic_bfaces(ib)
+      q = self%mesh%face_patch_id_soa(f_glob)
+      if (q >= 1 .and. q <= self%mesh%n_patches) then
+        if (self%mesh%patch_bc_id_soa(q) == BC_OUTLET) nout = nout + 1
+      end if
+    end do
+    allocate(bc(nout), bsf(3, nout))
+    nout = 0
+    do ib = 1, self%n_nonperiodic_bfaces
+      f_glob = self%mesh%n_int_faces + self%nonperiodic_bfaces(ib)
+      q = self%mesh%face_patch_id_soa(f_glob)
+      if (q >= 1 .and. q <= self%mesh%n_patches) then
+        if (self%mesh%patch_bc_id_soa(q) == BC_OUTLET) then
+          nout = nout + 1
+          bc(nout) = self%mesh%face_owner_soa(f_glob)
+          bsf(:, nout) = self%mesh%face_sf_soa(:, f_glob)
+        end if
+      end if
+    end do
+    call self%cproj%init(self%mesh%comm, nc, ntot, self%mesh%cell_volume_soa, own(1:n), nbr(1:n), sf(:, 1:n), gc(1:n), bc, bsf)
+    cproj_msh => self%mesh
+    self%cproj%halo_s => cproj_halo_s
+    self%cproj%halo_v => cproj_halo_v
+  end subroutine build_cell_projection
+
+  !> u <- exact V-orthogonal projection of u onto zero divergence of the gc-interpolated flux.
+  subroutine project_cells_exact(self, dt)
+    class(FVSolver), intent(inout), target :: self
+    real(rp),        intent(in)    :: dt
+    real(rp), allocatable :: bconst(:)
+    integer(ip) :: ib, f_glob, o, q, n_it, nc
+
+    nc = self%mesh%n_cells
+    allocate(bconst(nc), source=0.0_rp)
+    do ib = 1, self%n_nonperiodic_bfaces
+      f_glob = self%mesh%n_int_faces + self%nonperiodic_bfaces(ib)
+      o = self%mesh%face_owner_soa(f_glob)
+      q = self%mesh%face_patch_id_soa(f_glob)
+      if (o < 1 .or. o > nc .or. q < 1 .or. q > self%mesh%n_patches) cycle
+      select case (self%mesh%patch_bc_id_soa(q))
+      case (BC_WALL_NOSLIP, BC_WALL_MODEL, BC_WALL_VELOCITY, BC_SLIP, BC_SYMMETRY)
+        continue
+      case (BC_OUTLET)
+        ! Dirichlet pressure acts on the outlet cell as the boundary-face force -p_b Sf / V.
+        self%U(:, o) = self%U(:, o) - dt * self%patch_p_val(q) * self%mesh%face_sf_soa(:, f_glob) &
+                                          / self%mesh%cell_volume_soa(o)
+      case default
+        bconst(o) = bconst(o) + sum(self%U_bnd(:, self%nonperiodic_bfaces(ib)) * self%mesh%face_sf_soa(:, f_glob))
+      end select
+    end do
+    call self%cproj%project(self%U, bconst, cproj_precond, self%params%cell_projection_tol, 100_ip, n_it)
+
+  contains
+
+    subroutine cproj_precond(r, z)
+      real(rp), intent(in)    :: r(:)
+      real(rp), intent(inout) :: z(:)
+      z = 0.0_rp
+      call pressure_solver_solve(self%psolver, r, z, tol=0.05_rp, max_iter=50_ip)
+    end subroutine cproj_precond
+  end subroutine project_cells_exact
 
   !> Move all time-step fields to the device (OpenACC; no-op otherwise); call once before the time loop, host synced by sync_host.
   subroutine solver_to_device(self, gpu_aware_mpi)

@@ -277,6 +277,37 @@ With `rhie_chow_dual = .true.` the term becomes $$\bar{\mathbf{g}}_f\cdot\mathbf
 exactly the gradient the pre-correction removed. The face-flux and cell-velocity operators are then dual again,
 and orthogonal faces ($$\mathbf{k}_f=0$$) are unchanged. The default is `.false.` to keep older results.
 
+### Energy-stable cell-velocity projection (`cell_projection = 'EXACT'`)
+
+The flux $$q$$ is made divergence free by the compact Poisson operator $$\Lambda$$, but the cell velocity is
+corrected separately, by $$u \leftarrow u - G\psi$$ with $$G$$ the least-squares reconstruction of the face-normal
+differences. Write $$B = D I$$ for the outflow divergence of the gc-interpolated flux of the cell velocity and
+$$M = \mathrm{diag}(V)$$. The cell update is the map $$P = I - G\Lambda^{-1}B$$. It is an orthogonal projector in the
+$$M$$-norm only if $$G = M^{-1}B^T$$ and $$\Lambda = BM^{-1}B^T$$; the compact $$\Lambda$$ differs from the wide
+$$BM^{-1}B^T$$, and $$G$$ is not the $$M$$-adjoint of $$B$$ whenever the mesh is skewed or graded. On a uniform Cartesian
+mesh $$P$$ is symmetric with eigenvalues in $$[0,1]$$. On the 24k-cell urban crop used to develop this option
+(`MichelStadt`, faces with skewness 0.66 and owner weight 0.04) the largest singular value of $$P$$ is 1.4 to 1.5
+and the numerical abscissa 1.25 to 1.3, and the same value (1.4) holds with the Green-Gauss cell gradient, so any
+face-based $$G$$ leaves pressure doing net work on grid-scale cell velocities. Advection that conserves kinetic
+energy (KEP) cannot remove this energy: it appears as a pair of adjacent cells with opposite, large velocities
+that grows at a rate independent of $$\Delta t$$ (about 2 per second on that mesh) with every momentum scheme.
+
+With `cell_projection = 'EXACT'` the predictor is projected exactly:
+$$u^{k+1} = u^* - M^{-1}B^T\chi$$, $$BM^{-1}B^T\chi = Bu^*$$, which is the $$M$$-orthogonal projection onto
+$$\ker B$$, so kinetic energy cannot grow in the pressure step. The system is solved by flexible conjugate gradients
+preconditioned with the compact pressure solver; `cell_projection_tol` bounds the relative velocity-energy step. The
+cell velocity no longer carries a pressure-gradient pre-correction (the projection removes any range component
+exactly), the flux is built as before with the pressure of the previous stage in the Rhie-Chow term, and the
+Dirichlet pressure of outlets enters the predictor as the boundary-face force $$-p_b\mathbf{S}_f/V$$. Inlet fluxes
+are fixed data of $$B$$. Walls carry zero flux, which also balances the body force on closed walls.
+
+Limits: the two pressures differ. The compact solution drives the face flux and is what is written, and it is
+noisier than with `'LS'` (an offset of the mean and a lag of order the projection residual divided by $$\Delta t$$). The
+interpolation weights of $$B$$ are the geometric gc weights, so the adjoint gradient is first-order accurate for a
+linear pressure across a size jump (relative error $$(h_+ + h_- - 2h_c)/(4h_c)$$ for a 1D graded mesh); smooth
+grading and uniform meshes are second order. It does not make the advection scheme conservative: `CENTRAL`
+with the gradient-corrected face value and `QUICK` are not energy neutral and can still grow.
+
 ### Periodic pressure coupling
 
 Periodic edges are assembled explicitly, including cross-rank fallback when the

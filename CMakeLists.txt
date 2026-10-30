@@ -564,6 +564,7 @@ set(DOPAMINE_FORTRAN_SOURCES
   src/mesh/mod_streaming_decompose.f90
   src/io/mod_checkpoint_io.f90
   src/numerics/mod_nonortho.f90
+  src/numerics/mod_cell_projection.f90
   src/numerics/mod_gradient.f90
   src/numerics/mod_advection.f90
   src/numerics/mod_viscous.f90
