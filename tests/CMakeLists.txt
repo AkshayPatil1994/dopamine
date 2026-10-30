@@ -74,3 +74,9 @@ target_link_options(test_mesh_geometry PRIVATE -Wl,--no-as-needed)
 target_link_libraries(test_mesh_geometry PRIVATE dopamine_lib MPI::MPI_Fortran MPI::MPI_C dl)
 add_test(NAME unit_mesh_geometry COMMAND test_mesh_geometry)
 set_tests_properties(unit_mesh_geometry PROPERTIES LABELS unit TIMEOUT 60)
+
+# gmsh reader must refuse a mesh whose boundary faces lack a physical surface group.
+add_test(NAME unit_gmsh_open_cell
+         COMMAND test_mesh_geometry "${CMAKE_CURRENT_SOURCE_DIR}/unit/mesh/gmsh_open_tet.msh")
+set_tests_properties(unit_gmsh_open_cell PROPERTIES LABELS unit TIMEOUT 60
+  PASS_REGULAR_EXPRESSION "unlabelled boundary faces")

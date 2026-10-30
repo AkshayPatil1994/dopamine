@@ -104,7 +104,9 @@ setting only affects meshes that go through the decomposer.
 
 - **Gmsh v4 (.msh):** tet4, hex8, prism6, pyr5, tet10, hex20. Use
   `$PhysicalNames` for boundaries. Generate with
-  `gmsh -3 -format msh4 geometry.geo`.
+  `gmsh -3 -format msh4 geometry.geo`. Every boundary surface must belong to a
+  physical group: the reader stops with an error if a cell face has neither a
+  neighbour nor a labelled surface element.
 - **OpenFOAM polyMesh:** Reads `constant/polyMesh/{points,faces,owner,
   neighbour,boundary}`. All OpenFOAM-supported cell types.
 

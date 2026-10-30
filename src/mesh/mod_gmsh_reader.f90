@@ -490,6 +490,7 @@ contains
         if (h_state(slot) == 0) exit
         if (all(h_nodes(:, slot) == sig)) then
           face_owner(f) = h_owner(slot)
+          if (h_state(slot) == 1) h_state(slot) = 3
           exit
         end if
         if (slot == table_size) then
@@ -519,6 +520,13 @@ contains
         error stop 'build_faces_from_cells: boundary face without a physical surface group'
       end if
     end do
+
+    ! A cell face with no neighbour and no surface element would silently leave the cell open.
+    if (any(h_state == 1)) then
+      write(*, '(A,I0,A)') 'ERROR: ', count(h_state == 1), &
+        ' boundary faces are not in any physical surface group'
+      error stop 'gmsh_read: unlabelled boundary faces (open cells)'
+    end if
 
     msh%n_bnd_faces = n_bnd_f
     n_total_f        = n_int_f + n_bnd_f
