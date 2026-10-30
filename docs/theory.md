@@ -216,9 +216,10 @@ skewness correction.
 
 ### Non-orthogonal correction in viscous and pressure operators
 
-Both the viscous flux and the pressure Poisson RHS use Jasak's minimum-correction
-(deferred cross-diffusion) split [@jasak1996; @moukalled2016]. The face normal
-gradient is decomposed as:
+The viscous flux uses Jasak's minimum-correction (deferred cross-diffusion) split
+[@jasak1996; @moukalled2016]; the pressure Poisson operator uses the over-relaxed
+split of the next section, whose implicit coefficient is $$|\mathbf{S}_f|^2/(\mathbf{S}_f\cdot\mathbf{d}_{PN})$$.
+The viscous face normal gradient is decomposed as:
 
 $$
 (\nabla\phi)_f \cdot \mathbf{n}_f = \underbrace{a_f\,(\phi_N - \phi_P)}_{\text{implicit orthogonal}} + \underbrace{(\nabla\phi)_f^{(n-1)} \cdot \mathbf{k}_f}_{\text{explicit cross-diffusion}},
@@ -828,8 +829,8 @@ For current defaults and updated implementation:
    `scalar_tvd_scheme`.
 2. Dissipation responsibility is explicitly partitioned between SGS and
    wall-model closures near walls.
-3. Non-orthogonality handling uses Jasak minimum-correction / deferred cross-diffusion
-   in both viscous momentum and pressure operators [@jasak1996].
+3. Non-orthogonality handling uses Jasak deferred cross-diffusion: minimum-correction
+   in the viscous momentum operator, over-relaxed in the pressure operator [@jasak1996].
 4. Periodic coupling uses geometric distance-ratio $$g_c$$ rather than a hardcoded
    $$0.5$$ interpolant on non-uniform meshes.
 5. Parallel mesh partitioning uses a Morton (Z-order) SFC by default for scalability.
