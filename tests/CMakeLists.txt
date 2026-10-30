@@ -67,3 +67,10 @@ add_test(NAME inflow_chain COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/inflow/chain.sh"
 set_tests_properties(inflow_chain PROPERTIES
   ENVIRONMENT "DOPAMINE_BIN=$<TARGET_FILE:dopamine>;DOPAMINE_GEN=$<TARGET_FILE:dopamine-inflow-gen>;MPIRUN=${MPIEXEC_EXECUTABLE}"
   LABELS inflow PROCESSORS 2 TIMEOUT 1200)
+
+# Polygon face geometry on concave faces (serial, no mesh file).
+add_executable(test_mesh_geometry unit/test_mesh_geometry.f90)
+target_link_options(test_mesh_geometry PRIVATE -Wl,--no-as-needed)
+target_link_libraries(test_mesh_geometry PRIVATE dopamine_lib MPI::MPI_Fortran MPI::MPI_C dl)
+add_test(NAME unit_mesh_geometry COMMAND test_mesh_geometry)
+set_tests_properties(unit_mesh_geometry PROPERTIES LABELS unit TIMEOUT 60)

@@ -1418,9 +1418,9 @@ contains
     real(rp),    intent(in)  :: points(:,:)
     real(rp),    intent(out) :: centre(3), normal(3), area
 
-    integer(ip) :: i, nn, ni, ni1
+    integer(ip) :: i, nn
     real(rp)    :: pref(3), p_i(3), p_i1(3), tri_vec(3), n_acc(3)
-    real(rp)    :: tri_area, area_sum, tri_centroid(3)
+    real(rp)    :: tri_area, area_sum
 
     nn = face_offset(f+1) - face_offset(f)
     centre = 0.0_rp
@@ -1435,22 +1435,25 @@ contains
 
     pref = points(:, face_pts(face_offset(f)))
     do i = face_offset(f) + 1, face_offset(f + 1) - 2
-      ni  = face_pts(i)
-      ni1 = face_pts(i + 1)
-      p_i  = points(:, ni)
-      p_i1 = points(:, ni1)
-      tri_vec = 0.5_rp * cross3(p_i - pref, p_i1 - pref)
-      tri_area = sqrt(sum(tri_vec**2))
-      if (tri_area <= SMALL) cycle
-      tri_centroid = (pref + p_i + p_i1) / 3.0_rp
-      centre = centre + tri_area * tri_centroid
-      area_sum = area_sum + tri_area
-      n_acc = n_acc + tri_vec
+      p_i  = points(:, face_pts(i))
+      p_i1 = points(:, face_pts(i + 1))
+      n_acc = n_acc + 0.5_rp * cross3(p_i - pref, p_i1 - pref)
     end do
 
     area  = sqrt(sum(n_acc**2)) + SMALL
     normal = n_acc / area
-    if (area_sum > SMALL) then
+
+    ! Signed triangle areas along the face normal keep the centre correct for concave faces.
+    do i = face_offset(f) + 1, face_offset(f + 1) - 2
+      p_i  = points(:, face_pts(i))
+      p_i1 = points(:, face_pts(i + 1))
+      tri_vec = 0.5_rp * cross3(p_i - pref, p_i1 - pref)
+      tri_area = dot_product(tri_vec, normal)
+      centre = centre + tri_area * (pref + p_i + p_i1) / 3.0_rp
+      area_sum = area_sum + tri_area
+    end do
+
+    if (abs(area_sum) > SMALL) then
       centre = centre / area_sum
     else
       centre = pref
