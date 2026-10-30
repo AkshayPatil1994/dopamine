@@ -86,6 +86,7 @@ module mod_fv_solver
     integer(ip)   :: n_nonortho_corr = 1  ! Jasak non-orthogonal corrector outer iterations
     real(rp)      :: pressure_min_cos_theta = 0.0_rp  ! > 0 floors cos(theta) in the Poisson coefficient and k
     logical       :: rhie_chow_dual = .false.  ! .true.: Rhie-Chow restores exactly the applied cross-free gradient
+    logical       :: nonortho_check = .false.  ! .true.: corrector loop exits on the increment of phi, not on |rhs_p|
     logical     :: use_rotational_projection = .true.  ! Brown-Cortez-Minion rotational correction (-nudiv u*)
     logical     :: use_sgs = .true.   ! enable SGS model; set false for no-model/ILES runs
     character(16) :: sgs_model = 'VREMAN'  ! VREMAN (default), SMAGORINSKY, DYNAMIC_SMAG, or AMD
@@ -104,6 +105,9 @@ module mod_fv_solver
     logical     :: debug_diagnostics = .false.
     character(len=:), allocatable :: petsc_options(:)
   end type solver_params_t
+
+  !> Relative increment of phi below which the non-orthogonal corrector loop stops (nonortho_check).
+  real(rp), parameter :: NONORTHO_PHI_TOL = 1.0e-3_rp
 
   type, public :: FVSolver
     type(Mesh),    pointer :: mesh => null()
@@ -153,7 +157,7 @@ module mod_fv_solver
     real(rp), allocatable :: inv_vol(:)  ! (nc) cached 1/volume
 
     ! -- persistent work buffers (avoid per-step allocations)
-    real(rp), allocatable :: w_H_U(:,:), w_H_T(:), w_H_C(:,:), w_rhs_p(:), w_div_diag(:)
+    real(rp), allocatable :: w_H_U(:,:), w_H_T(:), w_H_C(:,:), w_rhs_p(:), w_div_diag(:), w_phi_it(:)
     real(rp), allocatable :: w_U0(:,:), w_T0(:)
     real(rp), allocatable :: w_C0(:,:)
     real(rp), allocatable :: w_conv_U(:,:), w_visc_U(:,:), w_conv_T(:), w_visc_T(:)
@@ -346,7 +350,7 @@ contains
     !$acc enter data copyin(self%inv_vol, self%U_face)
 #endif
 
-    allocate(self%w_H_U(3, nc), self%w_H_T(nc), self%w_rhs_p(nc), self%w_div_diag(nc), source=0.0_rp)
+    allocate(self%w_H_U(3, nc), self%w_H_T(nc), self%w_rhs_p(nc), self%w_div_diag(nc), self%w_phi_it(nc), source=0.0_rp)
     ! RK3W stage storage: w_U0/w_T0/w_C0 hold previous-stage H buffers.
     allocate(self%w_U0(3, nc), self%w_T0(nc), source=0.0_rp)
     ! w_C0/w_H_C keep max(1,...) so the advance_rk3w associate block can always reference them.
@@ -1405,6 +1409,7 @@ contains
         integer :: ierr_tol
         integer(ip) :: n_nonortho_max
         real(rp) :: divU_norm_prev, divU_norm_curr, divU_local, stagnate_tol, ub1, ub2
+        real(rp) :: dphi_l(2), dphi_g(2), dphi_prev
         ! Volume-weighted mean speed, not the domain max: max(|U|) is a single-cell
         ! quantity and loosens atol precisely when one cell is diverging.
         ub1 = 0.0_rp
@@ -1430,6 +1435,14 @@ contains
           stagnate_tol   = 0.9_rp
         end if
         divU_norm_prev = huge(1.0_rp)
+        dphi_prev = huge(1.0_rp)
+        if (self%params%nonortho_check) then
+          n_nonortho_max = min(self%params%n_nonortho_corr, 8_ip)
+          !$acc parallel loop default(present)
+          do c = 1, nc
+            self%w_phi_it(c) = 0.0_rp
+          end do
+        end if
         do jno = 1, n_nonortho_max
           call compute_face_fluxes_and_rhs(self, gk_dt, rhs_p, p_is_increment=(jno > 1))
           ! Global reduction: the exit test below must fire on every rank at the
@@ -1474,7 +1487,20 @@ contains
             self%diag_nonortho_atol = atol_dynamic
           end if
           ! Exit early if converged or not improving (orthogonal mesh converges in 1 iter).
-          if (jno > 1 .and. (divU_norm_curr < atol_dynamic .or. divU_norm_curr > divU_norm_prev * stagnate_tol)) exit
+          if (self%params%nonortho_check) then
+            dphi_l(1) = 0.0_rp;  dphi_l(2) = 0.0_rp
+            !$acc parallel loop default(present) reduction(max:dphi_l)
+            do c = 1, nc
+              dphi_l(1) = max(dphi_l(1), abs(p(c) - self%w_phi_it(c)))
+              dphi_l(2) = max(dphi_l(2), abs(p(c)))
+              self%w_phi_it(c) = p(c)
+            end do
+            call MPI_Allreduce(dphi_l, dphi_g, 2, MPI_DOUBLE_PRECISION, MPI_MAX, self%mesh%comm, ierr_tol)
+            if (jno > 1 .and. (dphi_g(1) < NONORTHO_PHI_TOL * dphi_g(2) .or. dphi_g(1) > dphi_prev * stagnate_tol)) exit
+            dphi_prev = dphi_g(1)
+          else if (jno > 1 .and. (divU_norm_curr < atol_dynamic .or. divU_norm_curr > divU_norm_prev * stagnate_tol)) then
+            exit
+          end if
           ! phi_prev stays at p^{k-1/2} for every corrector: it is what the pre-correction removed.
           divU_norm_prev = divU_norm_curr
         end do
@@ -3101,7 +3127,7 @@ contains
     !$acc      self%grad_U, self%grad_T, self%face_flux, self%w_H_U, self%w_H_T, self%w_H_C, &
     !$acc      self%w_rhs_p, self%w_U0, self%w_T0, self%w_C0, self%w_conv_U, self%w_visc_U, &
     !$acc      self%w_conv_T, self%w_visc_T, self%w_flux_built, self%w_gp, self%w_gp_rc, &
-    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval)
+    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval, self%w_phi_it)
     !$acc update device(self%U_face, self%inv_vol)
     if (self%params%n_scalars > 0) then
       !$acc enter data copyin(self%C, self%C_bnd, self%grad_C, self%w_conv_C, self%w_visc_C, &
@@ -3150,7 +3176,7 @@ contains
     !$acc      self%grad_U, self%grad_T, self%face_flux, self%w_H_U, self%w_H_T, self%w_H_C, &
     !$acc      self%w_rhs_p, self%w_U0, self%w_T0, self%w_C0, self%w_conv_U, self%w_visc_U, &
     !$acc      self%w_conv_T, self%w_visc_T, self%w_flux_built, self%w_gp, self%w_gp_rc, &
-    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval)
+    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval, self%w_phi_it)
     if (self%params%n_scalars > 0) then
       !$acc exit data delete(self%C, self%C_bnd, self%grad_C, self%w_conv_C, self%w_visc_C, &
       !$acc      self%w_Cs, self%w_Cs_bnd)
@@ -4213,6 +4239,7 @@ contains
     if (allocated(self%w_H_C))      deallocate(self%w_H_C)
     if (allocated(self%w_rhs_p))    deallocate(self%w_rhs_p)
     if (allocated(self%w_div_diag)) deallocate(self%w_div_diag)
+    if (allocated(self%w_phi_it)) deallocate(self%w_phi_it)
     if (allocated(self%w_U0))       deallocate(self%w_U0)
     if (allocated(self%w_T0))       deallocate(self%w_T0)
     if (allocated(self%w_C0))       deallocate(self%w_C0)

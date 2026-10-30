@@ -681,6 +681,9 @@ Practical settings:
 - On meshes with non-orthogonality above about 40 degrees (snappyHexMesh or skewed Gmsh meshes), a velocity that
   grows by a constant factor every step, independent of `dt`, points at the Rhie-Chow inconsistency. Set
   `rhie_chow_dual = .true.` (default `.false.`) in `&dopamine_numerics`; see Theory.
+- With the default exit test the non-orthogonal corrector loop never runs more than two passes whatever
+  `n_nonortho_corr` is, because it compares `max|rhs_p|` (dominated by div u*) between passes. Set
+  `nonortho_check = .true.` to stop on the increment of the pressure instead.
 - On meshes with faces near 90 degrees of non-orthogonality (snappyHexMesh surfaces), set
   `pressure_min_cos_theta` (default `0` = off, e.g. `0.1`) in `&dopamine_numerics` to floor
   $$\cos\theta$$ in the Poisson coefficient and deferred cross term; the number of limited

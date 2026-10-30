@@ -7,6 +7,7 @@ being restructured (e.g. the GPU port); they are not validation cases.
 | case | mesh | exercises |
 |---|---|---|
 | `tgv` | 32^3 periodic box | QUICK advection, Green-Gauss gradients, periodic-only BCs |
+| `tgv_skew_chk` | same skewed box | `nonortho_check = .true.` with 5 correctors allowed: the corrector loop exits on the increment of the pressure |
 | `channel` | 32x16x16 (2pi x 2pi x 1, walls in z, Taylor-Green initial field) | KEP, Vreman SGS, log-law wall model, body force, passive scalar with a Dirichlet wall |
 | `rb` | 24x24x16 | Boussinesq buoyancy, fixed-temperature walls, van Leer TVD, least-squares gradients, rotational projection |
 | `duct` | 32x16x16 (4 x 1 x 1) | velocity inlet, fixed-pressure outlet, no-slip walls, CDS; the Dirichlet-pressure terms of the projection |

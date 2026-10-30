@@ -99,6 +99,7 @@ Discretisation, time stepping, pressure solve and SGS model. Theory: [theory.md]
 | `n_nonortho_corr` | `0` | Non-orthogonal correction passes. `0` = auto (1 on an orthogonal mesh, otherwise 2). |
 | `pressure_min_cos_theta` | `0` | Floor on cos(theta) in the pressure Poisson coefficient and cross term. `0` = off. |
 | `rhie_chow_dual` | `.false.` | `.true.`: Rhie-Chow restores exactly the cross-free gradient removed by the pre-correction (stable on strongly skewed meshes). |
+| `nonortho_check` | `.false.` | `.true.`: the corrector loop stops on the relative increment of the pressure (`1e-3`) or when it stops contracting, and up to `n_nonortho_corr` (max 8) passes can run. Default: stops on `max|rhs_p|`, which includes div u* and ends the loop after two passes. |
 
 ### Subgrid-scale model and wall-model filtering
 
