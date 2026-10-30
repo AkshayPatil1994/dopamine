@@ -195,6 +195,7 @@ contains
     integer(ip)    :: gg_iterations = 2
     integer(ip)    :: n_nonortho_corr = 0  ! 0 = auto (1 if mesh orthogonal, else 2)
     real(rp)       :: pressure_min_cos_theta = 0.0_rp  ! > 0 floors cos(theta) in the Poisson operator
+    logical        :: rhie_chow_dual = .false.  ! consistent Rhie-Chow on non-orthogonal faces
     character(16)  :: time_scheme = 'RK3W'  ! legacy; use time_integrator instead
     character(16)  :: time_integrator = 'RK3W'  ! RK3W is the only integrator
     logical        :: use_skew_symmetric_advection = .false.
@@ -211,7 +212,7 @@ contains
            cfl_max, adapt_dt, nstep_max, &
              solver_stats_frequency, calc_stats_frequency, &
                                p_tol, p_max_iter, p_target_divU, gradient_scheme, pressure_solver, &
-                               use_rotational_projection, gg_iterations, use_sgs, time_scheme, n_nonortho_corr, pressure_min_cos_theta, &
+                               use_rotational_projection, gg_iterations, use_sgs, time_scheme, n_nonortho_corr, pressure_min_cos_theta, rhie_chow_dual, &
                                time_integrator, use_skew_symmetric_advection, sgs_model, &
                                wall_model_height, wall_model_filter_time, debug_diagnostics, &
                                c_amd, amd_wall_gradient, wall_model_filter_tf_fac
@@ -295,6 +296,7 @@ contains
       p%gg_iterations = gg_iterations
       p%n_nonortho_corr = max(0_ip, n_nonortho_corr)  ! 0 kept as the auto sentinel
       p%pressure_min_cos_theta = min(max(0.0_rp, pressure_min_cos_theta), 1.0_rp)
+      p%rhie_chow_dual = rhie_chow_dual
       p%time_integrator = time_integrator  ! RK3W 
       ! Parsed for input compatibility only; KEP already supplies the energy-conserving form.
       p%use_skew_symmetric_advection = use_skew_symmetric_advection

@@ -678,6 +678,9 @@ Practical settings:
 - Keep `p_tol` strict enough for long-time runs (`1e-8` works in many LES cases; the built-in default is `1e-10`).
 - Increase `p_max_iter` if pressure residuals stagnate before tolerance.
 - In parallel runs, monitor both pressure residual trend and `max|divU|`.
+- On meshes with non-orthogonality above about 40 degrees (snappyHexMesh or skewed Gmsh meshes), a velocity that
+  grows by a constant factor every step, independent of `dt`, points at the Rhie-Chow inconsistency. Set
+  `rhie_chow_dual = .true.` (default `.false.`) in `&dopamine_numerics`; see Theory.
 - On meshes with faces near 90 degrees of non-orthogonality (snappyHexMesh surfaces), set
   `pressure_min_cos_theta` (default `0` = off, e.g. `0.1`) in `&dopamine_numerics` to floor
   $$\cos\theta$$ in the Poisson coefficient and deferred cross term; the number of limited

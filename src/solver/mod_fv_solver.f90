@@ -85,6 +85,7 @@ module mod_fv_solver
     integer(ip)   :: gg_iterations   = 2  ! GG skewness-correction sweeps (GREEN_GAUSS only)
     integer(ip)   :: n_nonortho_corr = 1  ! Jasak non-orthogonal corrector outer iterations
     real(rp)      :: pressure_min_cos_theta = 0.0_rp  ! > 0 floors cos(theta) in the Poisson coefficient and k
+    logical       :: rhie_chow_dual = .false.  ! .true.: Rhie-Chow restores exactly the applied cross-free gradient
     logical     :: use_rotational_projection = .true.  ! Brown-Cortez-Minion rotational correction (-nudiv u*)
     logical     :: use_sgs = .true.   ! enable SGS model; set false for no-model/ILES runs
     character(16) :: sgs_model = 'VREMAN'  ! VREMAN (default), SMAGORINSKY, DYNAMIC_SMAG, or AMD
@@ -2356,6 +2357,7 @@ contains
     real(rp)    :: sf(3), d_on(3), k_f(3), k_rc(3), Uf(3), Uf_plain(3), Uf_eps(3), gm(3)
     logical     :: incr, skip_no
     real(rp)    :: min_cos_p
+    logical     :: rc_dual
     integer(ip) :: col, idx2, n_loops, lo, hi
     logical     :: use_color
     integer(c_int), pointer :: skip(:), fown_p(:)
@@ -2395,6 +2397,7 @@ contains
     fnb_p => self%psolver%face_neighbor_ext
     fmi => self%psolver%face_mesh_idx
     min_cos_p = self%params%pressure_min_cos_theta
+    rc_dual = self%params%rhie_chow_dual
     fcoef => self%psolver%face_coeff
     act_int => self%nonortho_active_int
     k_int => self%nonortho_k_int
@@ -2531,7 +2534,7 @@ contains
         ! pressure field on non-orthogonal faces. gc_f unclamped for the pressure-gradient weight.
         coeff_rc = real(fcoef(idx), rp)
         k_rc = 0.0_rp
-        if (.not. skip_no) then
+        if (.not. skip_no .and. .not. rc_dual) then
           call nonortho_kfactor_limited(sf, d_on, min_cos_p, k_f, s_dot_dhat, d_on_len)
           if (sum(k_f**2) >= NONORTHO_SIN2_TOL * sum(sf**2)) k_rc = k_f
         end if

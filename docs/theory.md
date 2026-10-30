@@ -262,6 +262,21 @@ symmetric with positive $$a_f$$, and faces with $$\cos\theta_f \ge c_{min}$$ (in
 faces) are unchanged. The default `0` disables the floor and leaves results bit-identical. Limited
 interior faces are counted at startup; periodic edges are not limited.
 
+### Consistent Rhie-Chow on non-orthogonal faces (`rhie_chow_dual`)
+
+The pre-correction removes from each cell the cross-free dual gradient
+$$\bar{\mathbf{g}}_P = T^{-1}\sum_f \mathbf{n}_f\, a_f\,(p_N-p_P)$$, which equals $$\nabla p$$ only on orthogonal
+faces. The default Rhie-Chow term, $$\bar{\mathbf{g}}_f\cdot(\mathbf{S}_f-\mathbf{k}_f) - a_f\,\Delta p$$,
+vanishes for a linear pressure only when $$\bar{\mathbf{g}}$$ is the true gradient. Otherwise the face flux
+carries an extra lagged term $$-\Delta t\,\bar{\mathbf{g}}_f\cdot\mathbf{k}_f$$ that the cell velocity does not,
+so $$p^{n+1}\approx -(L+C)^{-1}E\,p^n$$ with $$C$$ the cross operator and $$E$$ its lagged copy. The step-to-step
+gain is independent of $$\Delta t$$ and of the amplitude, and exceeds one on meshes with strong skewness.
+It shows as a sign-alternating, grid-scale pressure mode that grows by a constant factor per step
+(a Taylor-Green vortex on a $$45^\circ$$ skewed box diverges within 20 steps; see `tgv_skew`).
+With `rhie_chow_dual = .true.` the term becomes $$\bar{\mathbf{g}}_f\cdot\mathbf{S}_f - a_f\,\Delta p$$, which restores
+exactly the gradient the pre-correction removed. The face-flux and cell-velocity operators are then dual again,
+and orthogonal faces ($$\mathbf{k}_f=0$$) are unchanged. The default is `.false.` to keep older results.
+
 ### Periodic pressure coupling
 
 Periodic edges are assembled explicitly, including cross-rank fallback when the
