@@ -97,20 +97,21 @@ module mod_pressure_solver
 
 contains
 
-  subroutine pressure_solver_init(handle, msh, bc_configs, solver_type, petsc_options)
+  subroutine pressure_solver_init(handle, msh, bc_configs, solver_type, petsc_options, min_cos_theta)
     type(pressure_solver_handle_t), intent(inout) :: handle
     type(Mesh),                     intent(in)    :: msh
     type(BCConfig),       optional, intent(in)    :: bc_configs(:)
     character(len=*),     optional, intent(in)    :: solver_type
     character(len=*),     optional, intent(in)    :: petsc_options(:)
+    real(rp),             optional, intent(in)    :: min_cos_theta  ! > 0 floors cos(theta) of every face
 
     integer(ip) :: nc, nf_int, nf, q, f_loc, f_bnd, f_glob, o, idx, n_outlet_faces, nb
     integer(ip) :: n_periodic_edges, pair_bnd, pair_face
-    integer(ip) :: n_skip_int, n_skip_per, n_used_per, n_dortho_fallback
+    integer(ip) :: n_skip_int, n_skip_per, n_used_per, n_dortho_fallback, n_cos_limited
     integer(ip) :: ref_local, ref_global, ierr_local, i_opt
     real(rp) :: coeff, area_f, d_per, d_perp_b, c_b
     real(rp) :: pair_dcf
-    real(rp) :: d_on_vec(3), d_ortho
+    real(rp) :: d_on_vec(3), d_ortho, cos_floor
     integer(ip) :: rank, nranks
 
     if (fvm_petsc_backend_available() == 0_c_int) then
@@ -322,6 +323,9 @@ contains
     end if
 
     n_dortho_fallback = 0
+    n_cos_limited = 0
+    cos_floor = 0.0_rp
+    if (present(min_cos_theta)) cos_floor = min_cos_theta
     do idx = 1, nf_int
       o = msh%faces(idx)%owner
       nb = msh%faces(idx)%neighbour
@@ -340,6 +344,10 @@ contains
       d_on_vec(2) = msh%cells(nb)%centroid(2) - msh%cells(o)%centroid(2)
       d_on_vec(3) = msh%cells(nb)%centroid(3) - msh%cells(o)%centroid(3)
       d_ortho = dot_product(d_on_vec, msh%faces(idx)%normal)
+      if (cos_floor > 0.0_rp .and. d_ortho < cos_floor * msh%faces(idx)%d_cf) then
+        d_ortho = cos_floor * msh%faces(idx)%d_cf
+        n_cos_limited = n_cos_limited + 1_ip
+      end if
       if (d_ortho > SMALL) then
         coeff = msh%faces(idx)%area / d_ortho
       else
@@ -386,6 +394,7 @@ contains
           d_perp_b = abs(dot_product(msh%faces(f_glob)%centre - msh%cells(o)%centroid, &
                                      msh%faces(f_glob)%normal))
           if (d_perp_b <= SMALL) d_perp_b = msh%faces(f_glob)%d_cf
+          if (cos_floor > 0.0_rp) d_perp_b = max(d_perp_b, cos_floor * msh%faces(f_glob)%d_cf)
           if (d_perp_b <= SMALL) cycle
           c_b = msh%faces(f_glob)%area / d_perp_b
           if (.not. ieee_is_finite(c_b) .or. c_b <= SMALL) cycle
@@ -419,6 +428,17 @@ contains
       write(*, '(A,I0,A,I0,A,I0,A,I0,A,I0)') ' Pressure assembly summary: internal_faces=', nf_int, &
         ', internal_skipped=', n_skip_int, ', periodic_edges=', n_periodic_edges, &
         ', periodic_used=', n_used_per, ', periodic_skipped=', n_skip_per
+    end if
+    if (cos_floor > 0.0_rp) then
+      block
+        integer(ip) :: n_lim_global, ierr_lim
+        character(80) :: msg_lim
+        call MPI_Allreduce(n_cos_limited, n_lim_global, 1, MPI_INTEGER, MPI_SUM, msh%comm, ierr_lim)
+        if (n_lim_global > 0) then
+          write(msg_lim, '(I0,A,F5.2)') n_lim_global, ' faces: cos(theta) limited to ', cos_floor
+          call warn_log_message('[psolver]   ', trim(msg_lim))
+        end if
+      end block
     end if
     if (n_dortho_fallback > 0) then
       block

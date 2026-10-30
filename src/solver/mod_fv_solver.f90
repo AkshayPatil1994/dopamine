@@ -84,6 +84,7 @@ module mod_fv_solver
     character(16) :: gradient_scheme = 'LEAST_SQUARES'
     integer(ip)   :: gg_iterations   = 2  ! GG skewness-correction sweeps (GREEN_GAUSS only)
     integer(ip)   :: n_nonortho_corr = 1  ! Jasak non-orthogonal corrector outer iterations
+    real(rp)      :: pressure_min_cos_theta = 0.0_rp  ! > 0 floors cos(theta) in the Poisson coefficient and k
     logical     :: use_rotational_projection = .true.  ! Brown-Cortez-Minion rotational correction (-nudiv u*)
     logical     :: use_sgs = .true.   ! enable SGS model; set false for no-model/ILES runs
     character(16) :: sgs_model = 'VREMAN'  ! VREMAN (default), SMAGORINSKY, DYNAMIC_SMAG, or AMD
@@ -421,7 +422,8 @@ contains
       call mesh_assign_compact_ids(msh)  ! Assign compact IDs for PETSc matrix assembly
       call pressure_solver_init(self%psolver, msh, bc_configs, &
                                 solver_type=self%params%pressure_solver, &
-                                petsc_options=self%params%petsc_options)
+                                petsc_options=self%params%petsc_options, &
+                                min_cos_theta=self%params%pressure_min_cos_theta)
       ! atol = p_atol_factor/dt; use V_mean (not V_min) to avoid unachievable tolerances on graded meshes.
       block
         real(rp) :: vmin_local, vsum_local, vsum_global, vmean_global
@@ -1839,7 +1841,7 @@ contains
       if (nb < 1 .or. nb > nc + self%mesh%n_ghost) cycle
       if (f_mesh < 1 .or. f_mesh > self%mesh%n_faces) cycle
       d_on = self%mesh%cells(nb)%centroid - self%mesh%cells(o)%centroid
-      call nonortho_kfactor_overrelaxed(self%mesh%faces(f_mesh)%sf, d_on, k_f, s_dot_dhat, d_on_len)
+      call nonortho_kfactor_limited(self%mesh%faces(f_mesh)%sf, d_on, self%params%pressure_min_cos_theta, k_f, s_dot_dhat, d_on_len)
       if (sum(k_f**2) >= NONORTHO_SIN2_TOL * sum(self%mesh%faces(f_mesh)%sf**2)) &
         n_active_local = n_active_local + 1
     end do
@@ -1855,7 +1857,7 @@ contains
       if (q < 1 .or. q > self%mesh%n_patches) cycle
       if (self%bc_configs(q)%bc_id /= BC_OUTLET) cycle
       d_on = self%mesh%faces(f_glob)%centre - self%mesh%cells(o)%centroid
-      call nonortho_kfactor_overrelaxed(self%mesh%faces(f_glob)%sf, d_on, k_f, s_dot_dhat, d_on_len)
+      call nonortho_kfactor_limited(self%mesh%faces(f_glob)%sf, d_on, self%params%pressure_min_cos_theta, k_f, s_dot_dhat, d_on_len)
       if (sum(k_f**2) >= NONORTHO_SIN2_TOL * sum(self%mesh%faces(f_glob)%sf**2)) &
         n_active_local = n_active_local + 1
     end do
@@ -1926,7 +1928,7 @@ contains
       if (nb < 1 .or. nb > self%mesh%n_cells + self%mesh%n_ghost) cycle
       if (f_mesh < 1 .or. f_mesh > self%mesh%n_faces) cycle
       d_on = self%mesh%cells(nb)%centroid - self%mesh%cells(o)%centroid
-      call nonortho_kfactor_overrelaxed(self%mesh%faces(f_mesh)%sf, d_on, k_f, s_dot_dhat, d_on_len)
+      call nonortho_kfactor_limited(self%mesh%faces(f_mesh)%sf, d_on, self%params%pressure_min_cos_theta, k_f, s_dot_dhat, d_on_len)
       if (sum(k_f**2) >= NONORTHO_SIN2_TOL * sum(self%mesh%faces(f_mesh)%sf**2)) then
         self%nonortho_k_int(:, idx) = k_f
         self%nonortho_active_int(idx) = .true.
@@ -1944,7 +1946,7 @@ contains
       if (q < 1 .or. q > self%mesh%n_patches) cycle
       if (self%bc_configs(q)%bc_id /= BC_OUTLET) cycle
       d_on = self%mesh%faces(f_glob)%centre - self%mesh%cells(o)%centroid
-      call nonortho_kfactor_overrelaxed(self%mesh%faces(f_glob)%sf, d_on, k_f, s_dot_dhat, d_on_len)
+      call nonortho_kfactor_limited(self%mesh%faces(f_glob)%sf, d_on, self%params%pressure_min_cos_theta, k_f, s_dot_dhat, d_on_len)
       if (sum(k_f**2) >= NONORTHO_SIN2_TOL * sum(self%mesh%faces(f_glob)%sf**2)) then
         self%nonortho_k_bnd(:, ib) = k_f
         self%nonortho_active_bnd(ib) = .true.
@@ -2353,6 +2355,7 @@ contains
     real(rp)    :: flux, coeff_rc, gc_f, d_o, d_nb, d_tot, w_blend, s_dot_dhat, d_on_len, cross, rdt, gc_w
     real(rp)    :: sf(3), d_on(3), k_f(3), k_rc(3), Uf(3), Uf_plain(3), Uf_eps(3), gm(3)
     logical     :: incr, skip_no
+    real(rp)    :: min_cos_p
     integer(ip) :: col, idx2, n_loops, lo, hi
     logical     :: use_color
     integer(c_int), pointer :: skip(:), fown_p(:)
@@ -2391,6 +2394,7 @@ contains
     fown_p => self%psolver%face_owner
     fnb_p => self%psolver%face_neighbor_ext
     fmi => self%psolver%face_mesh_idx
+    min_cos_p = self%params%pressure_min_cos_theta
     fcoef => self%psolver%face_coeff
     act_int => self%nonortho_active_int
     k_int => self%nonortho_k_int
@@ -2528,7 +2532,7 @@ contains
         coeff_rc = real(fcoef(idx), rp)
         k_rc = 0.0_rp
         if (.not. skip_no) then
-          call nonortho_kfactor_overrelaxed(sf, d_on, k_f, s_dot_dhat, d_on_len)
+          call nonortho_kfactor_limited(sf, d_on, min_cos_p, k_f, s_dot_dhat, d_on_len)
           if (sum(k_f**2) >= NONORTHO_SIN2_TOL * sum(sf**2)) k_rc = k_f
         end if
         flux = flux + dt * nonortho_rhie_chow(gprc(:, o), gprc(:, nb), gc_f, sf, k_rc, coeff_rc, &

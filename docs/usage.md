@@ -678,6 +678,10 @@ Practical settings:
 - Keep `p_tol` strict enough for long-time runs (`1e-8` works in many LES cases; the built-in default is `1e-10`).
 - Increase `p_max_iter` if pressure residuals stagnate before tolerance.
 - In parallel runs, monitor both pressure residual trend and `max|divU|`.
+- On meshes with faces near 90 degrees of non-orthogonality (snappyHexMesh surfaces), set
+  `pressure_min_cos_theta` (default `0` = off, e.g. `0.1`) in `&dopamine_numerics` to floor
+  $$\cos\theta$$ in the Poisson coefficient and deferred cross term; the number of limited
+  faces is logged at startup.
 - With a CUDA-enabled PETSc this linear solve can run on GPU — see "GPU (CUDA)
   Run" above. Custom `-pc_hypre_boomeramg_interp_type`/`coarsen_type` overrides
   via `&dopamine_PetscParams` should stick to hypre's GPU-supported values

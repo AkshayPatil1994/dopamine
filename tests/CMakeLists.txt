@@ -80,3 +80,10 @@ add_test(NAME unit_gmsh_open_cell
          COMMAND test_mesh_geometry "${CMAKE_CURRENT_SOURCE_DIR}/unit/mesh/gmsh_open_tet.msh")
 set_tests_properties(unit_gmsh_open_cell PROPERTIES LABELS unit TIMEOUT 60
   PASS_REGULAR_EXPRESSION "unlabelled boundary faces")
+
+# cos(theta) floor of the over-relaxed k-vector (serial, no mesh).
+add_executable(test_nonortho_limiter unit/test_nonortho_limiter.f90)
+target_link_options(test_nonortho_limiter PRIVATE -Wl,--no-as-needed)
+target_link_libraries(test_nonortho_limiter PRIVATE dopamine_lib MPI::MPI_Fortran MPI::MPI_C dl)
+add_test(NAME unit_nonortho_limiter COMMAND test_nonortho_limiter)
+set_tests_properties(unit_nonortho_limiter PROPERTIES LABELS unit TIMEOUT 60)

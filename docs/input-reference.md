@@ -97,6 +97,7 @@ Discretisation, time stepping, pressure solve and SGS model. Theory: [theory.md]
 | `p_target_divU` | `1.0e-8` | Parsed but currently has no effect. |
 | `use_rotational_projection` | `.true.` | Rotational pressure correction (Brown, Cortez & Minion 2001); lowers the splitting error from O(Δt) to O(Δt²). Recommended for wall-bounded flow. |
 | `n_nonortho_corr` | `0` | Non-orthogonal correction passes. `0` = auto (1 on an orthogonal mesh, otherwise 2). |
+| `pressure_min_cos_theta` | `0` | Floor on cos(theta) in the pressure Poisson coefficient and cross term. `0` = off. |
 
 ### Subgrid-scale model and wall-model filtering
 

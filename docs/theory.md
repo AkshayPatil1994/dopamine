@@ -249,6 +249,19 @@ coupling on skewed meshes and introduces a mesh-angle-dependent error in the
 pressure operator. The orthogonal projection is the consistent two-point metric
 for the normal gradient component [@moukalled2016].
 
+### Optional cos(theta) floor
+
+The over-relaxed coefficient $$a_f = |\mathbf{S}_f|/(|\mathbf{d}|\cos\theta_f)$$, with
+$$\cos\theta_f = \mathbf{S}_f\cdot\mathbf{d}/(|\mathbf{S}_f||\mathbf{d}|)$$, grows without bound as a face
+approaches 90 degrees. With `pressure_min_cos_theta` $$c_{min} > 0$$ the cosine is replaced by
+$$\max(\cos\theta_f, c_{min})$$ in $$a_f$$, in the deferred vector
+$$\mathbf{k}_f = \mathbf{S}_f - a_f\mathbf{d}$$, and in the Rhie-Chow term, which all read the same
+coefficient and vector. The split $$a_f(\mathbf{d}\cdot\mathbf{g}) + \mathbf{k}_f\cdot\mathbf{g} =
+\mathbf{S}_f\cdot\mathbf{g}$$ stays exact for a uniform gradient $$\mathbf{g}$$, the matrix stays
+symmetric with positive $$a_f$$, and faces with $$\cos\theta_f \ge c_{min}$$ (including all orthogonal
+faces) are unchanged. The default `0` disables the floor and leaves results bit-identical. Limited
+interior faces are counted at startup; periodic edges are not limited.
+
 ### Periodic pressure coupling
 
 Periodic edges are assembled explicitly, including cross-rank fallback when the

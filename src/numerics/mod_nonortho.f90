@@ -12,6 +12,7 @@ module mod_nonortho
 
   public :: nonortho_kfactor
   public :: nonortho_kfactor_overrelaxed
+  public :: nonortho_kfactor_limited
   public :: nonortho_cross_flux
   public :: nonortho_rhie_chow
 
@@ -57,6 +58,19 @@ contains
     real(rp), intent(out) :: s_dot_dhat
     real(rp), intent(out) :: d_on_len
 
+    call nonortho_kfactor_limited(sf, d_on, 0.0_rp, k, s_dot_dhat, d_on_len)
+  end subroutine nonortho_kfactor_overrelaxed
+
+  !> Over-relaxed k-vector with cos(theta) = Sf.d/(|Sf||d|) floored at min_cos (<= 0 disables the floor).
+  pure subroutine nonortho_kfactor_limited(sf, d_on, min_cos, k, s_dot_dhat, d_on_len)
+    !$acc routine seq
+    real(rp), intent(in)  :: sf(3)
+    real(rp), intent(in)  :: d_on(3)
+    real(rp), intent(in)  :: min_cos
+    real(rp), intent(out) :: k(3)
+    real(rp), intent(out) :: s_dot_dhat
+    real(rp), intent(out) :: d_on_len
+
     real(rp) :: d_len, sf_sq, inv_len
 
     d_on_len = sqrt(sum(d_on**2))
@@ -71,6 +85,7 @@ contains
     s_dot_dhat = dot_product(sf, d_on) * inv_len
     d_len      = s_dot_dhat * d_on_len  ! = dot_product(sf, d_on)
     sf_sq      = sum(sf**2)
+    if (min_cos > 0.0_rp) d_len = max(d_len, min_cos * sqrt(sf_sq) * d_on_len)
 
     if (d_len > 1.0e-30_rp) then
       ! Over-relaxed k; no cap - spectral radius sin theta < 1 ensures convergence.
@@ -80,7 +95,7 @@ contains
       ! |k_min| = |Sf| sin theta <= |Sf| always; no cap needed.
       k = sf - (s_dot_dhat * inv_len) * d_on
     end if
-  end subroutine nonortho_kfactor_overrelaxed
+  end subroutine nonortho_kfactor_limited
 
   !> Rhie-Chow face term; subtracting the cross part makes it vanish for a linear pressure field.
   pure function nonortho_rhie_chow(grad_o, grad_nb, gc, sf, k, coeff, dp) result(rc)
