@@ -3959,7 +3959,7 @@ contains
   end function solver_state_is_finite
 
   real(rp) function wall_time_now() result(t)
-    integer :: count, rate
+    integer(lp) :: count, rate
 
     call system_clock(count, rate)
     if (rate > 0) then

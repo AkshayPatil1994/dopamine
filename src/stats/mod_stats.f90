@@ -338,7 +338,7 @@ contains
   end subroutine compute_stats_sums
 
   real(rp) function wall_clock_seconds() result(t)
-    integer(ip) :: count, rate
+    integer(lp) :: count, rate
 
     call system_clock(count, rate)
     if (rate > 0) then
