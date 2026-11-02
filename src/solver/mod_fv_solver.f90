@@ -3152,10 +3152,12 @@ contains
     self%cproj_on = (trim(self%params%cell_projection) == 'EXACT')
     if (.not. self%cproj_on) return
 #ifdef _OPENACC
-    if (self%mesh%rank == 0) write(*,'(A)') ' WARNING: cell_projection=EXACT is host-only, using LS'
-    self%params%cell_projection = 'LS'
-    self%cproj_on = .false.
-    return
+    if (self%mesh%nranks > 1) then
+      if (self%mesh%rank == 0) write(*,'(A)') ' WARNING: cell_projection=EXACT is single-rank on GPU, using LS'
+      self%params%cell_projection = 'LS'
+      self%cproj_on = .false.
+      return
+    end if
 #endif
     nc = self%mesh%n_cells;  ntot = nc + self%mesh%n_ghost
     allocate(own(self%psolver%n_faces), nbr(self%psolver%n_faces), sf(3, self%psolver%n_faces), gc(self%psolver%n_faces))
@@ -3205,27 +3207,52 @@ contains
     class(FVSolver), intent(inout), target :: self
     real(rp),        intent(in)    :: dt
     real(rp), allocatable :: bconst(:)
-    integer(ip) :: ib, f_glob, o, q, n_it, nc
+    integer(ip) :: ib, f_glob, o, q, n_it, nc, nbf, nint, npatch
+    real(rp) :: fl
+    logical :: dev
+    integer(ip), pointer :: fown(:), fpid(:), pbc(:), npb(:)
+    real(rp),    pointer :: fsf(:,:), cvol(:), Ub(:,:), Uc(:,:), ppv(:)
 
     nc = self%mesh%n_cells
-    allocate(bconst(nc), source=0.0_rp)
-    do ib = 1, self%n_nonperiodic_bfaces
-      f_glob = self%mesh%n_int_faces + self%nonperiodic_bfaces(ib)
-      o = self%mesh%face_owner_soa(f_glob)
-      q = self%mesh%face_patch_id_soa(f_glob)
-      if (o < 1 .or. o > nc .or. q < 1 .or. q > self%mesh%n_patches) cycle
-      select case (self%mesh%patch_bc_id_soa(q))
+    dev = self%on_device .and. self%cproj%staged
+    nbf = self%n_nonperiodic_bfaces
+    nint = self%mesh%n_int_faces
+    npatch = self%mesh%n_patches
+    fown => self%mesh%face_owner_soa;  fpid => self%mesh%face_patch_id_soa;  pbc => self%mesh%patch_bc_id_soa
+    fsf => self%mesh%face_sf_soa;  cvol => self%mesh%cell_volume_soa
+    npb => self%nonperiodic_bfaces;  Ub => self%U_bnd;  Uc => self%U;  ppv => self%patch_p_val
+    allocate(bconst(nc))
+    !$acc enter data create(bconst) if(dev)
+    !$acc parallel loop if(dev) default(present)
+    do o = 1, nc
+      bconst(o) = 0.0_rp
+    end do
+    !$acc parallel loop if(dev) default(present) private(f_glob, o, q, fl)
+    do ib = 1, nbf
+      f_glob = nint + npb(ib)
+      o = fown(f_glob)
+      q = fpid(f_glob)
+      if (o < 1 .or. o > nc .or. q < 1 .or. q > npatch) cycle
+      select case (pbc(q))
       case (BC_WALL_NOSLIP, BC_WALL_MODEL, BC_WALL_VELOCITY, BC_SLIP, BC_SYMMETRY)
         continue
       case (BC_OUTLET)
         ! Dirichlet pressure acts on the outlet cell as the boundary-face force -p_b Sf / V.
-        self%U(:, o) = self%U(:, o) - dt * self%patch_p_val(q) * self%mesh%face_sf_soa(:, f_glob) &
-                                          / self%mesh%cell_volume_soa(o)
+        fl = dt * ppv(q) / cvol(o)
+        !$acc atomic update
+        Uc(1, o) = Uc(1, o) - fl * fsf(1, f_glob)
+        !$acc atomic update
+        Uc(2, o) = Uc(2, o) - fl * fsf(2, f_glob)
+        !$acc atomic update
+        Uc(3, o) = Uc(3, o) - fl * fsf(3, f_glob)
       case default
-        bconst(o) = bconst(o) + sum(self%U_bnd(:, self%nonperiodic_bfaces(ib)) * self%mesh%face_sf_soa(:, f_glob))
+        fl = Ub(1, npb(ib)) * fsf(1, f_glob) + Ub(2, npb(ib)) * fsf(2, f_glob) + Ub(3, npb(ib)) * fsf(3, f_glob)
+        !$acc atomic update
+        bconst(o) = bconst(o) + fl
       end select
     end do
-    call self%cproj%project(self%U, bconst, cproj_precond, self%params%cell_projection_tol, 100_ip, n_it)
+    call self%cproj%project(self%U, bconst, cproj_precond, self%params%cell_projection_tol, 100_ip, n_it, dev)
+    !$acc exit data delete(bconst) if(dev)
 
   contains
 
@@ -3233,7 +3260,7 @@ contains
       real(rp), intent(in)    :: r(:)
       real(rp), intent(inout) :: z(:)
       z = 0.0_rp
-      call pressure_solver_solve(self%psolver, r, z, tol=0.05_rp, max_iter=50_ip)
+      call pressure_solver_solve(self%psolver, r, z, tol=0.05_rp, max_iter=50_ip, on_device=dev)
     end subroutine cproj_precond
   end subroutine project_cells_exact
 
@@ -3334,6 +3361,7 @@ contains
     !$acc      self%nonortho_k_int, self%nonortho_active_int, self%nonortho_k_bnd, self%nonortho_active_bnd, &
     !$acc      self%recon_Tinv, self%nonperiodic_bfaces, self%periodic_bfaces, self%patch_p_val, &
     !$acc      self%mesh%global_id)
+    if (self%cproj_on) call self%cproj%to_device()
     if (allocated(self%psolver%idx_color_perm)) then
       !$acc enter data copyin(self%psolver%idx_color_perm, self%psolver%color_offsets)
     end if
