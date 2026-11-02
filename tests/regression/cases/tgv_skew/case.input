@@ -4,6 +4,8 @@
   mesh_type = 'gmsh'
 /
 &dopamine_numerics
+  cell_projection = 'LS'
+  pressure_min_cos_theta = 0.0
   advection_scheme = 'KEP'
   time_integrator  = 'RK3W'
   use_sgs          = .false.

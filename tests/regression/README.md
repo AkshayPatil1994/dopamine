@@ -8,6 +8,7 @@ being restructured (e.g. the GPU port); they are not validation cases.
 |---|---|---|
 | `tgv` | 32^3 periodic box | QUICK advection, Green-Gauss gradients, periodic-only BCs |
 | `tgv_skew_chk` | same skewed box | `nonortho_check = .true.` with 5 correctors allowed: the corrector loop exits on the increment of the pressure |
+| `default_skew` | same skewed box | no numerics overrides: the defaults (`rhie_chow_dual`, `cell_projection = 'EXACT'`) |
 | `tgv_skew_exact`, `hydro_exact`, `duct_exact` | as `tgv_skew`, `hydro`, `duct` | `cell_projection = 'EXACT'`: the cell velocity is the V-orthogonal projection (outlet pressure enters as a boundary force) |
 | `channel` | 32x16x16 (2pi x 2pi x 1, walls in z, Taylor-Green initial field) | KEP, Vreman SGS, log-law wall model, body force, passive scalar with a Dirichlet wall |
 | `rb` | 24x24x16 | Boussinesq buoyancy, fixed-temperature walls, van Leer TVD, least-squares gradients, rotational projection |
@@ -20,6 +21,8 @@ being restructured (e.g. the GPU port); they are not validation cases.
 | `inflow` | same mesh | divergence-free SEM (`sem_type = 'dfsem'`, the default) `ablInlet` at x0, outlet at xL, periodic y, slip z, CDS: eddies wrap across the periodic seam; the result must not depend on the rank count (np 1, 2, 3 agree to 1e-14) |
 | `inflow_jarrin` | same mesh | as `inflow` with the original tent-kernel SEM (`sem_type = 'jarrin'`) |
 | `amd` | as `channel` | AMD SGS (`sgs_model = 'AMD'`) with the log-law wall-cell gradient, and the adaptive wall-model filter (`wall_model_filter_tf_fac = 1`); np 1 only |
+
+The other cases pin `rhie_chow_dual = .false.`, `cell_projection = 'LS'` and `pressure_min_cos_theta = 0` so their references predate and do not follow the default numerics.
 
 Run everything through CTest from a build tree (meshes are generated with gmsh on first use):
 

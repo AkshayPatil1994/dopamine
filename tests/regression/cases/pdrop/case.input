@@ -6,6 +6,9 @@
   mesh_type = 'gmsh'
 /
 &dopamine_numerics
+  rhie_chow_dual = .false.
+  cell_projection = 'LS'
+  pressure_min_cos_theta = 0.0
   advection_scheme = 'CDS'
   time_integrator  = 'RK3W'
   use_sgs          = .false.
