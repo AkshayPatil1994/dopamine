@@ -1292,11 +1292,8 @@ contains
       call prof_push('wall_model')
       select case (self%abl_config%wall_model_id)
       case (WM_MOST)
-        ! MOST runs on the host: refresh its inputs there and push its outputs back.
-        !$acc update host(self%U, self%T, self%tau_w_bnd, self%q_w_bnd, self%L_bnd) if(self%on_device)
         call abl_wall_model(self%U, self%T, self%mesh, self%abl_config, self%bc_configs, &
-                            self%tau_w_bnd, self%q_w_bnd, self%L_bnd, update_L=(k == 1))
-        !$acc update device(self%tau_w_bnd, self%q_w_bnd, self%L_bnd) if(self%on_device)
+                            self%tau_w_bnd, self%q_w_bnd, self%L_bnd, update_L=(k == 1), on_device=self%on_device)
       case (WM_NONE)
         !$acc parallel loop default(present)
         do c = 1, nbnd
