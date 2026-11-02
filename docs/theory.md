@@ -275,9 +275,9 @@ It shows as a sign-alternating, grid-scale pressure mode that grows by a constan
 (a Taylor-Green vortex on a $$45^\circ$$ skewed box diverges within 20 steps; see `tgv_skew`).
 With `rhie_chow_dual = .true.` the term becomes $$\bar{\mathbf{g}}_f\cdot\mathbf{S}_f - a_f\,\Delta p$$, which restores
 exactly the gradient the pre-correction removed. The face-flux and cell-velocity operators are then dual again,
-and orthogonal faces ($$\mathbf{k}_f=0$$) are unchanged. The default is `.false.` to keep older results.
+and orthogonal faces ($$\mathbf{k}_f=0$$) are unchanged. It is the default; `rhie_chow_dual = .false.` restores the previous term.
 
-### Energy-stable cell-velocity projection (`cell_projection = 'EXACT'`)
+### Energy-stable cell-velocity projection (`cell_projection = 'EXACT'`, default)
 
 The flux $$q$$ is made divergence free by the compact Poisson operator $$\Lambda$$, but the cell velocity is
 corrected separately, by $$u \leftarrow u - G\psi$$ with $$G$$ the least-squares reconstruction of the face-normal

@@ -678,13 +678,14 @@ Practical settings:
 - Keep `p_tol` strict enough for long-time runs (`1e-8` works in many LES cases; the built-in default is `1e-10`).
 - Increase `p_max_iter` if pressure residuals stagnate before tolerance.
 - In parallel runs, monitor both pressure residual trend and `max|divU|`.
-- On meshes with non-orthogonality above about 40 degrees (snappyHexMesh or skewed Gmsh meshes), a velocity that
-  grows by a constant factor every step, independent of `dt`, points at the Rhie-Chow inconsistency. Set
-  `rhie_chow_dual = .true.` (default `.false.`) in `&dopamine_numerics`; see Theory.
-- If a low-dissipation momentum scheme (`CENTRAL`, `KEP`, `QUICK`) still grows from a grid-scale pair of cells
-  next to a large size jump (face skewness above 0.5, owner weight near 0 or 1) after `rhie_chow_dual = .true.`,
-  set `cell_projection = 'EXACT'`. It makes the pressure step energy non-increasing on any mesh, costs about two to
-  three times the step time of the default, and is not available in OpenACC builds; see Theory.
+- `rhie_chow_dual = .true.` and `cell_projection = 'EXACT'` are the defaults. On meshes with non-orthogonality above
+  about 40 degrees (snappyHexMesh or skewed Gmsh meshes), `rhie_chow_dual = .false.` makes the velocity grow by a
+  constant factor every step, independent of `dt` (the Rhie-Chow inconsistency); see Theory.
+- `cell_projection = 'EXACT'` makes the pressure step energy non-increasing on any mesh and costs about 1.4 to three
+  times the step time of `'LS'`. OpenACC builds warn and use `'LS'`. Set `cell_projection = 'LS'` to trade stability
+  for speed on well-behaved meshes.
+- `QUICK` is not energy neutral: on snappyHexMesh meshes it can still grow slowly next to sliver prism cells at the
+  ground (max|U| 13 to 44 over 150 steps in the MichelStadt case). Prefer `KEP` for LES.
 - With the default exit test the non-orthogonal corrector loop never runs more than two passes whatever
   `n_nonortho_corr` is, because it compares `max|rhs_p|` (dominated by div u*) between passes. Set
   `nonortho_check = .true.` to stop on the increment of the pressure instead.

@@ -98,9 +98,9 @@ Discretisation, time stepping, pressure solve and SGS model. Theory: [theory.md]
 | `use_rotational_projection` | `.true.` | Rotational pressure correction (Brown, Cortez & Minion 2001); lowers the splitting error from O(Δt) to O(Δt²). Recommended for wall-bounded flow. |
 | `n_nonortho_corr` | `0` | Non-orthogonal correction passes. `0` = auto (1 on an orthogonal mesh, otherwise 2). |
 | `pressure_min_cos_theta` | `0` | Floor on cos(theta) in the pressure Poisson coefficient and cross term. `0` = off. |
-| `rhie_chow_dual` | `.false.` | `.true.`: Rhie-Chow restores exactly the cross-free gradient removed by the pre-correction (stable on strongly skewed meshes). |
+| `rhie_chow_dual` | `.true.` | `.true.`: Rhie-Chow restores exactly the cross-free gradient removed by the pre-correction (stable on skewed and non-orthogonal meshes; identical on orthogonal faces). `.false.` restores the pre-default behaviour. |
 | `nonortho_check` | `.false.` | `.true.`: the corrector loop stops on the relative increment of the pressure (`1e-3`) or when it stops contracting, and up to `n_nonortho_corr` (max 8) passes can run. Default: stops on `max|rhs_p|`, which includes div u* and ends the loop after two passes. |
-| `cell_projection` | `'LS'` | `'LS'`: the cell velocity is corrected by the least-squares reconstruction of the face-normal pressure differences. `'EXACT'`: the cell velocity is the V-orthogonal projection of the predictor onto fields whose interpolated face flux is divergence free (a second, wide-stencil system solved by preconditioned CG with the pressure solver as preconditioner; host builds only, no OpenACC). See Theory. |
+| `cell_projection` | `'EXACT'` | `'EXACT'`: the cell velocity is the V-orthogonal projection of the predictor onto fields whose interpolated face flux is divergence free (a second, wide-stencil system solved by preconditioned CG with the pressure solver as preconditioner; about 1.4 to 3 times the step time; host builds only: OpenACC builds warn and use `'LS'`). `'LS'`: the cell velocity is corrected by the least-squares reconstruction of the face-normal pressure differences. See Theory. |
 | `cell_projection_tol` | `0.1` | `EXACT`: the CG stops when the last velocity-energy step is below this fraction of the accumulated one. |
 
 ### Subgrid-scale model and wall-model filtering
