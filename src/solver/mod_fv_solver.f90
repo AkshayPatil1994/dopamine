@@ -1194,7 +1194,7 @@ contains
     ! Plain-array aliases for the device loops below (the polymorphic self can't be mapped).
     real(rp), pointer :: U(:,:), T(:), Cf(:,:), p(:), p_old(:), nu_sgs(:), gp_rc(:,:), gp_cell(:,:)
     real(rp), pointer :: phi_prev(:), phi_prev_bnd(:), p_bnd(:), U_face(:), face_flux(:), inv_vol(:)
-    real(rp), pointer :: cvol(:), tau(:,:), hU(:,:), hT(:), hC(:,:), hU0(:,:), hT0(:), hC0(:,:), rhsp(:)
+    real(rp), pointer :: cvol(:), tau(:,:), hU(:,:), hT(:), hC(:,:), hU0(:,:), hT0(:), hC0(:,:), rhsp(:), phi_it(:)
 
     nc = self%mesh%n_cells
     ntot = nc + self%mesh%n_ghost
@@ -1208,7 +1208,7 @@ contains
     phi_prev_bnd => self%phi_prev_bnd;  p_bnd => self%p_bnd;  U_face => self%U_face
     face_flux => self%face_flux;  inv_vol => self%inv_vol;  cvol => self%mesh%cell_volume_soa
     tau => self%tau_w_bnd
-    hU => self%w_H_U;  hT => self%w_H_T;  hC => self%w_H_C;  rhsp => self%w_rhs_p
+    hU => self%w_H_U;  hT => self%w_H_T;  hC => self%w_H_C;  rhsp => self%w_rhs_p;  phi_it => self%w_phi_it
     hU0 => self%w_U0;  hT0 => self%w_T0;  hC0 => self%w_C0
     Cf => self%w_H_C  ! placeholder when no scalars (never touched)
     if (ns > 0) Cf => self%C
@@ -1425,7 +1425,7 @@ contains
         integer :: ierr_tol
         integer(ip) :: n_nonortho_max
         real(rp) :: divU_norm_prev, divU_norm_curr, divU_local, stagnate_tol, ub1, ub2
-        real(rp) :: dphi_l(2), dphi_g(2), dphi_prev
+        real(rp) :: dphi_l(2), dphi_g(2), dphi_prev, dphi_d, dphi_p
         ! Volume-weighted mean speed, not the domain max: max(|U|) is a single-cell
         ! quantity and loosens atol precisely when one cell is diverging.
         ub1 = 0.0_rp
@@ -1456,7 +1456,7 @@ contains
           n_nonortho_max = min(self%params%n_nonortho_corr, 8_ip)
           !$acc parallel loop default(present)
           do c = 1, nc
-            self%w_phi_it(c) = 0.0_rp
+            phi_it(c) = 0.0_rp
           end do
         end if
         do jno = 1, n_nonortho_max
@@ -1504,12 +1504,13 @@ contains
           end if
           ! Exit early if converged or not improving (orthogonal mesh converges in 1 iter).
           if (self%params%nonortho_check) then
-            dphi_l(1) = 0.0_rp;  dphi_l(2) = 0.0_rp
-            !$acc parallel loop default(present) reduction(max:dphi_l)
+            dphi_d = 0.0_rp;  dphi_p = 0.0_rp
+            !$acc parallel loop default(present) reduction(max:dphi_d, dphi_p)
             do c = 1, nc
-              dphi_l(1) = max(dphi_l(1), abs(p(c) - self%w_phi_it(c)))
-              dphi_l(2) = max(dphi_l(2), abs(p(c)))
-              self%w_phi_it(c) = p(c)
+              dphi_d = max(dphi_d, abs(p(c) - phi_it(c)))
+            dphi_l = [dphi_d, dphi_p]
+              dphi_p = max(dphi_p, abs(p(c)))
+              phi_it(c) = p(c)
             end do
             call MPI_Allreduce(dphi_l, dphi_g, 2, MPI_DOUBLE_PRECISION, MPI_MAX, self%mesh%comm, ierr_tol)
             if (jno > 1 .and. (dphi_g(1) < NONORTHO_PHI_TOL * dphi_g(2) .or. dphi_g(1) > dphi_prev * stagnate_tol)) exit
