@@ -7,6 +7,7 @@ being restructured (e.g. the GPU port); they are not validation cases.
 | case | mesh | exercises |
 |---|---|---|
 | `tgv` | 32^3 periodic box | QUICK advection, Green-Gauss gradients, periodic-only BCs |
+| `tgv_skew` | 16^3 periodic box skewed by about 45 degrees (`mk_box_mesh.py`, no gmsh) | KEP Taylor-Green vortex that diverges within 20 steps without `rhie_chow_dual = .true.`; `cell_projection = 'LS'` |
 | `tgv_skew_chk` | same skewed box | `nonortho_check = .true.` with 5 correctors allowed: the corrector loop exits on the increment of the pressure |
 | `default_skew` | same skewed box | no numerics overrides: the defaults (`rhie_chow_dual`, `cell_projection = 'EXACT'`) |
 | `tgv_skew_exact`, `hydro_exact`, `duct_exact` | as `tgv_skew`, `hydro`, `duct` | `cell_projection = 'EXACT'`: the cell velocity is the V-orthogonal projection (outlet pressure enters as a boundary force) |
@@ -22,7 +23,7 @@ being restructured (e.g. the GPU port); they are not validation cases.
 | `inflow_jarrin` | same mesh | as `inflow` with the original tent-kernel SEM (`sem_type = 'jarrin'`) |
 | `amd` | as `channel` | AMD SGS (`sgs_model = 'AMD'`) with the log-law wall-cell gradient, and the adaptive wall-model filter (`wall_model_filter_tf_fac = 1`); np 1 only |
 
-The other cases pin `rhie_chow_dual = .false.`, `cell_projection = 'LS'` and `pressure_min_cos_theta = 0` so their references predate and do not follow the default numerics.
+Every other case pins `rhie_chow_dual`, `cell_projection` and `pressure_min_cos_theta` in its input (mostly `.false.`, `'LS'`, `0`, the numerics of the original references), so a change of defaults cannot move their references.
 
 Run everything through CTest from a build tree (meshes are generated with gmsh on first use):
 

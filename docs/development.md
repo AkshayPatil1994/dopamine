@@ -34,7 +34,7 @@ backend. Source is organized by responsibility under `src/`:
 
 `src/main.f90` is the solver entry point. Everything except `main.f90` and the
 `src/tools/*_main.f90` drivers is built into `dopamine_lib`
-([CMakeLists.txt:559](../CMakeLists.txt)), which the `dopamine`,
+(the `dopamine_lib` target in [CMakeLists.txt](../CMakeLists.txt)), which the `dopamine`,
 `dopamine-decompose`, `dopamine-checkpoint-partition`, and
 `dopamine-inflow-gen` executables link against.
 
@@ -83,7 +83,8 @@ against stored statistics. Unit tests are built on demand (`EXCLUDE_FROM_ALL`), 
 
 ```bash
 cmake --build build -j
-cmake --build build --target test_amd test_inflow_db test_inflow_gen test_inflow_planes test_sem_dfsem
+cmake --build build --target test_amd test_inflow_db test_inflow_gen test_inflow_planes test_sem_dfsem \
+  test_mesh_geometry test_nonortho_limiter test_cell_projection
 ctest --test-dir build --output-on-failure
 ```
 
@@ -98,9 +99,13 @@ ctest --test-dir build -R regression_tgv_np2 --output-on-failure
 ### What the existing tests cover
 
 - **Unit** (`unit_*`): `unit_amd` (AMD eddy viscosity), `unit_sem_dfsem` (divergence-free eddy field),
-  `unit_inflow_db`, `unit_inflow_gen`, `unit_inflow_planes` (inflow database, generator and replay).
+  `unit_inflow_db`, `unit_inflow_gen`, `unit_inflow_planes` (inflow database, generator and replay),
+  `unit_mesh_geometry`, `unit_gmsh_open_cell` (mesh geometry and open-cell reading),
+  `unit_nonortho_limiter` (`pressure_min_cos_theta`) and `unit_cell_projection` (`cell_projection = 'EXACT'`).
 - **Regression** (`regression_<case>_np<N>`): `tgv`, `channel`, `rb`, `duct`, `dynsmag`, `graded`, `pdrop`,
-  `hydro`, `hydrowall`, `inflow`, `inflow_jarrin` at one and two ranks, and `amd` at one rank. Each run is
+  `hydro`, `hydrowall`, `inflow`, `inflow_jarrin`, `tgv_skew`, `tgv_skew_chk`, `tgv_skew_exact`, `hydro_exact`,
+  `duct_exact` and `default_skew` at one and two ranks, and `amd` at one rank. Every case pins `rhie_chow_dual`,
+  `cell_projection` and `pressure_min_cos_theta` in its input except `default_skew`, which runs on the defaults. Each run is
   20 steps whose per-step statistics must match `tests/regression/reference/*.csv`; the np2 runs check
   that the result does not depend on the decomposition. The cases are described in
   `tests/regression/README.md`.

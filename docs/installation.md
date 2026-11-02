@@ -32,7 +32,8 @@ Unit tests are built on demand; regression cases need `gmsh` on `PATH`.
 ```sh
 cmake --build build -j
 ctest --test-dir build -L regression --output-on-failure
-cmake --build build --target test_amd test_inflow_db test_inflow_gen test_inflow_planes test_sem_dfsem
+cmake --build build --target test_amd test_inflow_db test_inflow_gen test_inflow_planes test_sem_dfsem \
+  test_mesh_geometry test_nonortho_limiter test_cell_projection
 ctest --test-dir build -L unit --output-on-failure
 ```
 
@@ -81,6 +82,11 @@ option that changes how PETSc itself is configured.
 | `DOPAMINE_PETSC_USE_GPU_AWARE_MPI` | `ON` | Request GPU-aware MPI in CUDA builds |
 | `DOPAMINE_ENABLE_OPENACC` | `OFF` | OpenACC GPU offload; requires NVHPC/`nvfortran` |
 | `DOPAMINE_OPENACC_GPU_ARCH` | *(empty)* | Optional `-gpu=` target, e.g. `cc86` |
+| `DOPAMINE_ENABLE_NVTX` | same as `DOPAMINE_ENABLE_OPENACC` | NVTX ranges for Nsight Systems; needs the `nvtx3` headers of a CUDA toolkit, otherwise ranges are disabled with a warning |
+| `DOPAMINE_PETSC_VERSION` | `3.25.0` | PETSc release fetched when `DOPAMINE_FETCH_PETSC=ON` |
+| `DOPAMINE_PETSC_ARCH` | `arch-dopamine-opt` | PETSc `ARCH` directory name of the fetched build |
+| `DOPAMINE_PETSC_CUDA_ARCH`, `DOPAMINE_PETSC_CUDAFLAGS`, `DOPAMINE_PETSC_CUDA_HOST_COMPILER` | *(empty)* | CUDA architecture (e.g. `80`), extra `CUDAFLAGS` and the `nvcc` host compiler passed to PETSc configure; only used with `DOPAMINE_PETSC_WITH_CUDA=ON` |
+| `DOPAMINE_PETSC_CUDAC` | first `nvcc` on `PATH` | `nvcc` that PETSc configure uses; set it to NVHPC's own `nvcc` in OpenACC builds |
 | `DOPAMINE_FETCH_NETCDF` | `ON` | Auto-build NetCDF C/Fortran when missing |
 | `DOPAMINE_BUILD_TESTS` | `ON` | Build the CTest unit tests |
 | `DOPAMINE_NATIVE_ARCH` | `ON` | Tune for the build machine (`-march=native`); `OFF` for portable binaries |

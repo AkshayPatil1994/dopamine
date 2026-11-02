@@ -14,7 +14,7 @@ geometry: margin=1in
 <!--
   This file is a human-readable outline only; it is NOT fed to Pandoc.
   `build.sh` assembles the actual manual by concatenating the pages listed in build.sh (front matter stripped) under its own
-  title block. Edit those three files for content changes.
+  title block. Edit the page files themselves for content changes.
 -->
 
 \tableofcontents

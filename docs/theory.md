@@ -150,8 +150,8 @@ preserves scalar boundedness without requiring high-resolution unbounded schemes
 
 ### Implemented advection families
 
-- `CDS`/`CENTRAL`: linear centered interpolation (default; recommended for WMLES).
-- `KEP`/`SKEW`: midpoint/skew form for improved discrete kinetic-energy behavior (recommended for LES).
+- `CDS`/`CENTRAL`: linear centered interpolation (input-file default; lowest dissipation, does not conserve kinetic energy).
+- `KEP`/`SKEW`: midpoint/skew form for improved discrete kinetic-energy behavior (recommended for LES, including the wall-modelled channel examples).
 - `QUICK`: geometry-aware quadratic upwind reconstruction.
 - `VANLEER_TVD`: MUSCL with van Leer limiter [@vanleer1974; @sweby1984].
 - `KOREN_TVD`: MUSCL with Koren limiter [@koren1993; @sweby1984].
@@ -259,7 +259,7 @@ $$\mathbf{k}_f = \mathbf{S}_f - a_f\mathbf{d}$$, and in the Rhie-Chow term, whic
 coefficient and vector. The split $$a_f(\mathbf{d}\cdot\mathbf{g}) + \mathbf{k}_f\cdot\mathbf{g} =
 \mathbf{S}_f\cdot\mathbf{g}$$ stays exact for a uniform gradient $$\mathbf{g}$$, the matrix stays
 symmetric with positive $$a_f$$, and faces with $$\cos\theta_f \ge c_{min}$$ (including all orthogonal
-faces) are unchanged. The default `0` disables the floor and leaves results bit-identical. Limited
+faces) are unchanged. The default `0` disables the floor and leaves results bit-identical. It is not on by default: `0.1` made the 45 degree skewed Taylor-Green box (`default_skew`) diverge, so enable it for near-90 degree faces and check the run. Limited
 interior faces are counted at startup; periodic edges are not limited.
 
 ### Consistent Rhie-Chow on non-orthogonal faces (`rhie_chow_dual`)
@@ -300,6 +300,8 @@ cell velocity no longer carries a pressure-gradient pre-correction (the projecti
 exactly), the flux is built as before with the pressure of the previous stage in the Rhie-Chow term, and the
 Dirichlet pressure of outlets enters the predictor as the boundary-face force $$-p_b\mathbf{S}_f/V$$. Inlet fluxes
 are fixed data of $$B$$. Walls carry zero flux, which also balances the body force on closed walls.
+
+Cost and availability: the projection runs on the host only (OpenACC builds warn and use `'LS'`), costs about 1.4 to 3 times the step time, and is not skipped on orthogonal meshes, where `'LS'` is already an orthogonal projector on a uniform Cartesian grid and cheaper.
 
 Limits: the two pressures differ. The compact solution drives the face flux and is what is written, and it is
 noisier than with `'LS'` (an offset of the mean and a lag of order the projection residual divided by $$\Delta t$$). The
@@ -893,6 +895,9 @@ For current defaults and updated implementation:
 4. Periodic coupling uses geometric distance-ratio $$g_c$$ rather than a hardcoded
    $$0.5$$ interpolant on non-uniform meshes.
 5. Parallel mesh partitioning uses a Morton (Z-order) SFC by default for scalability.
+6. Pressure-velocity coupling defaults to `rhie_chow_dual = .true.` and `cell_projection = 'EXACT'`, which keep
+   the pressure step dual and energy non-increasing on skewed meshes. `rhie_chow_dual = .false.` and
+   `cell_projection = 'LS'` restore the earlier behaviour (and cost).
 
 These choices are aimed at robust long-time LES behavior on realistic
 unstructured meshes where hidden discretization inconsistencies can dominate

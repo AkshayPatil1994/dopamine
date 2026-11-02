@@ -44,8 +44,8 @@ mpirun -np 8 ./build/dopamine examples/channel_flow_retau395/channel_retau395.in
 /
 ```
 
-Generates `output_prefix/processorR/checkpoint_XXXXXXXX.bin` for each rank
-plus a manifest file `checkpoint_latest`.
+Generates `<prefix>/processorR/checkpoint_XXXXXXXX.bin` for each rank
+plus a manifest file `checkpoint_latest`, where `<prefix>` is `prefix` from `&dopamine_output`.
 
 **Restart from checkpoint (same rank count):**
 
@@ -61,10 +61,10 @@ plus a manifest file `checkpoint_latest`.
 
 ```bash
 # Step 1: Pre-decompose mesh for 6 ranks
-mpirun -np 1 ./dopamine-decompose my_input.input --nranks 6 --output-dir mesh_6ranks
+mpirun -np 1 ./build/dopamine-decompose my_input.input --nranks 6 --output-dir mesh_6ranks
 
 # Step 2: Repartition checkpoint from old decomposition to new
-dopamine-checkpoint-partition --old-dir output_4ranks --old-nranks 4 \
+./build/dopamine-checkpoint-partition --old-dir output_4ranks --old-nranks 4 \
                               --new-dir mesh_6ranks --new-nranks 6 \
                               --step 10000
 
@@ -72,14 +72,14 @@ dopamine-checkpoint-partition --old-dir output_4ranks --old-nranks 4 \
 # (Update mesh_file, mesh_type='preprocessed', restart_dir, etc.)
 
 # Step 4: Run 6-rank simulation from repartitioned checkpoint
-mpirun -np 6 ./dopamine input_6ranks.input
+mpirun -np 6 ./build/dopamine input_6ranks.input
 ```
 
 ## GPU (CUDA) Run
 
 In this build only the pressure solve (PETSc + hypre BoomerAMG) runs on GPU;
 the explicit kernels are offloaded by the separate OpenACC build below. See
-the "GPU (CUDA) build" section above for build instructions and MPI
+[Installation: GPU (CUDA) build](installation.md#gpu-cuda-build) for build instructions and MPI
 requirements. Once built:
 
 ```bash
@@ -89,7 +89,7 @@ DOPAMINE_PETSC_USE_GPU=1 DOPAMINE_PETSC_USE_GPU_AWARE_MPI=1 \
 ```
 
 Set `DOPAMINE_PETSC_USE_GPU_AWARE_MPI=0` if your MPI isn't CUDA-aware (most
-distro packages aren't — see "GPU (CUDA) build" above); PETSc aborts at
+distro packages aren't — see [Installation](installation.md#gpu-cuda-build)); PETSc aborts at
 startup rather than silently falling back if you leave it on without one.
 Compare the `pressure`
 line in the performance snapshot against a `DOPAMINE_PETSC_USE_GPU=0` run on
@@ -121,8 +121,10 @@ device copy stays authoritative: `solver%sync_host` refreshes the host copy
 only on steps that write output, statistics, samples or checkpoints. Still on
 the host, with narrow updates around them: the MOST wall model, scalar
 sources, nudging, SEM inflow, and the PETSc interface when the backend cannot
-take device pointers. See the "OpenACC (nvfortran) build" section above for the
-build recipe (`build-acc26/`).
+take device pointers. Two options are host-only and fall back with a warning:
+`cell_projection = 'EXACT'` (the default) runs as `'LS'`; set `cell_projection = 'LS'` explicitly in
+OpenACC inputs to avoid the warning. See [Installation: OpenACC build](installation.md#openacc-nvfortran-build)
+for the build recipe (`build-acc26/`).
 
 ```bash
 export PATH="$HOME/nvhpc_26/Linux_x86_64/26.5/comm_libs/hpcx/bin:$HOME/nvhpc_26/Linux_x86_64/26.5/compilers/bin:$PATH"
@@ -134,11 +136,11 @@ DOPAMINE_PETSC_USE_GPU=1 DOPAMINE_PETSC_USE_GPU_AWARE_MPI=0 mpirun -np 1 ./build
 The OpenACC path is validated on a single-GPU workstation against a
 `channel_flow_retau395`-style case (73728 cells, `-np 1`): `max|divU|` holds at
 machine precision (~1e-11) every logged step with `p_resid_max` ~1.4e-9, the
-same correctness signature as the CUDA-only run in the "GPU (CUDA) build"
-section above. See `OPAL_PREFIX` and
-`DOPAMINE_PETSC_USE_GPU_AWARE_MPI=0` above — both needed on this HPC-X install
+same correctness signature as the CUDA-only run in the
+[GPU (CUDA) build](installation.md#gpu-cuda-build). `OPAL_PREFIX` and
+`DOPAMINE_PETSC_USE_GPU_AWARE_MPI=0` are both needed on this HPC-X install
 (see the paragraphs above for why). If it fails to even start with a
-driver-version error, see the "OpenACC (nvfortran) build" section above for
+driver-version error, see [Installation: OpenACC build](installation.md#openacc-nvfortran-build) for
 the fallback (pair `nvfortran` 26.5 with an older `nvcc` via
 `DOPAMINE_PETSC_CUDAC`).
 
@@ -239,8 +241,8 @@ accepted names (aliases separated by `/`) are:
 | `fixedTemperature` | Dirichlet temperature only; this type sets no velocity BC |
 | `ablInlet` | ABL inflow profile, optionally with SEM fluctuations |
 
-An unrecognised name falls back to `zeroGradient` rather than aborting, so
-check the startup log if a patch does not behave as expected.
+Names are case-insensitive. An unrecognised name stops the run. A mesh patch that
+is not listed in `&dopamine_bc` takes the default type with a warning, so check the startup log.
 
 ## Output and Visualization
 
@@ -269,15 +271,21 @@ output, apply these filters in order:
 
 Use the following names in `advection_scheme` (momentum) and `temperature_scheme` (temperature):
 
-- `CENTRAL` or `CDS`: linear central interpolation (second order on uniform orthogonal regions).
+- `CENTRAL` or `CDS`: linear central interpolation (second order on uniform orthogonal regions). It is the default but does not conserve kinetic energy.
 - `KEP` or `SKEW`: midpoint momentum convective state for lower dissipation and better resolved kinetic-energy behavior in LES-oriented runs.
 - `QUICK`: geometry-aware quadratic upwind reconstruction evaluated in projected streamline coordinates. On aligned uniform meshes it reduces to classical QUICK [@leonard1979].
 - `VANLEER_TVD`: bounded MUSCL reconstruction with van Leer limiter using geometry-aware projected slopes [@vanleer1974; @sweby1984].
 - `KOREN_TVD`: bounded MUSCL reconstruction with Koren limiter using geometry-aware projected slopes [@koren1993; @sweby1984].
 
-`advection_scheme` controls momentum; `temperature_scheme` controls the temperature (T) field independently. Both accept the same set of scheme names. Passive scalar advection is controlled separately by `scalar_tvd_scheme` in `&dopamine_scalars`.
+`advection_scheme` controls momentum; `temperature_scheme` controls the temperature (T) field independently. `KEP`/`SKEW` is a momentum scheme only, so `temperature_scheme` accepts `CENTRAL`/`CDS`, `QUICK`, `VANLEER_TVD` and `KOREN_TVD`. Passive scalar advection is controlled separately by `scalar_tvd_scheme` in `&dopamine_scalars` (same four names as `temperature_scheme`). An unknown name stops the run and lists the allowed ones. The default `advection_scheme` is `CENTRAL`; set `KEP` for LES.
 
 ## Recommended Numerics by Problem Type
+
+The pressure-velocity coupling defaults (`rhie_chow_dual = .true.`, `cell_projection = 'EXACT'`) need no change for
+any of the cases below. On a uniform orthogonal mesh (the Taylor-Green, cavity and channel examples)
+the `'LS'` projection is already energy-stable ([Theory](theory.md)), so
+`cell_projection = 'LS'` is a cheaper choice there; see
+[Pressure Projection and Linear Solve](#pressure-projection-and-linear-solve).
 
 - Transitional/turbulent wall-bounded flows:
   - `advection_scheme = 'KEP'`
@@ -641,7 +649,7 @@ When `use_nudging = .true.`:
 
 2. At each RHS computation, the solver relaxes toward these profiles:
    - **Below** `nudging_z_start`: free LES evolution
-   - **Above** `nudging_z_start`: Newtonian relaxation with timescale `nudging_tau`
+   - **Above** `nudging_z_start`: Newtonian relaxation with timescale `nudging_tau`; the strength ramps linearly up to `nudging_z_full` (`nudging_z_full` at or below `nudging_z_start` gives a hard switch)
 
 3. Typical use case:
    - Download WRF or ERA5 profile for your domain
@@ -692,24 +700,23 @@ Practical settings:
 - On meshes with faces near 90 degrees of non-orthogonality (snappyHexMesh surfaces), set
   `pressure_min_cos_theta` (default `0` = off, e.g. `0.1`) in `&dopamine_numerics` to floor
   $$\cos\theta$$ in the Poisson coefficient and deferred cross term; the number of limited
-  faces is logged at startup.
-- With a CUDA-enabled PETSc this linear solve can run on GPU — see "GPU (CUDA)
-  Run" above. Custom `-pc_hypre_boomeramg_interp_type`/`coarsen_type` overrides
+  faces is logged at startup. It is not a default because `0.1` made the 45 degree skewed Taylor-Green
+  box diverge, so try it only when the pressure solve struggles on such faces.
+- With a CUDA-enabled PETSc this linear solve can run on GPU — see [GPU (CUDA) Run](#gpu-cuda-run). Custom `-pc_hypre_boomeramg_interp_type`/`coarsen_type` overrides
   via `&dopamine_PetscParams` should stick to hypre's GPU-supported values
   (`ext+i`/`PMIS`) when GPU mode is active; host-only choices segfault against a
   device-resident matrix.
 
 ## Long-Time Stability Checklist
 
-1. Use the current executable (`build/dopamine`).
-2. Check `n_ranks` in log header to confirm intended MPI launch.
-3. For wall-model cases, monitor:
+1. Check `n_ranks` in the log header to confirm the intended MPI launch.
+2. For wall-model cases, monitor:
    - `max|U|`
    - `E`
    - `max|divU|`
    If only `max|U|` grows while global metrics remain bounded, investigate localized outliers.
-4. Keep `p_tol` and `p_max_iter` strict enough for projection quality.
-5. Use `solver_stats_frequency` consistently across cases.
+3. Keep `p_tol` and `p_max_iter` strict enough for projection quality.
+4. Use `solver_stats_frequency` consistently across cases.
 
 ## Minimal Numerics Example
 
@@ -727,8 +734,8 @@ Practical settings:
 
 ## Troubleshooting & Tips
 
-- If CMake cannot find a library, check `*_DIR` variables and `CMAKE_PREFIX_PATH`.
-- For runtime missing symbols, ensure `LD_LIBRARY_PATH` includes all required directories.
-- Use strict `p_tol` (e.g., `1e-8`) for projection quality in LES.
-- Monitor `max|divU|` and pressure residuals for stability.
-- Use `solver_stats_frequency` to control statistics print interval.
+- Build and library-path problems: [Installation: Troubleshooting](installation.md#troubleshooting).
+- Velocity grows by a constant factor every step on a skewed or snappyHexMesh mesh, independent of `dt`: check that `rhie_chow_dual` and `cell_projection` still have their defaults, then see [Pressure Projection and Linear Solve](#pressure-projection-and-linear-solve).
+- Step time rose after an upgrade: `cell_projection = 'EXACT'` is now the default; set `'LS'` on orthogonal meshes.
+- A run stops at startup with `input namelist parse error`: a parameter name is misspelled or in the wrong group; names are listed in the [Input Reference](input-reference.md).
+- Monitor `max|divU|` and the pressure residual; use `solver_stats_frequency` to set how often they print.

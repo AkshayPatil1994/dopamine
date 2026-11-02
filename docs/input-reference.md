@@ -29,6 +29,7 @@ parameter is omitted. Values written in `reference.input` are example values and
 - Array parameters are indexed per patch/scalar/object, e.g. `patch_type(2) = 'outlet'`, `patch_U(1,:) = 1.0, 0.0, 0.0`.
 - Units are SI unless stated. Lengths are in mesh units.
 - Table columns: **Default** is the parser default; `required` means the run is meaningless without it.
+- The pressure-velocity coupling defaults (`rhie_chow_dual = .true.`, `cell_projection = 'EXACT'`) favour stability on skewed and non-orthogonal meshes. Inputs written for older versions that need their old results set `rhie_chow_dual = .false.` and `cell_projection = 'LS'`.
 
 ## Contents
 
@@ -97,10 +98,10 @@ Discretisation, time stepping, pressure solve and SGS model. Theory: [theory.md]
 | `p_target_divU` | `1.0e-8` | Parsed but currently has no effect. |
 | `use_rotational_projection` | `.true.` | Rotational pressure correction (Brown, Cortez & Minion 2001); lowers the splitting error from O(Δt) to O(Δt²). Recommended for wall-bounded flow. |
 | `n_nonortho_corr` | `0` | Non-orthogonal correction passes. `0` = auto (1 on an orthogonal mesh, otherwise 2). |
-| `pressure_min_cos_theta` | `0` | Floor on cos(theta) in the pressure Poisson coefficient and cross term. `0` = off. |
+| `pressure_min_cos_theta` | `0` | Floor on cos(theta) in the pressure Poisson coefficient and cross term. `0` = off, which leaves results unchanged. Meant for meshes with faces near 90 degrees of non-orthogonality (snappyHexMesh surfaces), e.g. `0.1`; the number of limited faces is logged at startup. Not a default because `0.1` made the 45 degree skewed test box diverge. |
 | `rhie_chow_dual` | `.true.` | `.true.`: Rhie-Chow restores exactly the cross-free gradient removed by the pre-correction (stable on skewed and non-orthogonal meshes; identical on orthogonal faces). `.false.` restores the pre-default behaviour. |
 | `nonortho_check` | `.false.` | `.true.`: the corrector loop stops on the relative increment of the pressure (`1e-3`) or when it stops contracting, and up to `n_nonortho_corr` (max 8) passes can run. Default: stops on `max|rhs_p|`, which includes div u* and ends the loop after two passes. |
-| `cell_projection` | `'EXACT'` | `'EXACT'`: the cell velocity is the V-orthogonal projection of the predictor onto fields whose interpolated face flux is divergence free (a second, wide-stencil system solved by preconditioned CG with the pressure solver as preconditioner; about 1.4 to 3 times the step time; host builds only: OpenACC builds warn and use `'LS'`). `'LS'`: the cell velocity is corrected by the least-squares reconstruction of the face-normal pressure differences. See Theory. |
+| `cell_projection` | `'EXACT'` | `'EXACT'`: the cell velocity is the V-orthogonal projection of the predictor onto fields whose interpolated face flux is divergence free (a second, wide-stencil system solved by preconditioned CG with the pressure solver as preconditioner; about 1.4 to 3 times the step time, also on orthogonal meshes where it brings little, so set `'LS'` there; host builds only: OpenACC builds warn and use `'LS'`). `'LS'`: the cell velocity is corrected by the least-squares reconstruction of the face-normal pressure differences. See Theory. |
 | `cell_projection_tol` | `0.1` | `EXACT`: the CG stops when the last velocity-energy step is below this fraction of the accumulated one. |
 
 ### Subgrid-scale model and wall-model filtering
@@ -141,7 +142,7 @@ Cadence of the on-screen/CSV monitor and default cadence of the sampling objects
 | `solver_stats_frequency` | `0` | Monitor row every N steps (screen and CSV). |
 | `calc_stats_frequency` | `0` | Fallback used when `solver_stats_frequency` is `0`. |
 | `slice_write_frequency` | `0` | Default write cadence of [sampling planes](#sampling-groups). |
-| `probe_write_frequency` | `0` | Default cadence of sampling surfaces. |
+| `probe_write_frequency` | `0` | Default cadence of sampling surfaces, and the fallback for lines and curves when their own cadence is `0`. |
 | `line_write_frequency` | `0` | Default cadence of sampling lines. |
 | `curve_write_frequency` | `0` | Default cadence of sampling curves. |
 | `intersection_decimate_spacing` | `0.0` | Point spacing used when thinning surface-plane intersection curves; `0` keeps all points. |
@@ -176,7 +177,7 @@ Workflow: [Usage: ABL module](usage.md#atmospheric-boundary-layer-abl-module).
 
 | Parameter | Default | Meaning / how to use |
 |--------------------------|----------|------------------------------------------|
-| `wall_model` | `''` (`'loglaw'`) | Treatment on `wallModel` patches: `'loglaw'` smooth-wall (first cell in the log layer, y+ of about 30 or more), `'most'` Monin-Obukhov rough/stratified (stops if the first-cell height ≤ `z0_m`), `'none'` no wall stress. When empty, `use_abl = .true.` selects `'most'`, otherwise `'loglaw'`. |
+| `wall_model` | `''` (`'loglaw'`) | Treatment on `wallModel` patches: `'loglaw'` smooth-wall (first cell in the log layer, y+ of about 30 or more), `'most'` Monin-Obukhov rough/stratified (stops if the first-cell height ≤ `z0_m`), `'none'` no wall stress. When empty, `use_abl = .true.` selects `'most'`, otherwise `'loglaw'`. An unknown value prints a warning and uses `'loglaw'`. |
 | `use_abl` | `.false.` | Legacy alias for `wall_model = 'most'` when `wall_model` is unset. Does not gate SEM or nudging. |
 | `u_ref` | `8.0` m/s | Reference wind speed at `z_ref`. |
 | `z_ref` | `100.0` m | Reference height of `u_ref`. |
@@ -283,7 +284,7 @@ One entry per boundary patch; names must match the patch names in the mesh. Arra
 | `patch_scalar_flux(i,s)` | `0.0` | Diffusive flux for `'neumann'`. |
 | `patch_scalar_flux_omega(i,s)`, `patch_scalar_flux_phase(i,s)` | `0.0` | Harmonic modulation `flux(t) = flux·cos(ω t + φ)` of a Neumann flux. |
 
-`patch_type` aliases:
+`patch_type` names are case-insensitive. An unrecognised name stops the run. Accepted aliases:
 
 | Aliases | Meaning |
 |--------------|------------------------------------------------|
@@ -293,7 +294,8 @@ One entry per boundary patch; names must match the patch names in the mesh. Arra
 | `noSlip` | No-slip wall. |
 | `movingWall`, `wallVelocity` | Wall with prescribed velocity. |
 | `wallModel`, `wall` | Wall-modelled wall (see `wall_model`). |
-| `slip`, `symmetry` | Slip wall / symmetry plane. |
+| `slip` | Free-slip wall. |
+| `symmetry` | Symmetry plane. |
 | `periodic`, `cyclic` | Periodic pair. |
 | `fixedTemperature` | Fixed temperature (`patch_T`). |
 | `ablInlet` | Turbulent ABL inflow (SEM or plane replay). |
@@ -390,7 +392,7 @@ Time-resolved sampling of fields along analytic or file-defined geometry. Up to 
 | `line_name(i)` | `''` | Label. |
 | `line_p0(i,1:3)`, `line_p1(i,1:3)` | `0.0` | End points. |
 | `line_npts(i)` | `128` | Sample points along the line. |
-| `line_write_frequency(i)` | `line_write_frequency` | Steps between writes. |
+| `line_write_frequency(i)` | `line_write_frequency` | Steps between writes; when `0`, the larger of `line_write_frequency` and `probe_write_frequency`. |
 
 ### &dopamine_sampling_curves
 
@@ -399,7 +401,7 @@ Time-resolved sampling of fields along analytic or file-defined geometry. Up to 
 | `n_curves` | `0` | Number of curves. |
 | `curve_name(i)` | `''` | Label. |
 | `curve_file(i)` | `''` | ASCII xyz (one point per line), OBJ vertices, or ASCII STL vertices. |
-| `curve_write_frequency(i)` | `curve_write_frequency` | Steps between writes. |
+| `curve_write_frequency(i)` | `curve_write_frequency` | Steps between writes; when `0`, the larger of `curve_write_frequency` and `probe_write_frequency`. |
 
 ### &dopamine_sampling_surfaces
 

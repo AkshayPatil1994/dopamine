@@ -24,6 +24,10 @@ mpirun -np 8 ../../build/dopamine taylor_green.input
 decomposed `mesh` directory with `mesh_type = 'preprocessed'`. A single-rank run can use the gmsh form
 directly. Output is `<prefix>.nc` plus `<prefix>.xmf` for ParaView.
 
+The example inputs do not set `cell_projection`, so they run with the default `'EXACT'`. The meshes are orthogonal, where
+`cell_projection = 'LS'` is cheaper (about 1.4 to 3 times the step time is spent on `'EXACT'`); add it to the `&dopamine_numerics`
+group of the input to run faster.
+
 ## Overview
 
 | Case | Physics | Key settings | Reference / check |
@@ -37,7 +41,7 @@ directly. Output is `<prefix>.nc` plus `<prefix>.xmf` for ParaView.
 
 ## Regression cases
 
-`ctest -L regression` runs 12 short cases (TGV, channel, Rayleigh-Benard, duct, dynamic Smagorinsky, graded
-mesh, hydrostatic and pressure-drop checks, SEM inflow, AMD) at one and two ranks and compares per-step
-statistics with stored references. They protect results during refactoring and are not validation cases. See
+`ctest -L regression` runs 18 short cases (TGV and skewed TGV variants, channel, Rayleigh-Benard, duct, dynamic
+Smagorinsky, graded mesh, hydrostatic and pressure-drop checks, SEM inflow, AMD, and a case on the default
+numerics) at one and two ranks (AMD at one) and compares per-step statistics with stored references. They protect results during refactoring and are not validation cases. See
 `tests/regression/README.md`.

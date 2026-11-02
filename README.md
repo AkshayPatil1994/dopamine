@@ -86,8 +86,8 @@ Friction velocity $u_\tau$ is found via Newton iteration; wall shear stress $\ta
 - Enabled via `&dopamine_abl` namelist
 
 ### Advection schemes
-- **CENTRAL / CDS**: linear central face interpolation; lowest numerical dissipation of the currently implemented options and the preferred choice for WMLES.
-- **KEP / SKEW**: momentum uses a midpoint face state with projected face mass flux (Ham-Iaccarino style collocated FV convective form) to reduce numerical dissipation and better preserve resolved kinetic energy on interior faces.
+- **CENTRAL / CDS**: linear central face interpolation; lowest numerical dissipation of the currently implemented options, but not kinetic-energy conserving. It is the input-file default.
+- **KEP / SKEW**: recommended for LES (the channel and cavity examples use it). Momentum uses a midpoint face state with projected face mass flux (Ham-Iaccarino style collocated FV convective form) to reduce numerical dissipation and better preserve resolved kinetic energy on interior faces.
 - **QUICK**: geometry-aware quadratic upwind reconstruction in projected streamline coordinates; it reduces to classical QUICK on aligned uniform meshes.
 - **KOREN_TVD**: bounded Koren-TVD MUSCL reconstruction using geometry-aware projected slopes, retained as a robust nonlinear option for under-resolved transients.
 - **VANLEER_TVD**: bounded van-Leer-TVD MUSCL reconstruction using geometry-aware projected slopes.
@@ -111,30 +111,31 @@ cmake .. -DCMAKE_BUILD_TYPE=Release \
   -DDOPAMINE_PETSC_INSTALL_DIR=/path/to/petsc \
   -DDOPAMINE_PETSC_ARCH_DIR=/path/to/petsc-arch
 make -j
+cd ..
 ```
 
-For the full build-options table, offline/HPC (no internet) builds, a
+The commands below run from the repository root. For the full build-options table, offline/HPC (no internet) builds, a
 standalone PETSc build recipe, and the GPU (CUDA) and OpenACC (nvfortran)
-build paths, see [docs/usage.md](docs/usage.md#build).
+build paths, see [docs/installation.md](docs/installation.md).
 
 ### 2. Offline Mesh Decomposition (for large meshes)
 
 For meshes >10M cells, pre-decompose using the `dopamine-decompose` tool:
 
 ```sh
-mpirun -np 1 ./dopamine-decompose input.input --nranks 128 \
+mpirun -np 1 ./build/dopamine-decompose input.input --nranks 128 \
   --output-dir ./mesh_decomposed --max-memory-gb 48
 ```
 
 Then point the input file at the decomposed mesh (`mesh_file =
 './mesh_decomposed'`, `mesh_type = 'preprocessed'`). See
-[docs/usage.md](docs/usage.md#choosing-a-mesh-path) for the decomposer's full
+[docs/preprocessing.md](docs/preprocessing.md#choosing-a-mesh-path) for the decomposer's full
 flag list and when to prefer this over direct-read.
 
 ### 3. Run Solver
 
 ```sh
-mpirun -np 16 ./dopamine examples/channel_flow_retau395/channel_retau395.input
+mpirun -np 16 ./build/dopamine examples/channel_flow_retau395/channel_retau395.input
 ```
 
 ### 4. Visualize
@@ -206,7 +207,7 @@ filter sequence for decomposed MPI output.
 ## Supported Mesh Formats
 
 Gmsh v4 (`.msh`) and OpenFOAM `polyMesh`. See
-[docs/usage.md](docs/usage.md#supported-mesh-formats) for supported cell
+[docs/preprocessing.md](docs/preprocessing.md#supported-mesh-formats) for supported cell
 types and file layout.
 
 ---
@@ -232,10 +233,14 @@ The `docs/` folder is published as a [GitHub Pages site](https://akshaypatil1994
 (Settings → Pages → source `/docs`) and also builds standalone as a single
 PDF/HTML manual via `bash docs/build.sh` (see [docs/README.md](docs/README.md)).
 
+- [docs/installation.md](docs/installation.md): Dependencies, build options, offline/HPC builds, GPU (CUDA) and OpenACC builds
+- [docs/usage.md](docs/usage.md): Running, checkpoint/restart, GPU runs, boundary conditions, outputs, the ABL module, troubleshooting
+- [docs/preprocessing.md](docs/preprocessing.md): Mesh formats, patch names, direct vs. pre-decomposed meshes
+- [docs/input-reference.md](docs/input-reference.md): Every input parameter with its default, units and meaning
 - [docs/theory.md](docs/theory.md): Governing equations, discretization, and numerical implementation
-- [docs/usage.md](docs/usage.md): Full build/run guide — build options, offline/HPC builds, GPU (CUDA) and OpenACC builds, mesh decomposition, input/output, examples, and troubleshooting
+- [docs/examples.md](docs/examples.md) and [docs/tools.md](docs/tools.md): Example cases, regression suite, helper executables
 - [docs/development.md](docs/development.md): Code layout, build system, testing, style, contributing
-- [reference.input](reference.input): Complete input template
+- [reference.input](reference.input): Annotated input template
 
 
 ---

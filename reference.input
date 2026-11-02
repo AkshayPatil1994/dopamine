@@ -110,12 +110,13 @@
   advection_scheme = 'QUICK'
 
   ! Convection/advection discretization for temperature (T field).
-  ! Independent of advection_scheme; same options as above.
+  ! Independent of advection_scheme. Options: 'CENTRAL' | 'CDS' | 'QUICK' | 'KOREN_TVD' | 'VANLEER_TVD'
+  ! ('KEP'/'SKEW' are momentum-only and stop the run here).
   ! Defaults to VANLEER_TVD for bounded, oscillation-free temperature transport.
   ! Only takes effect when boussinesq = .true.; a neutral run (including a neutral
   ! ABL) does not transport T at all, so this setting is then inert.
   !   Recommended: 'VANLEER_TVD' or 'KOREN_TVD' for most flows;
-  !                'KEP'/'CENTRAL' only if temperature is near-smooth.
+  !                'CENTRAL' only if temperature is near-smooth.
   temperature_scheme = 'VANLEER_TVD'
 
   ! Time integrator: 'RK3W' (default and only stable option).
@@ -232,6 +233,27 @@
   !   1  - single correction pass (sufficient for mildly non-orthogonal meshes)
   !   2+ - extra passes for highly skewed or non-orthogonal polyhedral meshes
   n_nonortho_corr = 0
+
+  ! Consistent Rhie-Chow term on non-orthogonal faces. Default .true.; identical on orthogonal faces.
+  !   .false. restores the pre-default lagged cross term, which makes velocity grow by a
+  !   constant factor per step on strongly skewed meshes (non-orthogonality above ~40 degrees).
+  rhie_chow_dual = .true.
+
+  ! Cell-velocity projection. Default 'EXACT': V-orthogonal projection, energy non-increasing on any mesh,
+  !   about 1.4 to 3 times the step time, host only (OpenACC builds warn and use 'LS').
+  !   'LS': least-squares reconstruction of the face pressure differences; cheaper, fine on orthogonal meshes.
+  cell_projection = 'EXACT'
+
+  ! 'EXACT' only: the CG stops when the last velocity-energy step is below this fraction of the accumulated one.
+  cell_projection_tol = 0.1
+
+  ! Floor on cos(theta) in the Poisson coefficient and cross term; 0 = off (default).
+  ! For faces near 90 degrees of non-orthogonality, e.g. 0.1. Not a default: 0.1 made a 45 degree skewed box diverge.
+  pressure_min_cos_theta = 0.0
+
+  ! .true.: the corrector loop stops on the relative increment of the pressure (1e-3) instead of max|rhs_p|,
+  ! and up to n_nonortho_corr (max 8) passes can run. Default .false.: the loop never exceeds two passes.
+  nonortho_check = .false.
 
   ! Verbose runtime diagnostics: startup projection-idempotency check, per-report interface
   ! KE budget/conservation error, and the worst-divergence-cell report. Off by default; the
