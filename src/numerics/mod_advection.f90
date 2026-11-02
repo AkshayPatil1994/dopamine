@@ -1404,6 +1404,7 @@ contains
     real(rp),    intent(in)    :: grad_U(:,:,:)  ! (3, 3, n_cells), grad_U(:,k,c), only used by QUICK
 
     integer(ip) :: f, o, nb, k, f_bnd, patch_id, bc_id, up, down, far_up
+    real(rp)    :: phi_q(3)
     real(rp)    :: Fn, phi_f, x_up(3), x_down(3), x_face(3), up_shift(3), dir_hat(3), s_face, s_down
     integer(ip) :: col, idx, n_loops, lo, hi, nc, nf, n_int, nbnd, n_patches, nu
     logical     :: use_color, ok, host_fill
@@ -1524,11 +1525,11 @@ contains
         hi = nf
       end if
 #ifdef _OPENACC
-      !$acc parallel loop if(use_color) private(f, o, nb, k, f_bnd, patch_id, bc_id, Fn, phi_f, &
+      !$acc parallel loop if(use_color) private(f, o, nb, k, f_bnd, patch_id, bc_id, Fn, phi_f, phi_q, &
       !$acc      up, down, far_up, x_up, x_down, x_face, up_shift, dir_hat, s_face, s_down, ok)
 #else
       !$omp parallel do if(use_color) default(shared) &
-      !$omp& private(f, idx, o, nb, k, f_bnd, patch_id, bc_id, Fn, phi_f, &
+      !$omp& private(f, idx, o, nb, k, f_bnd, patch_id, bc_id, Fn, phi_f, phi_q, &
       !$omp&         up, down, far_up, x_up, x_down, x_face, up_shift, dir_hat, s_face, s_down, ok)
 #endif
       do idx = lo, hi
@@ -1581,12 +1582,15 @@ contains
 
         if (.not. soa_is_finite(Fn)) Fn = 0.0_rp
 
+        if (ok .and. scheme == SCHEME_QUICK) &
+          call soa_quick_reconstruction3_dev(recon_v_Ut_buf(1:nu,:), up, down, x_up, x_down, up_shift, dir_hat, &
+                 s_face, s_down, nc, cfo_soa, cell_faces_p, fo_soa, fn_soa, ccent_soa, recon_v_gradt_buf(:,1:nc,:), nu, phi_q)
+
         do k = 1, 3
           if (ok) then
             select case (scheme)
             case (SCHEME_QUICK)
-              phi_f = soa_quick_reconstruction_ctx_dev(recon_v_Ut_buf(1:nu,k), up, down, x_up, x_down, up_shift, dir_hat, &
-                        s_face, s_down, nc, cfo_soa, cell_faces_p, fo_soa, fn_soa, ccent_soa, recon_v_gradt_buf(:,1:nc,k), nu)
+              phi_f = phi_q(k)
             case (SCHEME_VANLEER_TVD)
               phi_f = soa_vanleer_tvd_ctx_dev(recon_v_Ut_buf(1:nu,k), up, down, x_up, up_shift, dir_hat, s_face, s_down, &
                         far_up, ccent_soa)
@@ -2628,6 +2632,94 @@ contains
     phi_f = phi_U + a1*s_face + a2*s_face*s_face
     phi_f = clamp_value(phi_f, min(phi_U, phi_D), max(phi_U, phi_D))
   end function soa_quick_reconstruction_ctx_dev
+
+  !> Three-component fused soa_quick_reconstruction_ctx_dev: the stencil geometry is evaluated once.
+  subroutine soa_quick_reconstruction3_dev(phi, up, down, x_up, x_down, up_shift, dir_hat, s_face, s_down, &
+                        nc, cfo_soa, cell_faces, fo_soa, fn_soa, ccent_soa, grad_phi, nu, phi_f)
+    !$acc routine seq
+    real(rp),    intent(in)  :: phi(:,:)  ! (nu, 3)
+    integer(ip), intent(in)  :: up, down, nc, nu
+    real(rp),    intent(in)  :: x_up(3), x_down(3), up_shift(3), dir_hat(3), s_face, s_down
+    integer(ip), intent(in)  :: cfo_soa(:), cell_faces(:), fo_soa(:), fn_soa(:)
+    real(rp),    intent(in)  :: ccent_soa(:,:), grad_phi(:,:,:)  ! (3, nc, 3)
+    real(rp),    intent(out) :: phi_f(3)
+
+    integer(ip) :: fi, fj, nb, nfit, k
+    real(rp)    :: s, dist2, align, weight, det, a1, a2
+    real(rp)    :: a11, a12, a22, lin_den, dvec(3), x_nb(3)
+    real(rp)    :: phi_U(3), phi_D(3), b1(3), b2(3), lin_num(3), grad_up(3, 3), delta_phi(3)
+    logical     :: have_grad
+
+    have_grad = (up <= size(grad_phi, 2) .and. up <= nc .and. down <= nc)
+    do k = 1, 3
+      phi_U(k) = phi(up, k)
+      phi_D(k) = phi(down, k)
+      grad_up(:, k) = 0.0_rp
+      if (have_grad) grad_up(:, k) = grad_phi(:, up, k)
+    end do
+
+    dvec = x_down - x_up
+    dist2 = max(sum(dvec**2), SMALL)
+    weight = 1.0_rp / dist2
+    a11 = weight * s_down * s_down
+    a12 = a11 * s_down
+    a22 = a12 * s_down
+    lin_den = a11
+    nfit = 1
+    do k = 1, 3
+      delta_phi(k) = axial_delta(phi_D(k), phi_U(k), grad_up(:, k), dvec, s_down, dir_hat)
+      b1(k) = weight * s_down * delta_phi(k)
+      b2(k) = weight * s_down * s_down * delta_phi(k)
+      lin_num(k) = b1(k)
+    end do
+
+    if (up >= 1 .and. up <= nc .and. down <= nc) then
+      do fi = cfo_soa(up), cfo_soa(up+1) - 1
+        fj = cell_faces(fi)
+        nb = fo_soa(fj)
+        if (nb == up) nb = fn_soa(fj)
+        if (nb < 1 .or. nb == down .or. nb > nu) cycle
+
+        x_nb = ccent_soa(:, nb) + up_shift
+        dvec = x_nb - x_up
+        s = dot_product(dvec, dir_hat)
+        if (s >= -1.0e-12_rp) cycle
+
+        dist2 = max(sum(dvec**2), SMALL)
+        if (s*s < 0.25_rp*dist2) cycle
+        align = min(1.0_rp, -s / sqrt(dist2))
+        weight = (0.25_rp + align*align) / dist2
+
+        a11 = a11 + weight * s * s
+        a12 = a12 + weight * s * s * s
+        a22 = a22 + weight * s * s * s * s
+        lin_den = lin_den + weight * s * s
+        do k = 1, 3
+          delta_phi(k) = axial_delta(phi(nb, k), phi_U(k), grad_up(:, k), dvec, s, dir_hat)
+          b1(k) = b1(k) + weight * s * delta_phi(k)
+          b2(k) = b2(k) + weight * s * s * delta_phi(k)
+          lin_num(k) = lin_num(k) + weight * s * delta_phi(k)
+        end do
+        nfit = nfit + 1
+      end do
+    end if
+
+    det = a11*a22 - a12*a12
+    do k = 1, 3
+      if (nfit >= 2 .and. abs(det) > SMALL) then
+        a1 = ( b1(k)*a22 - b2(k)*a12) / det
+        a2 = (-b1(k)*a12 + b2(k)*a11) / det
+      else if (lin_den > SMALL) then
+        a1 = lin_num(k) / lin_den
+        a2 = 0.0_rp
+      else
+        a1 = (phi_D(k) - phi_U(k)) / max(s_down, SMALL)
+        a2 = 0.0_rp
+      end if
+      phi_f(k) = phi_U(k) + a1*s_face + a2*s_face*s_face
+      phi_f(k) = clamp_value(phi_f(k), min(phi_U(k), phi_D(k)), max(phi_U(k), phi_D(k)))
+    end do
+  end subroutine soa_quick_reconstruction3_dev
 
   !> Device-callable SoA counterpart of vanleer_tvd_reconstruction_ctx (diagnostic fallback counter dropped).
   real(rp) function soa_vanleer_tvd_ctx_dev(phi, up, down, x_up, up_shift, dir_hat, s_face, s_down, far_up, ccent_soa) &
