@@ -86,9 +86,9 @@ module mod_fv_solver
     integer(ip)   :: gg_iterations   = 2  ! GG skewness-correction sweeps (GREEN_GAUSS only)
     integer(ip)   :: n_nonortho_corr = 1  ! Jasak non-orthogonal corrector outer iterations
     real(rp)      :: pressure_min_cos_theta = 0.0_rp  ! > 0 floors cos(theta) in the Poisson coefficient and k
-    logical       :: rhie_chow_dual = .false.  ! .true.: Rhie-Chow restores exactly the applied cross-free gradient
+    logical       :: rhie_chow_dual = .true.  ! .true.: Rhie-Chow restores exactly the applied cross-free gradient
     logical       :: nonortho_check = .false.  ! .true.: corrector loop exits on the increment of phi, not on |rhs_p|
-    character(8)  :: cell_projection = 'LS'  ! 'EXACT': cell velocity is the V-orthogonal projection (mod_cell_projection)
+    character(8)  :: cell_projection = 'EXACT'  ! 'EXACT': cell velocity is the V-orthogonal projection (mod_cell_projection)
     real(rp)      :: cell_projection_tol = 1.0e-1_rp  ! EXACT: relative velocity-energy tolerance of the PCG
     logical     :: use_rotational_projection = .true.  ! Brown-Cortez-Minion rotational correction (-nudiv u*)
     logical     :: use_sgs = .true.   ! enable SGS model; set false for no-model/ILES runs
@@ -3151,7 +3151,10 @@ contains
     self%cproj_on = (trim(self%params%cell_projection) == 'EXACT')
     if (.not. self%cproj_on) return
 #ifdef _OPENACC
-    error stop 'cell_projection=EXACT is host-only'
+    if (self%mesh%rank == 0) write(*,'(A)') ' WARNING: cell_projection=EXACT is host-only, using LS'
+    self%params%cell_projection = 'LS'
+    self%cproj_on = .false.
+    return
 #endif
     nc = self%mesh%n_cells;  ntot = nc + self%mesh%n_ghost
     allocate(own(self%psolver%n_faces), nbr(self%psolver%n_faces), sf(3, self%psolver%n_faces), gc(self%psolver%n_faces))

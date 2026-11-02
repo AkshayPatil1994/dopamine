@@ -195,9 +195,9 @@ contains
     integer(ip)    :: gg_iterations = 2
     integer(ip)    :: n_nonortho_corr = 0  ! 0 = auto (1 if mesh orthogonal, else 2)
     real(rp)       :: pressure_min_cos_theta = 0.0_rp  ! > 0 floors cos(theta) in the Poisson operator
-    logical        :: rhie_chow_dual = .false.  ! consistent Rhie-Chow on non-orthogonal faces
+    logical        :: rhie_chow_dual = .true.  ! consistent Rhie-Chow on non-orthogonal faces
     logical        :: nonortho_check = .false.  ! corrector loop exits on the increment of phi, not on |rhs_p|
-    character(8)   :: cell_projection = 'LS'  ! LS (reconstructed face correction) or EXACT (V-orthogonal)
+    character(8)   :: cell_projection = 'EXACT'  ! EXACT (V-orthogonal; host-only) or LS (reconstructed face correction)
     real(rp)       :: cell_projection_tol = 1.0e-1_rp  ! EXACT: relative velocity-energy tolerance of the PCG
     character(16)  :: time_scheme = 'RK3W'  ! legacy; use time_integrator instead
     character(16)  :: time_integrator = 'RK3W'  ! RK3W is the only integrator
