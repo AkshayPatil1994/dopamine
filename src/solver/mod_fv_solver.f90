@@ -278,7 +278,7 @@ contains
     procedure :: divergence_metrics => solver_divergence_metrics
     procedure :: destroy      => solver_destroy
     procedure :: compute_dt   => solver_compute_dt
-    procedure :: compute_cfl_rate => solver_compute_cfl_rate
+    procedure :: cfl_rates    => solver_cfl_rates
     procedure :: state_is_finite => solver_state_is_finite
     procedure :: to_device    => solver_to_device
     procedure :: sync_host    => solver_sync_host
@@ -1505,10 +1505,10 @@ contains
             !$acc parallel loop default(present) reduction(max:dphi_d, dphi_p)
             do c = 1, nc
               dphi_d = max(dphi_d, abs(p(c) - phi_it(c)))
-            dphi_l = [dphi_d, dphi_p]
               dphi_p = max(dphi_p, abs(p(c)))
               phi_it(c) = p(c)
             end do
+            dphi_l = [dphi_d, dphi_p]
             call MPI_Allreduce(dphi_l, dphi_g, 2, MPI_DOUBLE_PRECISION, MPI_MAX, self%mesh%comm, ierr_tol)
             if (jno > 1 .and. (dphi_g(1) < NONORTHO_PHI_TOL * dphi_g(2) .or. dphi_g(1) > dphi_prev * stagnate_tol)) exit
             dphi_prev = dphi_g(1)
@@ -3358,10 +3358,10 @@ contains
     !$acc      self%nonortho_k_int, self%nonortho_active_int, self%nonortho_k_bnd, self%nonortho_active_bnd, &
     !$acc      self%recon_Tinv, self%nonperiodic_bfaces, self%periodic_bfaces, self%patch_p_val, &
     !$acc      self%mesh%global_id)
-    if (self%cproj_on) call self%cproj%to_device()
     if (allocated(self%psolver%idx_color_perm)) then
       !$acc enter data copyin(self%psolver%idx_color_perm, self%psolver%color_offsets)
     end if
+    if (self%cproj_on) call self%cproj%to_device()
     self%static_on_device = .true.
 #endif
   end subroutine stage_static_on_device
@@ -3378,6 +3378,7 @@ contains
     if (allocated(self%psolver%idx_color_perm)) then
       !$acc exit data delete(self%psolver%idx_color_perm, self%psolver%color_offsets)
     end if
+    if (self%cproj_on) call self%cproj%leave_device()
     self%static_on_device = .false.
 #endif
   end subroutine release_static_on_device
@@ -3732,16 +3733,16 @@ contains
 
   end subroutine solver_divergence_metrics
 
-  !> CFL-based adaptive time step: per-cell sums of all face fluxes/diffusion, not per-face max.
-  real(rp) function solver_compute_dt(self) result(dt)
+  !> Global max convective and diffusive rates (1/s): CFL numbers are rate * dt. MPI-collective.
+  !> Per-cell sums of all face fluxes/diffusion, not per-face max.
+  subroutine solver_cfl_rates(self, conv_rate, diff_rate)
     class(FVSolver), intent(in), target :: self
+    real(rp),        intent(out)        :: conv_rate, diff_rate
     integer(ip) :: f, o, nb, ierr, nc, ntot, nf, n_patches, patch_id, bc_id
     real(rp)    :: cfl_max_local, cfl_max_global
     real(rp)    :: diff_max_local, diff_max_global, nu_eff, area, w, gc
-    real(rp)    :: dt_min, dt_conv, dt_diff
     real(rp)    :: u_face_use, sf1, sf2, sf3, nu_mol
     logical     :: have_uface, dev
-    real(rp), parameter :: diff_cfl_limit = 1.0_rp
     integer(ip), pointer :: fown(:), fnb(:), fpid(:), pbc(:)
     real(rp),    pointer :: fsf(:,:), gcs(:), dcf(:), cvol(:), U(:,:), Uf(:), nus(:)
 
@@ -3876,6 +3877,18 @@ contains
       cfl_max_global  = red_global(1)
       diff_max_global = red_global(2)
     end block
+    conv_rate = cfl_max_global
+    diff_rate = diff_max_global
+  end subroutine solver_cfl_rates
+
+  !> CFL-based adaptive time step from the convective and diffusive rates.
+  real(rp) function solver_compute_dt(self) result(dt)
+    class(FVSolver), intent(in), target :: self
+    real(rp)    :: cfl_max_global, diff_max_global
+    real(rp)    :: dt_min, dt_conv, dt_diff
+    real(rp), parameter :: diff_cfl_limit = 1.0_rp
+
+    call solver_cfl_rates(self, cfl_max_global, diff_max_global)
 
     ! Convective and diffusive dt limits; cfl_max and diff_cfl_limit are the margins, no extra safety factor.
     dt_conv = huge(1.0_rp)
@@ -3926,39 +3939,6 @@ contains
       hit_boundary = .true.
     end if
   end subroutine snap_dt_to_write_time
-
-  !> Global max convective CFL rate (1/s): CFL number = compute_cfl_rate() * dt.
-  !> MPI-collective; must be called by all ranks.
-  real(rp) function solver_compute_cfl_rate(self) result(cfl_max)
-    class(FVSolver), intent(in) :: self
-    integer(ip) :: f, o, nb, ierr
-    real(rp)    :: cfl_loc, cfl_max_local, u_face_use, sf(3), vol_min
-    logical     :: have_uface
-
-    cfl_max_local = 0.0_rp
-    have_uface = allocated(self%U_face) .and. self%u_face_ready
-
-    do f = 1, self%mesh%n_faces
-      o  = self%mesh%faces(f)%owner
-      nb = self%mesh%faces(f)%neighbour
-      if (nb >= 1 .and. nb <= self%mesh%n_cells) then
-        vol_min = min(self%mesh%cells(o)%volume, self%mesh%cells(nb)%volume)
-      else
-        vol_min = self%mesh%cells(o)%volume
-      end if
-      if (have_uface) then
-        u_face_use = self%U_face(f)
-      else
-        sf = self%mesh%faces(f)%sf
-        u_face_use = dot_product(self%U(:, o), sf)
-      end if
-      cfl_loc = abs(u_face_use) / (vol_min + SMALL)
-      cfl_max_local = max(cfl_max_local, cfl_loc)
-    end do
-
-    call MPI_Allreduce(cfl_max_local, cfl_max, 1, MPI_DOUBLE_PRECISION, &
-                       MPI_MAX, self%mesh%comm, ierr)
-  end function solver_compute_cfl_rate
 
   !> True when U and p are finite on every rank (a NaN/Inf anywhere poisons the sum). MPI-collective;
   !> reduces on the device when the fields live there, so no host sync is needed.

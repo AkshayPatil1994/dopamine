@@ -170,7 +170,7 @@ contains
     logical,  optional,   intent(in)    :: output_written
     logical,  optional,   intent(in)    :: write_csv  ! default .true.; .false. prints the screen row only
 
-    real(rp) :: E, eps, umax, max_div, abs_div, cfl
+    real(rp) :: E, eps, umax, max_div, abs_div, cfl_c, cfl_v, conv_rate, diff_rate
     real(rp) :: max_div_cell, abs_div_cell
     real(rp) :: ubulk, tauw_mean, cf_bulk, nu_sgs_mean, sgs_to_mol
     real(rp) :: E_norm, eps_ref, E0_val, dt_val
@@ -184,7 +184,9 @@ contains
 
     dt_val = solver%params%dt
     if (present(dt)) dt_val = dt
-    cfl = solver%compute_cfl_rate() * dt_val
+    call solver%cfl_rates(conv_rate, diff_rate)
+    cfl_c = conv_rate * dt_val
+    cfl_v = diff_rate * dt_val
 
     cf_bulk = tauw_mean / max(0.5_rp * ubulk**2, SMALL)
     sgs_to_mol = nu_sgs_mean / max(solver%params%nu, SMALL)
@@ -220,22 +222,18 @@ contains
     ! ---- screen output -------------------------------------------------------
     if (.not. stats%header_written) then
       write(*, '(A)') ''
-      write(*, '(A)') repeat('-', 106)
-      write(*, '(A)') right_header_col('step', 8) // right_header_col('dt', 10) // &
-                      right_header_col('time', 14) // right_header_col('CFL', 14) // &
-                      right_header_col('max|U|', 14) // right_header_col('max|divU|', 14) // &
-                      right_header_col('<|divU|>V', 14) // right_header_col('wall [s]', 18)
-      write(*, '(A)') repeat('-', 106)
+      write(*, '(A)') repeat('-', 125)
+      write(*, '(A)') right_header_col('step', 8) // right_header_col('t', 14) // &
+                      right_header_col('<U>', 13) // right_header_col('|U|max', 13) // &
+                      right_header_col('max |div|', 13) // right_header_col('|div|', 13) // &
+                      right_header_col('CFL_c', 13) // right_header_col('CFL_v', 13) // &
+                      right_header_col('dt', 13) // right_header_col('wall(s)', 12)
+      write(*, '(A)') repeat('-', 125)
       stats%header_written = .true.
     end if
 
-    if (present(dt)) then
-      write(*, '(I8,ES10.3,5ES14.6,F14.4,A)') step, dt, time, cfl, umax, max_div, abs_div, wall_elapsed, &
-        trim(output_tag)
-    else
-      write(*, '(I8,A10,5ES14.6,F14.4,A)') step, '-', time, cfl, umax, max_div, abs_div, wall_elapsed, &
-        trim(output_tag)
-    end if
+    write(*, '(I8,ES14.6,7ES13.5,F12.4,A)') step, time, ubulk, umax, max_div, abs_div, cfl_c, cfl_v, dt_val, &
+      wall_elapsed, trim(output_tag)
 
     ! ---- CSV output ----------------------------------------------------------
     if (do_csv .and. stats%file_opened .and. stats%file_unit /= -1) then
