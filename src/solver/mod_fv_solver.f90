@@ -195,6 +195,7 @@ module mod_fv_solver
     logical,  allocatable :: w_outlet_cell(:)   ! (nc) precomputed outlet cell mask
     real(rp), allocatable :: w_outlet_pval(:)   ! (nc) reference pressure per outlet cell
     real(rp), allocatable :: patch_p_val(:)     ! (n_patches) bc_configs(:)%p_val, flat for device kernels
+    real(rp), allocatable :: outlet_pb(:)       ! (n_bnd_faces) outlet face pressure: p_val less the backflow traction
     !> Static projection operator arrays (psolver indices/coefficients, non-orthogonal caches,
     !> recon_Tinv, boundary-face lists) have been staged on the device (stage_static_on_device).
     logical :: static_on_device = .false.
@@ -395,6 +396,12 @@ contains
     allocate(self%patch_p_val(max(1_ip, msh%n_patches)), source=0.0_rp)
     do q_out = 1, msh%n_patches
       self%patch_p_val(q_out) = bc_configs(q_out)%p_val
+    end do
+    allocate(self%outlet_pb(max(1_ip, msh%n_bnd_faces)), source=0.0_rp)
+    do q_out = 1, msh%n_patches
+      do f_loc_out = 1, msh%patches(q_out)%n_faces
+        self%outlet_pb(msh%patches(q_out)%start_face + f_loc_out - 1) = bc_configs(q_out)%p_val
+      end do
     end do
     call build_patch_classification(self)
 
@@ -894,7 +901,7 @@ contains
 #ifdef _OPENACC
     !$acc update device(self%U_face)
 #endif
-    call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh)
+    call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, p_out_bnd=self%outlet_pb)
     if (self%cproj_on) then
       call project_cells_exact(self, dt_use)
     else
@@ -911,13 +918,13 @@ contains
       end do
       !$omp end parallel do
       call self%mesh%exchange_halos_scalar(self%p)
-      call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh)
+      call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, p_out_bnd=self%outlet_pb)
     end if
 
     self%p_old(1:nc) = self%p(1:nc)
     self%phi_prev(1:nc+self%mesh%n_ghost) = self%p(1:nc+self%mesh%n_ghost)
     self%phi_prev_bnd(:) = self%p_bnd(:)
-    call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh)
+    call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, p_out_bnd=self%outlet_pb)
     ! Seed w_gp for the first stage's pre-correction.
     call compute_pressure_gradient(self)
 
@@ -1189,7 +1196,7 @@ contains
     real(rp),        intent(in)    :: dt
 
     integer(ip) :: nc, ntot, nbnd, nfaces, ns, nsc, c, k, s, jno, p_iter
-    real(rp)    :: gk_dt, time_n, a_k, b_k, nu_mol
+    real(rp)    :: gk_dt, time_n, a_k, b_k, nu_mol, c_outlet
     real(rp)    :: t_perf, t_sub, p_resid
     ! Plain-array aliases for the device loops below (the polymorphic self can't be mapped).
     real(rp), pointer :: U(:,:), T(:), Cf(:,:), p(:), p_old(:), nu_sgs(:), gp_rc(:,:), gp_cell(:,:)
@@ -1323,6 +1330,8 @@ contains
       t_sub = wall_time_now()
       a_k = RK3W_ALPHA(k)
       b_k = RK3W_BETA(k)
+      call outlet_advance_boundary(self%U, self%U_bnd, self%grad_U, self%bc_configs, self%mesh, dt, a_k, b_k, c_outlet)
+      if (c_outlet > OUTLET_COURANT_WARN) call warn_log_bump(WARN_OUTLET_COURANT, 1_ip, c_outlet)
 #ifdef _OPENACC
       !$acc parallel loop default(present)
 #else
@@ -1361,6 +1370,7 @@ contains
           !$acc update device(self%abl_mean_bnd) if(self%on_device)
         end if
       end if
+      call update_outlet_pressure(self%U, self%outlet_pb, self%bc_configs, self%mesh)
       call self%mesh%begin_halos_vec(self%U)
       call apply_velocity_bc(self%U, self%U_bnd, self%bc_configs, self%mesh, &
                              periodic_only=.false., grad_U=self%grad_U, u_fluc_bnd=self%sem_fluc_bnd, u_mean_bnd=self%abl_mean_bnd)
@@ -2038,10 +2048,10 @@ contains
     ! w_gp is not a gradient when skip_grad_p is set; omit it so the BC falls back to zero-gradient.
     if (self%skip_grad_p) then
       call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, &
-                              periodic_only=periodic_only)
+                              periodic_only=periodic_only, p_out_bnd=self%outlet_pb)
     else
       call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, &
-                              periodic_only=periodic_only, grad_p=self%w_gp)
+                              periodic_only=periodic_only, grad_p=self%w_gp, p_out_bnd=self%outlet_pb)
     end if
     call apply_temperature_bc(self%T, self%T_bnd, self%bc_configs, self%mesh, &
                                periodic_only=periodic_only, grad_T=self%grad_T)
@@ -2333,10 +2343,11 @@ contains
     incr = .false.
     if (present(increment)) incr = increment
     if (self%skip_grad_p) then
-      call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, periodic_only=.false., increment=incr)
+      call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, periodic_only=.false., increment=incr, &
+                             p_out_bnd=self%outlet_pb)
     else
       call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, &
-                             periodic_only=.false., grad_p=self%w_gp, increment=incr)
+                             periodic_only=.false., grad_p=self%w_gp, increment=incr, p_out_bnd=self%outlet_pb)
     end if
   end subroutine apply_pressure_bc_o2
 
@@ -2397,7 +2408,7 @@ contains
 
     integer(ip) :: nc, ntot, nf, n_int, n_faces, n_bnd, n_patches, n_nper, n_per, c, f, q, ib, f_bnd, f_glob
     integer(ip) :: idx, o, nb, f_mesh, pair_bnd, pair_face, om, nm, j
-    real(rp)    :: flux, coeff_rc, gc_f, d_o, d_nb, d_tot, w_blend, s_dot_dhat, d_on_len, cross, rdt, gc_w
+    real(rp)    :: flux, coeff_rc, gc_f, d_o, d_nb, d_tot, w_blend, s_dot_dhat, d_on_len, cross, rdt, gc_w, d1, d2, d3
     real(rp)    :: sf(3), d_on(3), k_f(3), k_rc(3), Uf(3), Uf_plain(3), Uf_eps(3), gm(3)
     logical     :: incr, skip_no
     real(rp)    :: min_cos_p
@@ -2599,7 +2610,7 @@ contains
     end do
 
     ! Non-periodic boundary faces contribute only to their owner cell (atomics: faces share owners).
-    !$acc parallel loop default(present) private(f_bnd, f_glob, o, q, flux)
+    !$acc parallel loop default(present) private(f_bnd, f_glob, o, q, flux, d1, d2, d3)
     do ib = 1, n_nper
       f_bnd = nper(ib)
       f_glob = n_int + f_bnd
@@ -2614,6 +2625,17 @@ contains
         ! BC_OUTLET: extrapolated boundary velocity (O(h^2) on skewed meshes); BC_INLET/BC_ABL_INLET:
         ! prescribed Dirichlet velocity, so include its flux in the RHS.
         flux = Ub(1, f_bnd)*fsf(1, f_glob) + Ub(2, f_bnd)*fsf(2, f_glob) + Ub(3, f_bnd)*fsf(3, f_glob)
+        ! Outlet flux is set by continuity, so the projection uses the extrapolated cell velocity, not the convective U_b.
+        if (pbc(q) == BC_OUTLET) then
+          if (bc_outlet_conv_soa(q) /= 0) then
+            d1 = fctr(1, f_glob) - cctr(1, o)
+            d2 = fctr(2, f_glob) - cctr(2, o)
+            d3 = fctr(3, f_glob) - cctr(3, o)
+            flux = (U(1, o) + gU(1, 1, o)*d1 + gU(2, 1, o)*d2 + gU(3, 1, o)*d3) * fsf(1, f_glob) &
+                 + (U(2, o) + gU(1, 2, o)*d1 + gU(2, 2, o)*d2 + gU(3, 2, o)*d3) * fsf(2, f_glob) &
+                 + (U(3, o) + gU(1, 3, o)*d1 + gU(2, 3, o)*d2 + gU(3, 3, o)*d3) * fsf(3, f_glob)
+          end if
+        end if
       end select
       ff(f_glob) = flux
       built(f_glob) = .true.
@@ -2775,7 +2797,7 @@ contains
     k_bnd => self%nonortho_k_bnd
     nper => self%nonperiodic_bfaces
     per => self%periodic_bfaces
-    pval => self%patch_p_val
+    pval => self%outlet_pb
     gcs => self%mesh%face_gc_soa
     pgcs => self%mesh%periodic_gc_soa
     fown => self%mesh%face_owner_soa
@@ -2845,7 +2867,7 @@ contains
       sn = abs(d1*fnrm(1, f_glob) + d2*fnrm(2, f_glob) + d3*fnrm(3, f_glob))
       d_orth = max(sn, SMALL)
       coeff = farea(f_glob) / d_orth
-      ff(f_glob) = ff(f_glob) - dt * coeff * (merge(pval(q), 0.0_rp, ptot) - p(o))
+      ff(f_glob) = ff(f_glob) - dt * coeff * (merge(pval(f_bnd), 0.0_rp, ptot) - p(o))
       ! Cross-diffusion correction for Dirichlet p BC (outlet); owner-side gradient only (no off-cell info).
       if (act_bnd(ib)) then
         ff(f_glob) = ff(f_glob) - dt * (gp(1, o)*k_bnd(1, ib) + gp(2, o)*k_bnd(2, ib) + gp(3, o)*k_bnd(3, ib))
@@ -2945,7 +2967,7 @@ contains
     act_bnd => self%nonortho_active_bnd
     k_bnd => self%nonortho_k_bnd
     nper => self%nonperiodic_bfaces
-    pval => self%patch_p_val
+    pval => self%outlet_pb
     Tinv => self%recon_Tinv
     gcs => self%mesh%face_gc_soa
     pgcs => self%mesh%periodic_gc_soa
@@ -3058,7 +3080,7 @@ contains
       sn     = abs(d1*fnrm(1, f_glob) + d2*fnrm(2, f_glob) + d3*fnrm(3, f_glob))
       d_orth = max(sn, SMALL)
       coeff  = farea(f_glob) / d_orth
-      g_f    = coeff * (merge(pval(q), 0.0_rp, ptot) - p(o))
+      g_f    = coeff * (merge(pval(f_bnd), 0.0_rp, ptot) - p(o))
       if (do_cross) then
         if (act_bnd(ib)) g_f = g_f + gp(1, o)*k_bnd(1, ib) + gp(2, o)*k_bnd(2, ib) + gp(3, o)*k_bnd(3, ib)
       end if
@@ -3217,7 +3239,7 @@ contains
     npatch = self%mesh%n_patches
     fown => self%mesh%face_owner_soa;  fpid => self%mesh%face_patch_id_soa;  pbc => self%mesh%patch_bc_id_soa
     fsf => self%mesh%face_sf_soa;  cvol => self%mesh%cell_volume_soa
-    npb => self%nonperiodic_bfaces;  Ub => self%U_bnd;  Uc => self%U;  ppv => self%patch_p_val
+    npb => self%nonperiodic_bfaces;  Ub => self%U_bnd;  Uc => self%U;  ppv => self%outlet_pb
     allocate(bconst(nc))
     !$acc enter data create(bconst) if(dev)
     !$acc parallel loop if(dev) default(present)
@@ -3235,7 +3257,7 @@ contains
         continue
       case (BC_OUTLET)
         ! Dirichlet pressure acts on the outlet cell as the boundary-face force -p_b Sf / V.
-        fl = dt * ppv(q) / cvol(o)
+        fl = dt * ppv(npb(ib)) / cvol(o)
         !$acc atomic update
         Uc(1, o) = Uc(1, o) - fl * fsf(1, f_glob)
         !$acc atomic update
@@ -3277,7 +3299,8 @@ contains
     !$acc      self%grad_U, self%grad_T, self%face_flux, self%w_H_U, self%w_H_T, self%w_H_C, &
     !$acc      self%w_rhs_p, self%w_U0, self%w_T0, self%w_C0, self%w_conv_U, self%w_visc_U, &
     !$acc      self%w_conv_T, self%w_visc_T, self%w_flux_built, self%w_gp, self%w_gp_rc, &
-    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval, self%w_phi_it)
+    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval, self%w_phi_it, &
+    !$acc      self%outlet_pb)
     !$acc update device(self%U_face, self%inv_vol)
     if (self%params%n_scalars > 0) then
       !$acc enter data copyin(self%C, self%C_bnd, self%grad_C, self%w_conv_C, self%w_visc_C, &
@@ -3326,7 +3349,8 @@ contains
     !$acc      self%grad_U, self%grad_T, self%face_flux, self%w_H_U, self%w_H_T, self%w_H_C, &
     !$acc      self%w_rhs_p, self%w_U0, self%w_T0, self%w_C0, self%w_conv_U, self%w_visc_U, &
     !$acc      self%w_conv_T, self%w_visc_T, self%w_flux_built, self%w_gp, self%w_gp_rc, &
-    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval, self%w_phi_it)
+    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval, self%w_phi_it, &
+    !$acc      self%outlet_pb)
     if (self%params%n_scalars > 0) then
       !$acc exit data delete(self%C, self%C_bnd, self%grad_C, self%w_conv_C, self%w_visc_C, &
       !$acc      self%w_Cs, self%w_Cs_bnd)
@@ -4392,6 +4416,7 @@ contains
     if (allocated(self%w_outlet_cell)) deallocate(self%w_outlet_cell)
     if (allocated(self%w_outlet_pval)) deallocate(self%w_outlet_pval)
     if (allocated(self%patch_p_val))   deallocate(self%patch_p_val)
+    if (allocated(self%outlet_pb))     deallocate(self%outlet_pb)
     if (allocated(self%w_Cs))          deallocate(self%w_Cs)
     if (allocated(self%w_Cs_bnd))      deallocate(self%w_Cs_bnd)
     if (allocated(self%w_pack_grad)) deallocate(self%w_pack_grad)

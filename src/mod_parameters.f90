@@ -70,4 +70,9 @@ module mod_parameters
   real(rp), parameter, public :: RK3W_C(3) = &
       [0.0_rp,           8.0_rp/15.0_rp,  2.0_rp/3.0_rp]
 
+  !> Boundary Courant 2 Uc dt/|delta| of the convective outlet above which a warning is logged (RK3W real-axis limit is 2.5).
+  real(rp), parameter, public :: OUTLET_COURANT_WARN = 2.0_rp
+  !> Backflow switch width of the outlet traction as a fraction of the patch mean speed.
+  real(rp), parameter, public :: OUTLET_BACKFLOW_DELTA = 0.05_rp
+
 end module mod_parameters

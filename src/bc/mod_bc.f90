@@ -7,6 +7,7 @@ module mod_bc
   use mod_scalar
   use mod_mesh
   use mod_abl_profiles
+  use mpi_f08
   implicit none
   private
 
@@ -15,6 +16,10 @@ module mod_bc
   public :: apply_pressure_bc
   public :: apply_temperature_bc
   public :: apply_passive_scalar_bc
+  public :: outlet_advance_boundary
+  public :: bc_outlet_conv_soa
+  public :: update_outlet_pressure
+  public :: outlet_dn_u
 
   type, public :: BCConfig
     integer(ip) :: bc_id    = BC_ZEROGRADIENT
@@ -22,6 +27,8 @@ module mod_bc
     real(rp)    :: T_val    = 0.0_rp  ! inlet/fixed temperature
     real(rp)    :: p_val    = 0.0_rp  ! fixed pressure (outlet)
     real(rp)    :: a_wall(3) = 0.0_rp  ! wall acceleration for Kim-Moin p BC
+    logical     :: outlet_conv    = .false.  ! outlet: convective velocity instead of extrapolation
+    real(rp)    :: backflow_beta  = 0.0_rp   ! outlet: backflow traction coefficient, 0 = off
     integer(ip), allocatable :: scalar_bc_mode(:)
     real(rp), allocatable :: scalar_value(:)
     real(rp), allocatable :: scalar_flux(:)
@@ -50,6 +57,11 @@ module mod_bc
   integer(ip), allocatable, save :: bc_scalar_mode_soa(:,:)  ! (n_scalars, n_patches)
   real(rp),    allocatable, save :: bc_scalar_value_soa(:,:), bc_scalar_flux_soa(:,:), &
                                      bc_scalar_flux_omega_soa(:,:), bc_scalar_flux_phase_soa(:,:)
+  ! Convective/backflow outlet: per-patch flags and speeds, and the previous-stage boundary rate G for the RK update.
+  integer(ip), allocatable, save :: bc_outlet_conv_soa(:)
+  real(rp),    allocatable, save :: bc_outlet_beta_soa(:), bc_outlet_uc(:), bc_outlet_uref(:), bc_outlet_gprev(:,:)
+  logical,  save :: bc_outlet_ready = .false.
+  logical,  save :: bc_outlet_active = .false.  ! any outlet patch is convective or has backflow_beta > 0
   integer(ip), save :: bc_soa_n_patches = -1
   integer(ip), save :: bc_soa_n_scalars = 0
 
@@ -58,13 +70,15 @@ module mod_bc
   real(rp), target, save :: bc_dummy_grad_v(3, 3, 1) = 0.0_rp
   real(rp), target, save :: bc_dummy_vec(3, 1) = 0.0_rp
   real(rp), target, save :: bc_dummy_grad_s(3, 1) = 0.0_rp
+  real(rp), target, save :: bc_dummy_vec1(1) = 0.0_rp
 
   ! Device copies mirror the host arrays; contents are pushed once each cache is (re)built.
   !$acc declare create(periodic_nb_cache, bc_U_val_soa, bc_a_wall_soa, bc_T_val_soa, bc_p_val_soa, &
   !$acc      bc_abl_z0_m_soa, bc_abl_z0_h_soa, bc_abl_wind_dir_soa, bc_abl_T_surface_soa, &
   !$acc      bc_scalar_mode_soa, bc_scalar_value_soa, bc_scalar_flux_soa, bc_scalar_flux_omega_soa, &
   !$acc      bc_scalar_flux_phase_soa, &
-  !$acc      bc_dummy_grad_v, bc_dummy_vec, bc_dummy_grad_s)
+  !$acc      bc_dummy_grad_v, bc_dummy_vec, bc_dummy_grad_s, bc_dummy_vec1, &
+  !$acc      bc_outlet_conv_soa, bc_outlet_beta_soa, bc_outlet_uc, bc_outlet_uref, bc_outlet_gprev)
 
 contains
 
@@ -103,6 +117,15 @@ contains
     if (allocated(bc_scalar_mode_soa)) deallocate(bc_scalar_mode_soa, bc_scalar_value_soa, &
       bc_scalar_flux_soa, bc_scalar_flux_omega_soa, bc_scalar_flux_phase_soa)
 
+    if (allocated(bc_outlet_conv_soa)) deallocate(bc_outlet_conv_soa, bc_outlet_beta_soa, &
+      bc_outlet_uc, bc_outlet_uref, bc_outlet_gprev)
+    allocate(bc_outlet_conv_soa(n_patches), bc_outlet_beta_soa(n_patches))
+    allocate(bc_outlet_uc(n_patches), bc_outlet_uref(n_patches), source=0.0_rp)
+    allocate(bc_outlet_gprev(3, max(1_ip, msh%n_bnd_faces)), source=0.0_rp)
+    bc_outlet_ready = .false.
+    bc_outlet_active = any(bc_configs(1:n_patches)%bc_id == BC_OUTLET .and. &
+                           (bc_configs(1:n_patches)%outlet_conv .or. bc_configs(1:n_patches)%backflow_beta > 0.0_rp))
+
     allocate(bc_U_val_soa(3, n_patches), bc_a_wall_soa(3, n_patches))
     allocate(bc_T_val_soa(n_patches), bc_p_val_soa(n_patches))
     allocate(bc_abl_z0_m_soa(n_patches), bc_abl_z0_h_soa(n_patches), bc_abl_u_ref_soa(n_patches), &
@@ -121,6 +144,8 @@ contains
       bc_abl_T_surface_soa(p) = bc_configs(p)%abl_T_surface
       bc_abl_T_ref_soa(p)     = bc_configs(p)%abl_T_ref
       bc_abl_wind_dir_soa(p)  = bc_configs(p)%abl_wind_dir
+      bc_outlet_conv_soa(p)   = merge(1_ip, 0_ip, bc_configs(p)%outlet_conv)
+      bc_outlet_beta_soa(p)   = bc_configs(p)%backflow_beta
     end do
 
     ! build_bc_configs allocates scalar_* uniformly (same length) across every patch, or not at all.
@@ -155,9 +180,10 @@ contains
       end do
     end if
 
+    !$acc update device(bc_outlet_conv_soa, bc_outlet_beta_soa, bc_outlet_uc, bc_outlet_uref, bc_outlet_gprev)
     !$acc update device(bc_U_val_soa, bc_a_wall_soa, bc_T_val_soa, bc_p_val_soa, &
     !$acc      bc_abl_z0_m_soa, bc_abl_z0_h_soa, bc_abl_wind_dir_soa, bc_abl_T_surface_soa, &
-    !$acc      bc_dummy_grad_v, bc_dummy_vec, bc_dummy_grad_s)
+    !$acc      bc_dummy_grad_v, bc_dummy_vec, bc_dummy_grad_s, bc_dummy_vec1)
     if (n_scalars > 0) then
       !$acc update device(bc_scalar_mode_soa, bc_scalar_value_soa, bc_scalar_flux_soa, &
       !$acc      bc_scalar_flux_omega_soa, bc_scalar_flux_phase_soa)
@@ -180,7 +206,7 @@ contains
     integer(ip) :: p, f_bnd, f_global, o, nb, patch_id, bc_id, n_int, n_bnd, n_patches, n_grad, n_u
     real(rp)    :: n1, n2, n3, u1, u2, u3, un, d1, d2, d3, u_mag, wdir, w
     real(rp)    :: u_star(msh%n_patches)
-    logical     :: have_mean, have_grad, have_fluc, filter_periodic, filter_nonperiodic
+    logical     :: have_mean, have_grad, have_fluc, filter_periodic, filter_nonperiodic, conv_ready
     real(rp),    pointer :: gU(:,:,:), fluc(:,:), umean(:,:)
     integer(ip), pointer :: fpid(:), pbc(:), fown(:)
     real(rp),    pointer :: fnrm(:,:), fctr(:,:), cctr(:,:), pgc(:)
@@ -230,6 +256,7 @@ contains
     n_patches = msh%n_patches
     n_grad = size(gU, 3)
     n_u = size(U, 2)
+    conv_ready = bc_outlet_ready
 
     !$acc parallel loop default(present) copyin(u_star, U, gU, fluc, umean) copy(U_bnd) &
     !$acc      private(f_global, patch_id, bc_id, o, nb, n1, n2, n3, u1, u2, u3, un, d1, d2, d3, u_mag, wdir, w)
@@ -273,6 +300,14 @@ contains
           u1 = u1 + gU(1, 1, o)*d1 + gU(2, 1, o)*d2 + gU(3, 1, o)*d3
           u2 = u2 + gU(1, 2, o)*d1 + gU(2, 2, o)*d2 + gU(3, 2, o)*d3
           u3 = u3 + gU(1, 3, o)*d1 + gU(2, 3, o)*d2 + gU(3, 3, o)*d3
+        end if
+        ! A convective outlet face is an RK state advanced by outlet_advance_boundary; only its start-up value is extrapolated.
+        if (bc_id == BC_OUTLET .and. conv_ready) then
+          if (bc_outlet_conv_soa(patch_id) /= 0) then
+            u1 = U_bnd(1, f_bnd)
+            u2 = U_bnd(2, f_bnd)
+            u3 = U_bnd(3, f_bnd)
+          end if
         end if
 
       case (BC_WALL_NOSLIP, BC_WALL_MODEL)
@@ -345,7 +380,7 @@ contains
 
   !> Apply pressure BC: OUTLET Dirichlet, others Neumann with O(h^2) extrapolation if grad_p provided.
   !> OpenACC builds run on the device, like apply_velocity_bc.
-  subroutine apply_pressure_bc(p, p_bnd, bc_configs, msh, periodic_only, grad_p, increment)
+  subroutine apply_pressure_bc(p, p_bnd, bc_configs, msh, periodic_only, grad_p, increment, p_out_bnd)
     real(rp),      intent(inout) :: p(:)  ! (n_cells + n_ghost)
     real(rp),      intent(inout) :: p_bnd(:)  ! (n_bnd_faces)
     type(BCConfig), intent(in)   :: bc_configs(:)
@@ -355,12 +390,14 @@ contains
     !> p holds the pressure increment phi: its Dirichlet outlet value is 0 (the old pressure already
     !> equals p_val there), not p_val. Summing old + increment boundary values would otherwise give 2 p_val.
     logical, optional, intent(in) :: increment
+    !> Per-face outlet pressure (backflow traction); absent means the patch p_val.
+    real(rp), optional, intent(in), target :: p_out_bnd(:)
 
     integer(ip) :: f_bnd, f_global, o, nb, patch_id, bc_id, n_int, n_bnd, n_patches, n_grad, n_p
     real(rp) :: outlet_scale
     real(rp) :: an, d_ortho, d_cf(3), n_hat(3)
-    logical :: have_grad, filter_periodic, filter_nonperiodic
-    real(rp),    pointer :: gp(:,:)
+    logical :: have_grad, have_pob, filter_periodic, filter_nonperiodic
+    real(rp),    pointer :: gp(:,:), pob(:)
     integer(ip), pointer :: fpid(:), pbc(:), fown(:)
     real(rp),    pointer :: fnrm(:,:), fctr(:,:), cctr(:,:), pgc(:)
 
@@ -368,6 +405,9 @@ contains
     call ensure_bc_config_soa(bc_configs, msh)
 
     have_grad = present(grad_p)
+    have_pob = present(p_out_bnd)
+    pob => bc_dummy_vec1
+    if (have_pob) pob => p_out_bnd
     outlet_scale = 1.0_rp
     if (present(increment)) then
       if (increment) outlet_scale = 0.0_rp
@@ -397,7 +437,7 @@ contains
     n_grad = size(gp, 2)
     n_p = size(p)
 
-    !$acc parallel loop default(present) copyin(p, gp) copy(p_bnd) &
+    !$acc parallel loop default(present) copyin(p, gp, pob) copy(p_bnd) &
     !$acc      private(f_global, patch_id, bc_id, o, nb, an, d_ortho, d_cf, n_hat)
     do f_bnd = 1, n_bnd
       f_global = n_int + f_bnd
@@ -414,7 +454,11 @@ contains
 
       select case (bc_id)
       case (BC_OUTLET)
-        p_bnd(f_bnd) = outlet_scale * bc_p_val_soa(patch_id)  ! fixed p_val (0 for an increment)
+        if (have_pob) then
+          p_bnd(f_bnd) = outlet_scale * pob(f_bnd)  ! per-face value (0 for an increment)
+        else
+          p_bnd(f_bnd) = outlet_scale * bc_p_val_soa(patch_id)  ! fixed p_val (0 for an increment)
+        end if
       case (BC_PERIODIC)
         nb = periodic_nb_cache(f_bnd)
         if (nb >= 1 .and. nb <= n_p) then
@@ -632,6 +676,146 @@ contains
       end select
     end do
   end subroutine apply_passive_scalar_bc
+
+  !> Stage start: patch speed Uc, then advance convective-outlet face velocities one RK3W stage.
+  subroutine outlet_advance_boundary(U, U_bnd, grad_U, bc_configs, msh, dt, a_k, b_k, courant_max)
+    real(rp),       intent(in)    :: U(:,:)  ! (3, n_cells + n_ghost)
+    real(rp),       intent(inout) :: U_bnd(:,:)  ! (3, n_bnd_faces)
+    real(rp),       intent(in)    :: grad_U(:,:,:)  ! (3, 3, n_cells + n_ghost)
+    type(BCConfig), intent(in)    :: bc_configs(:)
+    type(Mesh),     intent(in), target :: msh
+    real(rp),       intent(in)    :: dt, a_k, b_k  ! step and Wray stage weights
+    real(rp),       intent(out)   :: courant_max  ! rank-local max of 2 Uc dt / |delta| over convective faces
+
+    integer(ip) :: p, f_bnd, f_global, o, k, patch_id, n_int, n_bnd, n_patches, ierr
+    real(rp)    :: un, u2, area, len_d, nd, uc, c_loc, g, gdd, gt, cmax
+    real(rp)    :: dl(3), nrm(3), tn(3), stat(3, msh%n_patches)
+    integer(ip), pointer :: fpid(:), pbc(:), fown(:)
+    real(rp),    pointer :: fnrm(:,:), farea(:), fctr(:,:), cctr(:,:)
+
+    courant_max = 0.0_rp
+    call ensure_bc_config_soa(bc_configs, msh)
+    if (.not. bc_outlet_active) return
+    fpid => msh%face_patch_id_soa
+    pbc  => msh%patch_bc_id_soa
+    fown => msh%face_owner_soa
+    fnrm => msh%face_normal_soa
+    farea => msh%face_area_soa
+    fctr => msh%face_centre_soa
+    cctr => msh%cell_centroid_soa
+    n_int = msh%n_int_faces
+    n_bnd = msh%n_bnd_faces
+    n_patches = msh%n_patches
+
+    stat = 0.0_rp
+    !$acc parallel loop default(present) copyin(U) copy(stat) private(f_global, patch_id, o, un, u2, area)
+    do f_bnd = 1, n_bnd
+      f_global = n_int + f_bnd
+      patch_id = fpid(f_global)
+      if (patch_id < 1 .or. patch_id > n_patches) cycle
+      if (pbc(patch_id) /= BC_OUTLET) cycle
+      if (bc_outlet_conv_soa(patch_id) == 0 .and. bc_outlet_beta_soa(patch_id) <= 0.0_rp) cycle
+      o = fown(f_global)
+      area = farea(f_global)
+      un = U(1, o)*fnrm(1, f_global) + U(2, o)*fnrm(2, f_global) + U(3, o)*fnrm(3, f_global)
+      u2 = sqrt(U(1, o)**2 + U(2, o)**2 + U(3, o)**2)
+      !$acc atomic update
+      stat(1, patch_id) = stat(1, patch_id) + area*un
+      !$acc atomic update
+      stat(2, patch_id) = stat(2, patch_id) + area*u2
+      !$acc atomic update
+      stat(3, patch_id) = stat(3, patch_id) + area
+    end do
+    call MPI_Allreduce(MPI_IN_PLACE, stat, 3*n_patches, MPI_DOUBLE_PRECISION, MPI_SUM, msh%comm, ierr)
+
+    do p = 1, n_patches
+      if (stat(3, p) <= 0.0_rp) cycle
+      bc_outlet_uref(p) = stat(2, p) / stat(3, p)
+      bc_outlet_uc(p) = max(stat(1, p) / stat(3, p), 0.0_rp)
+    end do
+    !$acc update device(bc_outlet_uc, bc_outlet_uref)
+
+    cmax = 0.0_rp
+    !$acc parallel loop default(present) copyin(U, grad_U) copy(U_bnd) reduction(max:cmax) &
+    !$acc      private(f_global, patch_id, o, k, len_d, nd, uc, c_loc, g, gdd, gt, dl, nrm, tn)
+    do f_bnd = 1, n_bnd
+      f_global = n_int + f_bnd
+      patch_id = fpid(f_global)
+      if (patch_id < 1 .or. patch_id > n_patches) cycle
+      if (pbc(patch_id) /= BC_OUTLET) cycle
+      if (bc_outlet_conv_soa(patch_id) == 0) cycle
+      o = fown(f_global)
+      dl(1) = fctr(1, f_global) - cctr(1, o)
+      dl(2) = fctr(2, f_global) - cctr(2, o)
+      dl(3) = fctr(3, f_global) - cctr(3, o)
+      len_d = max(sqrt(dl(1)**2 + dl(2)**2 + dl(3)**2), SMALL)
+      dl = dl / len_d
+      nrm(1) = fnrm(1, f_global);  nrm(2) = fnrm(2, f_global);  nrm(3) = fnrm(3, f_global)
+      nd = nrm(1)*dl(1) + nrm(2)*dl(2) + nrm(3)*dl(3)
+      tn = nrm - nd*dl
+      uc = bc_outlet_uc(patch_id)
+      c_loc = 2.0_rp * uc * dt / len_d
+      cmax = max(cmax, c_loc)
+      do k = 1, 3
+        gdd = grad_U(1, k, o)*dl(1) + grad_U(2, k, o)*dl(2) + grad_U(3, k, o)*dl(3)
+        gt  = grad_U(1, k, o)*tn(1) + grad_U(2, k, o)*tn(2) + grad_U(3, k, o)*tn(3)
+        g = -uc * outlet_dn_u(U_bnd(k, f_bnd), U(k, o), gdd, gt, len_d, nd)
+        U_bnd(k, f_bnd) = U_bnd(k, f_bnd) + dt * (a_k*g + b_k*bc_outlet_gprev(k, f_bnd))
+        bc_outlet_gprev(k, f_bnd) = g
+      end do
+    end do
+    courant_max = cmax
+    bc_outlet_ready = .true.
+  end subroutine outlet_advance_boundary
+
+  !> Face-normal derivative n.grad u at an outlet face; Taylor along the owner-to-face offset removes the curvature term.
+  pure function outlet_dn_u(u_b, u_o, gdd, gt, len_d, nd) result(dn)
+    !$acc routine seq
+    real(rp), intent(in) :: u_b, u_o  ! face and owner values
+    real(rp), intent(in) :: gdd, gt  ! owner gradient along the offset and along n - (n.dhat) dhat
+    real(rp), intent(in) :: len_d, nd  ! offset length and n.dhat
+    real(rp) :: dn
+
+    dn = nd * (2.0_rp * (u_b - u_o) / len_d - gdd) + gt
+  end function outlet_dn_u
+
+  !> Backflow-traction outlet pressure p_b = p_val - beta |u|^2 S0 / 2 from the current cell velocity.
+  subroutine update_outlet_pressure(U, p_out_bnd, bc_configs, msh)
+    real(rp),       intent(in)    :: U(:,:)  ! (3, n_cells + n_ghost)
+    real(rp),       intent(inout) :: p_out_bnd(:)  ! (n_bnd_faces)
+    type(BCConfig), intent(in)    :: bc_configs(:)
+    type(Mesh),     intent(in), target :: msh
+
+    integer(ip) :: f_bnd, f_global, o, patch_id, n_int, n_bnd, n_patches
+    real(rp)    :: un, u2, s0, ur
+    integer(ip), pointer :: fpid(:), pbc(:), fown(:)
+    real(rp),    pointer :: fnrm(:,:)
+
+    call ensure_bc_config_soa(bc_configs, msh)
+    if (.not. bc_outlet_active) return
+    fpid => msh%face_patch_id_soa
+    pbc  => msh%patch_bc_id_soa
+    fown => msh%face_owner_soa
+    fnrm => msh%face_normal_soa
+    n_int = msh%n_int_faces
+    n_bnd = msh%n_bnd_faces
+    n_patches = msh%n_patches
+
+    !$acc parallel loop default(present) copyin(U) copy(p_out_bnd) private(f_global, patch_id, o, un, u2, s0, ur)
+    do f_bnd = 1, n_bnd
+      f_global = n_int + f_bnd
+      patch_id = fpid(f_global)
+      if (patch_id < 1 .or. patch_id > n_patches) cycle
+      if (pbc(patch_id) /= BC_OUTLET) cycle
+      if (bc_outlet_beta_soa(patch_id) <= 0.0_rp) cycle
+      o = fown(f_global)
+      un = U(1, o)*fnrm(1, f_global) + U(2, o)*fnrm(2, f_global) + U(3, o)*fnrm(3, f_global)
+      u2 = U(1, o)**2 + U(2, o)**2 + U(3, o)**2
+      ur = max(bc_outlet_uref(patch_id), SMALL)
+      s0 = 0.5_rp * (1.0_rp - tanh(un / (ur * OUTLET_BACKFLOW_DELTA)))
+      p_out_bnd(f_bnd) = bc_p_val_soa(patch_id) - bc_outlet_beta_soa(patch_id) * 0.5_rp * u2 * s0
+    end do
+  end subroutine update_outlet_pressure
 
   ! Resolve periodic partner owner cell robustly for BC sampling.
   ! Prefer periodic_neighbor in MPI runs; fall back to same-rank periodic_pair.
