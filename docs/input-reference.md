@@ -278,6 +278,8 @@ One entry per boundary patch; names must match the patch names in the mesh. Arra
 | `patch_U(i,1:3)` | `0.0` m/s | Velocity for `velocity`/`inlet`/`movingWall` patches. |
 | `patch_T(i)` | `T_ref` K | Temperature for `fixedTemperature` patches. |
 | `patch_p(i)` | `0.0` | Pressure for `outlet`/`fixedPressure` patches. |
+| `patch_outlet_mode(i)` | `'extrapolate'` | Outlet velocity face value: `'extrapolate'` (linear extrapolation of the cell velocity) or `'convective'` (advective condition for the face velocity, an RK3W state, see [Theory](theory.md#convective-outlet-and-backflow-traction)). Use `'convective'` with turbulent inflow. |
+| `patch_backflow_beta(i)` | `0.0`, or `1.0` if `patch_outlet_mode(i) = 'convective'` | Backflow traction coefficient β of an outlet: the face pressure is lowered by `β·½|u|²` where the flow re-enters. `β ≥ 1` bounds the kinetic energy entering through the outlet; `0` switches it off. A negative value selects the default. |
 | `patch_z0_m(i)`, `patch_z0_h(i)` | `0.0` m | Per-patch roughness for `wallModel` patches under MOST. `0` inherits `&dopamine_abl`. A negative `patch_z0_h` derives it from `z0_m` with ln(z0_m/z0_h) = 2. |
 | `patch_scalar_mode(i,s)` | `'zeroGradient'` | Passive-scalar BC: `'dirichlet'`, `'neumann'`, or `'zeroGradient'`. |
 | `patch_scalar_value(i,s)` | `0.0` | Value for `'dirichlet'`. |

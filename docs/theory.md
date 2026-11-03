@@ -453,6 +453,33 @@ effective $$(u_\parallel, y_w)$$ pair presented to the log-law inversion,
 especially on unstructured anisotropic cells. A single well-defined sample
 point is more physically interpretable and reproducible.
 
+### Convective outlet and backflow traction
+
+A Dirichlet-pressure outlet with an extrapolated velocity has no mechanism that bounds the kinetic energy entering when an eddy reverses the flow at the boundary. With $$\mathbf{u}_b$$ the face velocity, $$p_b$$ the face pressure and $$\mathbf{n}$$ the outward normal, the kinetic energy balance of the domain contains the boundary term
+$$-\oint (\tfrac12|\mathbf{u}|^2 + p_b)\,(\mathbf{u}\cdot\mathbf{n})\,dA$$,
+which is positive wherever $$\mathbf{u}\cdot\mathbf{n}<0$$ unless $$p_b \le -\tfrac12|\mathbf{u}|^2$$ there. A fixed $$p_b$$ cannot satisfy this, and the first backflow event grows without bound (observed: `stable dt collapsed` within about 0.1 s of the first reversed face, with `ablInlet` + SEM at 50 to 60 percent intensity). Two independent pieces fix it, selected per patch.
+
+**Backflow traction** (`patch_backflow_beta`, $$\beta$$). The directional do-nothing condition of Bazilevs et al. (2009) and Esmaily-Moghadam et al. (2011) sets
+$$p_b = p_{val} - \beta\,\tfrac12|\mathbf{u}|^2\,S_0,\qquad S_0 = \tfrac12\Bigl(1-\tanh\frac{\mathbf{u}\cdot\mathbf{n}}{\delta\,\bar U}\Bigr),\quad \delta = 0.05,$$
+with $$\bar U$$ the area-mean speed of the patch and $$\mathbf{u}$$ the owner-cell velocity. $$S_0\to 1$$ for inflow and $$\to 0$$ for outflow, so forward flow sees exactly $$p_{val}$$. For $$\beta\ge 1$$ the bracket above is non-positive on the backflow part, so the boundary term cannot add energy; the smooth switch leaves a residual of order $$\delta$$ near $$\mathbf{u}\cdot\mathbf{n}=0$$. $$p_b$$ is evaluated once per Runge-Kutta stage from the stage velocity. Every stage pre-corrects with the total-pressure gradient (outlet face value $$p_b$$) and then solves for an increment with a homogeneous Dirichlet value, so a $$p_b$$ that changes between stages needs no change to the Poisson matrix or right-hand side. In forward flow $$S_0\sim e^{-40}$$, so the traction has no formal order there and does not enter the order statements below.
+
+**Convective velocity** (`patch_outlet_mode = 'convective'`). The face velocity $$\mathbf{u}_b$$ is a state of the Runge-Kutta system, with the rate
+$$\frac{d\mathbf{u}_b}{dt}=-U_c\,\partial_n\mathbf{u}\big|_b ,$$
+$$U_c$$ the area-weighted patch mean of $$\mathbf{u}_o\cdot\mathbf{n}$$ clipped at zero (no information is pulled in from outside; a stagnant patch keeps its value). Taylor expansion along the owner-to-face offset $$\boldsymbol\delta$$ ($$|\boldsymbol\delta|=d$$, $$\hat{\boldsymbol\delta}=\boldsymbol\delta/d$$) eliminates the curvature term:
+$$\partial_{\delta}\mathbf{u}\big|_b = \frac{2(\mathbf{u}_b-\mathbf{u}_o)}{d}-\hat{\boldsymbol\delta}\cdot\nabla\mathbf{u}_o + O(d^2),\qquad
+\partial_n\mathbf{u}\big|_b=(\mathbf{n}\cdot\hat{\boldsymbol\delta})\,\partial_\delta\mathbf{u}\big|_b+(\mathbf{n}-(\mathbf{n}\cdot\hat{\boldsymbol\delta})\hat{\boldsymbol\delta})\cdot\nabla\mathbf{u}_o .$$
+This is second order when the offset is normal to the face; the tangential part uses the owner gradient, so an oblique offset leaves an error of order $$d\,\sin\theta$$ (the unit test `test_outlet_bc` measures 1.98 for a normal offset and 1.10 for an oblique one, against 1.03 for the one-sided difference $$(\mathbf{u}_b-\mathbf{u}_o)/d$$).
+
+$$\mathbf{u}_b$$ is advanced with the same Wray weights as the cells, $$\mathbf{u}_b\leftarrow\mathbf{u}_b+\Delta t(\alpha_k G^k+\beta_k G^{k-1})$$, with $$G^k$$ evaluated from the stage-start velocity and gradient exactly as the explicit cell right-hand side. No boundary value is imposed at a stage time. This is the remedy for the order reduction of explicit Runge-Kutta methods with time-dependent boundary data (Abarbanel and Gottlieb 1994; Pathria 1997; Alonso-Mallo 2002; Rosales et al. 2024), caused by a stage order of one: the boundary follows from the Runge-Kutta solution operator, as an interior point does. The unit test integrates the boundary ODE with the exact travelling-wave owner data and measures third order in $$\Delta t$$ (3.09).
+
+The explicit boundary equation has the eigenvalue $$-2U_c/d$$ (before the gradient feedback), so the stage limit of RK3W on the negative real axis, about 2.5, bounds $$2U_c\Delta t/d$$. The solver logs a warning (`[outlet]`) if this boundary Courant number exceeds 2.0; with the default `cfl_max = 0.4` it is not reached in normal use. On a restart the face velocity is rebuilt by the linear extrapolation of the cell velocity.
+
+**What this does and does not buy.** The solver's own temporal order at fixed mesh is one (see the temporal-accuracy discussion), so the outlet is built not to lower it: on a smooth transient leaving the domain the outlet band converges at the same observed order as the interior (0.9 against 0.8 to 0.9 for the extrapolated outlet). A convective condition is also a model, exact only for a frozen, uniformly convected field, and a truncation test against a domain twice as long shows no measurable gain over extrapolation in the velocity near the outlet on that transient (rms difference 4.2e-3 against 4.2e-3 in the last cell layer). The higher order removes the discretisation error of the condition, not its modelling error.
+
+**The projection does not see $$\mathbf{u}_b$$.** With a Dirichlet pressure the outlet flux is an output of continuity. If the lagging convective value entered the pressure right-hand side, the pressure would have to absorb the mismatch, $$p\sim\Delta u\,d_\perp/\Delta t$$, and the velocity of the outlet cell would be driven to $$\mathbf{u}_b$$ (this diverged within about 100 steps in a quiet flow). The predicted outlet flux is therefore the same linearly extrapolated cell velocity as for `'extrapolate'`, and $$\mathbf{u}_b$$ is used only by advection, diffusion and the gradients.
+
+**Both pieces are needed.** The convective condition fixes the boundary state, the traction controls the energy flux; with $$\beta=0$$ the convective outlet alone was still growing at 77 percent intensity (`Umax` of order 100 against 4 with the traction). A convective patch therefore defaults to $$\beta=1$$. Limits: $$\delta$$ is fixed, $$\beta<1$$ gives up the energy bound, and a mean reversal of the whole patch (the `Uc` clip at zero) is outside what the condition is designed for.
+
 ## Boundary Conditions and Periodicity Nuances
 
 - Periodic flux reconstruction includes anti-symmetric paired-face reuse where

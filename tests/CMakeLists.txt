@@ -5,7 +5,7 @@ find_program(DOPAMINE_GMSH gmsh)
 set(_regression_dir "${CMAKE_CURRENT_SOURCE_DIR}/regression")
 set(_regression_work "${CMAKE_BINARY_DIR}/regression")
 
-foreach(_case tgv tgv_skew tgv_skew_chk tgv_skew_exact default_skew hydro_exact duct_exact channel rb duct dynsmag graded pdrop hydro hydrowall inflow inflow_jarrin)
+foreach(_case tgv tgv_skew tgv_skew_chk tgv_skew_exact default_skew hydro_exact duct_exact channel channel_most rb duct dynsmag graded pdrop hydro hydrowall inflow inflow_jarrin inflow_backflow)
   foreach(_np 1 2)
     add_test(NAME regression_${_case}_np${_np}
              COMMAND "${_regression_dir}/check_case.sh" ${_case} ${_np} "${_regression_work}")
@@ -87,6 +87,13 @@ target_link_options(test_nonortho_limiter PRIVATE -Wl,--no-as-needed)
 target_link_libraries(test_nonortho_limiter PRIVATE dopamine_lib MPI::MPI_Fortran MPI::MPI_C dl)
 add_test(NAME unit_nonortho_limiter COMMAND test_nonortho_limiter)
 set_tests_properties(unit_nonortho_limiter PROPERTIES LABELS unit TIMEOUT 60)
+
+# Convective outlet: order in space of the face derivative and in time of its RK3W integration (serial, no mesh).
+add_executable(test_outlet_bc unit/test_outlet_bc.f90)
+target_link_options(test_outlet_bc PRIVATE -Wl,--no-as-needed)
+target_link_libraries(test_outlet_bc PRIVATE dopamine_lib MPI::MPI_Fortran MPI::MPI_C dl)
+add_test(NAME unit_outlet_bc COMMAND test_outlet_bc)
+set_tests_properties(unit_outlet_bc PROPERTIES LABELS unit TIMEOUT 60)
 
 # Exact cell projection on a skewed box (mesh from mk_box_mesh.py, no gmsh needed).
 add_executable(test_cell_projection unit/test_cell_projection.f90)

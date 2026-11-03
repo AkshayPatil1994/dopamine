@@ -458,6 +458,8 @@ contains
     real(rp)                :: patch_U(MAX_BC_PATCHES, 3)
     real(rp)                :: patch_T(MAX_BC_PATCHES)
     real(rp)                :: patch_p(MAX_BC_PATCHES)
+    character(16)           :: patch_outlet_mode(MAX_BC_PATCHES)
+    real(rp)                :: patch_backflow_beta(MAX_BC_PATCHES)
     real(rp)                :: patch_z0_m(MAX_BC_PATCHES)
     real(rp)                :: patch_z0_h(MAX_BC_PATCHES)
     real(rp)                :: patch_scalar_value(MAX_BC_PATCHES, MAX_PASSIVE_SCALARS)
@@ -467,7 +469,7 @@ contains
     character(16)           :: patch_scalar_mode(MAX_BC_PATCHES, MAX_PASSIVE_SCALARS)
 
     namelist /dopamine_bc/ n_patches, patch_name, patch_type, &
-               patch_U, patch_T, patch_p, patch_z0_m, patch_z0_h, &
+               patch_U, patch_T, patch_p, patch_outlet_mode, patch_backflow_beta, patch_z0_m, patch_z0_h, &
                patch_scalar_value, patch_scalar_flux, &
                patch_scalar_flux_omega, patch_scalar_flux_phase, patch_scalar_mode
 
@@ -476,6 +478,9 @@ contains
     patch_U    = 0.0_rp
     patch_T    = config%params%T_ref
     patch_p    = 0.0_rp
+    patch_outlet_mode   = 'extrapolate'
+    ! Negative means unset: 1 for a convective outlet (energy-bounded), 0 otherwise.
+    patch_backflow_beta = -1.0_rp
     ! Zero means "inherit the global &dopamine_abl roughness".
     patch_z0_m = 0.0_rp
     patch_z0_h = 0.0_rp
@@ -502,6 +507,18 @@ contains
       config%bc_configs(p)%U_val   = patch_U(p, :)
       config%bc_configs(p)%T_val   = patch_T(p)
       config%bc_configs(p)%p_val   = patch_p(p)
+      select case (trim(adjustl(lower_case(patch_outlet_mode(p)))))
+      case ('extrapolate')
+        config%bc_configs(p)%outlet_conv = .false.
+      case ('convective')
+        config%bc_configs(p)%outlet_conv = .true.
+      case default
+        write(*, '(A,A,A)') 'ERROR: unrecognised patch_outlet_mode ''', trim(patch_outlet_mode(p)), ''''
+        error stop 'read_bc: unknown patch_outlet_mode'
+      end select
+      config%bc_configs(p)%backflow_beta = patch_backflow_beta(p)
+      if (patch_backflow_beta(p) < 0.0_rp) &
+        config%bc_configs(p)%backflow_beta = merge(1.0_rp, 0.0_rp, config%bc_configs(p)%outlet_conv)
       ! &dopamine_abl is parsed before &dopamine_bc, so the ABL inlet sees the user's values.
       config%bc_configs(p)%abl_u_ref     = config%abl_u_ref
       config%bc_configs(p)%abl_z_ref     = config%abl_z_ref

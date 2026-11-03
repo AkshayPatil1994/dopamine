@@ -9,7 +9,7 @@ module mod_warn_log
 
   public :: warn_log_init, warn_log_bump, warn_log_flush, warn_log_message, warn_log_finalize
   public :: warn_log_total, warn_log_filename, warn_log_set_step_start
-  public :: WARN_WALL_UTAU_CAP, WARN_TVD_FALLBACK, WARN_CFL_CLAMP, WARN_PSOLVER_RESIDUAL
+  public :: WARN_WALL_UTAU_CAP, WARN_TVD_FALLBACK, WARN_CFL_CLAMP, WARN_PSOLVER_RESIDUAL, WARN_OUTLET_COURANT
 
   integer(ip), parameter, public :: NWARN = 8
 
@@ -17,10 +17,11 @@ module mod_warn_log
   integer(ip), parameter :: WARN_TVD_FALLBACK     = 2_ip
   integer(ip), parameter :: WARN_CFL_CLAMP        = 3_ip
   integer(ip), parameter :: WARN_PSOLVER_RESIDUAL = 4_ip
+  integer(ip), parameter :: WARN_OUTLET_COURANT   = 5_ip
 
   character(*), parameter :: TAG(NWARN) = [ character(12) :: &
     '[wall-model]', '[advection] ', '[cfl]       ', '[psolver]   ', &
-    '[spare5]    ', '[spare6]    ', '[spare7]    ', '[spare8]    ' ]
+    '[outlet]    ', '[spare6]    ', '[spare7]    ', '[spare8]    ' ]
 
   integer(ip), save :: cnt(NWARN) = 0_ip           ! rank-local events since last flush
   real(rp),    save :: aux(NWARN) = 0.0_rp         ! rank-local worst-case magnitude since last flush
@@ -189,6 +190,9 @@ contains
     case (WARN_PSOLVER_RESIDUAL)
       write(msg, '(A,I0,A,I0,A,I0,A,ES11.4)') 'pressure residual above atol floor on ', n, &
         ' solves (steps ', step_lo, '-', step, '); worst ||r||_2 = ', worst
+    case (WARN_OUTLET_COURANT)
+      write(msg, '(A,I0,A,I0,A,I0,A,F0.3)') 'convective outlet boundary Courant above the RK3W limit margin on ', n, &
+        ' stages (', step_lo, '-', step, '); worst 2 Uc dt/|delta| = ', worst
     case default
       write(msg, '(A,I0,A)') 'unnamed warning slot: ', n, ' events'
     end select

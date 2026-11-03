@@ -31,6 +31,7 @@ program dopamine_main
   ! -- MPI
   integer(ip)    :: rank, nranks, ierr
   real(rp)       :: t_target
+  real(rp)       :: t_setup(0:4)
 
   ! -- Objects
   type(Mesh)           :: mesh_global, mesh_local
@@ -59,6 +60,7 @@ program dopamine_main
 
   ! Initialise MPI
   call MPI_Init(ierr)
+  t_setup(0) = MPI_Wtime()
   call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
   call MPI_Comm_size(MPI_COMM_WORLD, nranks, ierr)
 
@@ -186,6 +188,8 @@ program dopamine_main
     write(*, '(A,I0,A,I0,A)') ' Local mesh (rank 0): ', mesh_local%n_cells, &
                                 ' cells, ', mesh_local%n_ghost, ' ghost cells'
 
+  t_setup(1) = MPI_Wtime()
+
   ! Map input BC configs to mesh patches
   if (rank == 0) write(*, '(A)') ' Building BC configs...'
   call build_bc_configs(config, mesh_local, bc_configs)
@@ -281,9 +285,12 @@ program dopamine_main
     end if
   end block
 
+  t_setup(2) = MPI_Wtime()
+
   ! Initialise solver
   if (rank == 0) write(*, '(A)') ' Initializing solver...'
   call solver%init(mesh_local, config%params, bc_configs, config%abl_config, config%inflow)
+  t_setup(3) = MPI_Wtime()
   if (rank == 0) write(*, '(A)') ' Solver initialization complete.'
 
   ! Handle restart or initial conditions
@@ -361,7 +368,14 @@ program dopamine_main
   ! From here on the solver fields live on the device (OpenACC builds); the host copy is
   ! refreshed with sync_host only when output, statistics, sampling or checkpoints need it.
   call solver%to_device(gpu_aware_mpi=device_mpi_gpu_aware)
+  t_setup(4) = MPI_Wtime()
 
+  if (rank == 0) then
+    write(*, '(A,F9.3,A)') ' Setup time: mesh read/build   ', t_setup(1) - t_setup(0), ' s'
+    write(*, '(A,F9.3,A)') ' Setup time: LS/colour/SoA     ', t_setup(2) - t_setup(1), ' s'
+    write(*, '(A,F9.3,A)') ' Setup time: solver init       ', t_setup(3) - t_setup(2), ' s'
+    write(*, '(A,F9.3,A)') ' Setup time: IC/restart/device ', t_setup(4) - t_setup(3), ' s'
+  end if
   if (rank == 0) write(*, '(A)') ' Starting time loop...'
   call stats_mark_start(stats)
   call MPI_Barrier(MPI_COMM_WORLD, ierr)  ! Synchronize all ranks before time loop

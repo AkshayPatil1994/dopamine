@@ -119,11 +119,13 @@ non-orthogonal caches) is staged by `solver_init`. `solver%to_device` then moves
 every field and work array to the device once, before the time loop, and the
 device copy stays authoritative: `solver%sync_host` refreshes the host copy
 only on steps that write output, statistics, samples or checkpoints. Still on
-the host, with narrow updates around them: the MOST wall model, scalar
-sources, nudging, SEM inflow, and the PETSc interface when the backend cannot
-take device pointers. Two options are host-only and fall back with a warning:
-`cell_projection = 'EXACT'` (the default) runs as `'LS'`; set `cell_projection = 'LS'` explicitly in
-OpenACC inputs to avoid the warning. See [Installation: OpenACC build](installation.md#openacc-nvfortran-build)
+the host, with narrow updates around them: scalar sources, nudging, SEM
+inflow, and the PETSc interface when the backend cannot take device pointers.
+The MOST wall model and `cell_projection = 'EXACT'` run on the device; `'EXACT'`
+is single-rank on the GPU and falls back to `'LS'` with a warning on more ranks.
+Its PCG stops at a loose tolerance, so GPU results differ from the CPU at about
+1e-5 (use `REGRESSION_RTOL=1e-4` for the `*_exact` regression cases). A
+single-GPU timing run is `tests/bench/run_bench.sh <N> <workdir>`. See [Installation: OpenACC build](installation.md#openacc-nvfortran-build)
 for the build recipe (`build-acc26/`).
 
 ```bash
@@ -230,7 +232,7 @@ accepted names (aliases separated by `/`) are:
 | `patch_type` | Treatment |
 |---|---|
 | `velocity` / `inlet` / `fixedValue` | Dirichlet velocity inlet |
-| `outlet` / `fixedPressure` / `outflow` | Outflow with pressure anchoring |
+| `outlet` / `fixedPressure` / `outflow` | Pressure outlet; `patch_outlet_mode = 'convective'` adds the advective velocity condition and backflow traction (recommended behind an `ablInlet`) |
 | `zeroGradient` | Homogeneous Neumann on all fields |
 | `noSlip` | Stationary no-slip wall |
 | `movingWall` / `wallVelocity` | No-slip wall with prescribed wall velocity |

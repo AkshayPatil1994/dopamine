@@ -351,12 +351,12 @@ contains
       grad_phi(2, c) = 0.0_rp
       grad_phi(3, c) = 0.0_rp
     end do
-    !$acc parallel loop gang vector_length(32) private(gx, gy, gz)
+    !$acc parallel loop private(gx, gy, gz, k, nb, f, bnd_idx, dphi, phi_nb)
     do c = 1, nc
       gx = 0.0_rp
       gy = 0.0_rp
       gz = 0.0_rp
-      !$acc loop vector reduction(+:gx,gy,gz) private(k, nb, f, bnd_idx, dphi, phi_nb)
+      !$acc loop seq
       do k = stencil_offset(c), stencil_offset(c+1) - 1
         nb = stencil(k)
         if (nb < 1) then
@@ -471,13 +471,12 @@ contains
         grad_U(3, j, c) = 0.0_rp
       end do
     end do
-    !$acc parallel loop gang vector_length(32) private(g11,g21,g31,g12,g22,g32,g13,g23,g33)
+    !$acc parallel loop private(g11,g21,g31,g12,g22,g32,g13,g23,g33,k,nb,f,bnd_idx,dU,U_nb)
     do c = 1, nc
       g11 = 0.0_rp; g21 = 0.0_rp; g31 = 0.0_rp
       g12 = 0.0_rp; g22 = 0.0_rp; g32 = 0.0_rp
       g13 = 0.0_rp; g23 = 0.0_rp; g33 = 0.0_rp
-      !$acc loop vector reduction(+:g11,g21,g31,g12,g22,g32,g13,g23,g33) &
-      !$acc      private(k, nb, f, bnd_idx, dU, U_nb)
+      !$acc loop seq
       do k = stencil_offset(c), stencil_offset(c+1) - 1
         nb = stencil(k)
         if (nb < 1) then

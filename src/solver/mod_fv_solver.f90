@@ -195,6 +195,7 @@ module mod_fv_solver
     logical,  allocatable :: w_outlet_cell(:)   ! (nc) precomputed outlet cell mask
     real(rp), allocatable :: w_outlet_pval(:)   ! (nc) reference pressure per outlet cell
     real(rp), allocatable :: patch_p_val(:)     ! (n_patches) bc_configs(:)%p_val, flat for device kernels
+    real(rp), allocatable :: outlet_pb(:)       ! (n_bnd_faces) outlet face pressure: p_val less the backflow traction
     !> Static projection operator arrays (psolver indices/coefficients, non-orthogonal caches,
     !> recon_Tinv, boundary-face lists) have been staged on the device (stage_static_on_device).
     logical :: static_on_device = .false.
@@ -278,7 +279,7 @@ contains
     procedure :: divergence_metrics => solver_divergence_metrics
     procedure :: destroy      => solver_destroy
     procedure :: compute_dt   => solver_compute_dt
-    procedure :: compute_cfl_rate => solver_compute_cfl_rate
+    procedure :: cfl_rates    => solver_cfl_rates
     procedure :: state_is_finite => solver_state_is_finite
     procedure :: to_device    => solver_to_device
     procedure :: sync_host    => solver_sync_host
@@ -395,6 +396,12 @@ contains
     allocate(self%patch_p_val(max(1_ip, msh%n_patches)), source=0.0_rp)
     do q_out = 1, msh%n_patches
       self%patch_p_val(q_out) = bc_configs(q_out)%p_val
+    end do
+    allocate(self%outlet_pb(max(1_ip, msh%n_bnd_faces)), source=0.0_rp)
+    do q_out = 1, msh%n_patches
+      do f_loc_out = 1, msh%patches(q_out)%n_faces
+        self%outlet_pb(msh%patches(q_out)%start_face + f_loc_out - 1) = bc_configs(q_out)%p_val
+      end do
     end do
     call build_patch_classification(self)
 
@@ -894,7 +901,7 @@ contains
 #ifdef _OPENACC
     !$acc update device(self%U_face)
 #endif
-    call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh)
+    call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, p_out_bnd=self%outlet_pb)
     if (self%cproj_on) then
       call project_cells_exact(self, dt_use)
     else
@@ -911,13 +918,13 @@ contains
       end do
       !$omp end parallel do
       call self%mesh%exchange_halos_scalar(self%p)
-      call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh)
+      call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, p_out_bnd=self%outlet_pb)
     end if
 
     self%p_old(1:nc) = self%p(1:nc)
     self%phi_prev(1:nc+self%mesh%n_ghost) = self%p(1:nc+self%mesh%n_ghost)
     self%phi_prev_bnd(:) = self%p_bnd(:)
-    call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh)
+    call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, p_out_bnd=self%outlet_pb)
     ! Seed w_gp for the first stage's pre-correction.
     call compute_pressure_gradient(self)
 
@@ -1189,12 +1196,12 @@ contains
     real(rp),        intent(in)    :: dt
 
     integer(ip) :: nc, ntot, nbnd, nfaces, ns, nsc, c, k, s, jno, p_iter
-    real(rp)    :: gk_dt, time_n, a_k, b_k, nu_mol
+    real(rp)    :: gk_dt, time_n, a_k, b_k, nu_mol, c_outlet
     real(rp)    :: t_perf, t_sub, p_resid
     ! Plain-array aliases for the device loops below (the polymorphic self can't be mapped).
     real(rp), pointer :: U(:,:), T(:), Cf(:,:), p(:), p_old(:), nu_sgs(:), gp_rc(:,:), gp_cell(:,:)
     real(rp), pointer :: phi_prev(:), phi_prev_bnd(:), p_bnd(:), U_face(:), face_flux(:), inv_vol(:)
-    real(rp), pointer :: cvol(:), tau(:,:), hU(:,:), hT(:), hC(:,:), hU0(:,:), hT0(:), hC0(:,:), rhsp(:)
+    real(rp), pointer :: cvol(:), tau(:,:), hU(:,:), hT(:), hC(:,:), hU0(:,:), hT0(:), hC0(:,:), rhsp(:), phi_it(:)
 
     nc = self%mesh%n_cells
     ntot = nc + self%mesh%n_ghost
@@ -1208,7 +1215,7 @@ contains
     phi_prev_bnd => self%phi_prev_bnd;  p_bnd => self%p_bnd;  U_face => self%U_face
     face_flux => self%face_flux;  inv_vol => self%inv_vol;  cvol => self%mesh%cell_volume_soa
     tau => self%tau_w_bnd
-    hU => self%w_H_U;  hT => self%w_H_T;  hC => self%w_H_C;  rhsp => self%w_rhs_p
+    hU => self%w_H_U;  hT => self%w_H_T;  hC => self%w_H_C;  rhsp => self%w_rhs_p;  phi_it => self%w_phi_it
     hU0 => self%w_U0;  hT0 => self%w_T0;  hC0 => self%w_C0
     Cf => self%w_H_C  ! placeholder when no scalars (never touched)
     if (ns > 0) Cf => self%C
@@ -1292,11 +1299,8 @@ contains
       call prof_push('wall_model')
       select case (self%abl_config%wall_model_id)
       case (WM_MOST)
-        ! MOST runs on the host: refresh its inputs there and push its outputs back.
-        !$acc update host(self%U, self%T, self%tau_w_bnd, self%q_w_bnd, self%L_bnd) if(self%on_device)
         call abl_wall_model(self%U, self%T, self%mesh, self%abl_config, self%bc_configs, &
-                            self%tau_w_bnd, self%q_w_bnd, self%L_bnd, update_L=(k == 1))
-        !$acc update device(self%tau_w_bnd, self%q_w_bnd, self%L_bnd) if(self%on_device)
+                            self%tau_w_bnd, self%q_w_bnd, self%L_bnd, update_L=(k == 1), on_device=self%on_device)
       case (WM_NONE)
         !$acc parallel loop default(present)
         do c = 1, nbnd
@@ -1326,6 +1330,8 @@ contains
       t_sub = wall_time_now()
       a_k = RK3W_ALPHA(k)
       b_k = RK3W_BETA(k)
+      call outlet_advance_boundary(self%U, self%U_bnd, self%grad_U, self%bc_configs, self%mesh, dt, a_k, b_k, c_outlet)
+      if (c_outlet > OUTLET_COURANT_WARN) call warn_log_bump(WARN_OUTLET_COURANT, 1_ip, c_outlet)
 #ifdef _OPENACC
       !$acc parallel loop default(present)
 #else
@@ -1364,6 +1370,7 @@ contains
           !$acc update device(self%abl_mean_bnd) if(self%on_device)
         end if
       end if
+      call update_outlet_pressure(self%U, self%outlet_pb, self%bc_configs, self%mesh)
       call self%mesh%begin_halos_vec(self%U)
       call apply_velocity_bc(self%U, self%U_bnd, self%bc_configs, self%mesh, &
                              periodic_only=.false., grad_U=self%grad_U, u_fluc_bnd=self%sem_fluc_bnd, u_mean_bnd=self%abl_mean_bnd)
@@ -1425,7 +1432,7 @@ contains
         integer :: ierr_tol
         integer(ip) :: n_nonortho_max
         real(rp) :: divU_norm_prev, divU_norm_curr, divU_local, stagnate_tol, ub1, ub2
-        real(rp) :: dphi_l(2), dphi_g(2), dphi_prev
+        real(rp) :: dphi_l(2), dphi_g(2), dphi_prev, dphi_d, dphi_p
         ! Volume-weighted mean speed, not the domain max: max(|U|) is a single-cell
         ! quantity and loosens atol precisely when one cell is diverging.
         ub1 = 0.0_rp
@@ -1456,7 +1463,7 @@ contains
           n_nonortho_max = min(self%params%n_nonortho_corr, 8_ip)
           !$acc parallel loop default(present)
           do c = 1, nc
-            self%w_phi_it(c) = 0.0_rp
+            phi_it(c) = 0.0_rp
           end do
         end if
         do jno = 1, n_nonortho_max
@@ -1504,13 +1511,14 @@ contains
           end if
           ! Exit early if converged or not improving (orthogonal mesh converges in 1 iter).
           if (self%params%nonortho_check) then
-            dphi_l(1) = 0.0_rp;  dphi_l(2) = 0.0_rp
-            !$acc parallel loop default(present) reduction(max:dphi_l)
+            dphi_d = 0.0_rp;  dphi_p = 0.0_rp
+            !$acc parallel loop default(present) reduction(max:dphi_d, dphi_p)
             do c = 1, nc
-              dphi_l(1) = max(dphi_l(1), abs(p(c) - self%w_phi_it(c)))
-              dphi_l(2) = max(dphi_l(2), abs(p(c)))
-              self%w_phi_it(c) = p(c)
+              dphi_d = max(dphi_d, abs(p(c) - phi_it(c)))
+              dphi_p = max(dphi_p, abs(p(c)))
+              phi_it(c) = p(c)
             end do
+            dphi_l = [dphi_d, dphi_p]
             call MPI_Allreduce(dphi_l, dphi_g, 2, MPI_DOUBLE_PRECISION, MPI_MAX, self%mesh%comm, ierr_tol)
             if (jno > 1 .and. (dphi_g(1) < NONORTHO_PHI_TOL * dphi_g(2) .or. dphi_g(1) > dphi_prev * stagnate_tol)) exit
             dphi_prev = dphi_g(1)
@@ -2040,10 +2048,10 @@ contains
     ! w_gp is not a gradient when skip_grad_p is set; omit it so the BC falls back to zero-gradient.
     if (self%skip_grad_p) then
       call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, &
-                              periodic_only=periodic_only)
+                              periodic_only=periodic_only, p_out_bnd=self%outlet_pb)
     else
       call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, &
-                              periodic_only=periodic_only, grad_p=self%w_gp)
+                              periodic_only=periodic_only, grad_p=self%w_gp, p_out_bnd=self%outlet_pb)
     end if
     call apply_temperature_bc(self%T, self%T_bnd, self%bc_configs, self%mesh, &
                                periodic_only=periodic_only, grad_T=self%grad_T)
@@ -2335,10 +2343,11 @@ contains
     incr = .false.
     if (present(increment)) incr = increment
     if (self%skip_grad_p) then
-      call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, periodic_only=.false., increment=incr)
+      call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, periodic_only=.false., increment=incr, &
+                             p_out_bnd=self%outlet_pb)
     else
       call apply_pressure_bc(self%p, self%p_bnd, self%bc_configs, self%mesh, &
-                             periodic_only=.false., grad_p=self%w_gp, increment=incr)
+                             periodic_only=.false., grad_p=self%w_gp, increment=incr, p_out_bnd=self%outlet_pb)
     end if
   end subroutine apply_pressure_bc_o2
 
@@ -2399,7 +2408,7 @@ contains
 
     integer(ip) :: nc, ntot, nf, n_int, n_faces, n_bnd, n_patches, n_nper, n_per, c, f, q, ib, f_bnd, f_glob
     integer(ip) :: idx, o, nb, f_mesh, pair_bnd, pair_face, om, nm, j
-    real(rp)    :: flux, coeff_rc, gc_f, d_o, d_nb, d_tot, w_blend, s_dot_dhat, d_on_len, cross, rdt, gc_w
+    real(rp)    :: flux, coeff_rc, gc_f, d_o, d_nb, d_tot, w_blend, s_dot_dhat, d_on_len, cross, rdt, gc_w, d1, d2, d3
     real(rp)    :: sf(3), d_on(3), k_f(3), k_rc(3), Uf(3), Uf_plain(3), Uf_eps(3), gm(3)
     logical     :: incr, skip_no
     real(rp)    :: min_cos_p
@@ -2601,7 +2610,7 @@ contains
     end do
 
     ! Non-periodic boundary faces contribute only to their owner cell (atomics: faces share owners).
-    !$acc parallel loop default(present) private(f_bnd, f_glob, o, q, flux)
+    !$acc parallel loop default(present) private(f_bnd, f_glob, o, q, flux, d1, d2, d3)
     do ib = 1, n_nper
       f_bnd = nper(ib)
       f_glob = n_int + f_bnd
@@ -2616,6 +2625,17 @@ contains
         ! BC_OUTLET: extrapolated boundary velocity (O(h^2) on skewed meshes); BC_INLET/BC_ABL_INLET:
         ! prescribed Dirichlet velocity, so include its flux in the RHS.
         flux = Ub(1, f_bnd)*fsf(1, f_glob) + Ub(2, f_bnd)*fsf(2, f_glob) + Ub(3, f_bnd)*fsf(3, f_glob)
+        ! Outlet flux is set by continuity, so the projection uses the extrapolated cell velocity, not the convective U_b.
+        if (pbc(q) == BC_OUTLET) then
+          if (bc_outlet_conv_soa(q) /= 0) then
+            d1 = fctr(1, f_glob) - cctr(1, o)
+            d2 = fctr(2, f_glob) - cctr(2, o)
+            d3 = fctr(3, f_glob) - cctr(3, o)
+            flux = (U(1, o) + gU(1, 1, o)*d1 + gU(2, 1, o)*d2 + gU(3, 1, o)*d3) * fsf(1, f_glob) &
+                 + (U(2, o) + gU(1, 2, o)*d1 + gU(2, 2, o)*d2 + gU(3, 2, o)*d3) * fsf(2, f_glob) &
+                 + (U(3, o) + gU(1, 3, o)*d1 + gU(2, 3, o)*d2 + gU(3, 3, o)*d3) * fsf(3, f_glob)
+          end if
+        end if
       end select
       ff(f_glob) = flux
       built(f_glob) = .true.
@@ -2777,7 +2797,7 @@ contains
     k_bnd => self%nonortho_k_bnd
     nper => self%nonperiodic_bfaces
     per => self%periodic_bfaces
-    pval => self%patch_p_val
+    pval => self%outlet_pb
     gcs => self%mesh%face_gc_soa
     pgcs => self%mesh%periodic_gc_soa
     fown => self%mesh%face_owner_soa
@@ -2847,7 +2867,7 @@ contains
       sn = abs(d1*fnrm(1, f_glob) + d2*fnrm(2, f_glob) + d3*fnrm(3, f_glob))
       d_orth = max(sn, SMALL)
       coeff = farea(f_glob) / d_orth
-      ff(f_glob) = ff(f_glob) - dt * coeff * (merge(pval(q), 0.0_rp, ptot) - p(o))
+      ff(f_glob) = ff(f_glob) - dt * coeff * (merge(pval(f_bnd), 0.0_rp, ptot) - p(o))
       ! Cross-diffusion correction for Dirichlet p BC (outlet); owner-side gradient only (no off-cell info).
       if (act_bnd(ib)) then
         ff(f_glob) = ff(f_glob) - dt * (gp(1, o)*k_bnd(1, ib) + gp(2, o)*k_bnd(2, ib) + gp(3, o)*k_bnd(3, ib))
@@ -2947,7 +2967,7 @@ contains
     act_bnd => self%nonortho_active_bnd
     k_bnd => self%nonortho_k_bnd
     nper => self%nonperiodic_bfaces
-    pval => self%patch_p_val
+    pval => self%outlet_pb
     Tinv => self%recon_Tinv
     gcs => self%mesh%face_gc_soa
     pgcs => self%mesh%periodic_gc_soa
@@ -3060,7 +3080,7 @@ contains
       sn     = abs(d1*fnrm(1, f_glob) + d2*fnrm(2, f_glob) + d3*fnrm(3, f_glob))
       d_orth = max(sn, SMALL)
       coeff  = farea(f_glob) / d_orth
-      g_f    = coeff * (merge(pval(q), 0.0_rp, ptot) - p(o))
+      g_f    = coeff * (merge(pval(f_bnd), 0.0_rp, ptot) - p(o))
       if (do_cross) then
         if (act_bnd(ib)) g_f = g_f + gp(1, o)*k_bnd(1, ib) + gp(2, o)*k_bnd(2, ib) + gp(3, o)*k_bnd(3, ib)
       end if
@@ -3151,10 +3171,12 @@ contains
     self%cproj_on = (trim(self%params%cell_projection) == 'EXACT')
     if (.not. self%cproj_on) return
 #ifdef _OPENACC
-    if (self%mesh%rank == 0) write(*,'(A)') ' WARNING: cell_projection=EXACT is host-only, using LS'
-    self%params%cell_projection = 'LS'
-    self%cproj_on = .false.
-    return
+    if (self%mesh%nranks > 1) then
+      if (self%mesh%rank == 0) write(*,'(A)') ' WARNING: cell_projection=EXACT is single-rank on GPU, using LS'
+      self%params%cell_projection = 'LS'
+      self%cproj_on = .false.
+      return
+    end if
 #endif
     nc = self%mesh%n_cells;  ntot = nc + self%mesh%n_ghost
     allocate(own(self%psolver%n_faces), nbr(self%psolver%n_faces), sf(3, self%psolver%n_faces), gc(self%psolver%n_faces))
@@ -3204,27 +3226,52 @@ contains
     class(FVSolver), intent(inout), target :: self
     real(rp),        intent(in)    :: dt
     real(rp), allocatable :: bconst(:)
-    integer(ip) :: ib, f_glob, o, q, n_it, nc
+    integer(ip) :: ib, f_glob, o, q, n_it, nc, nbf, nint, npatch
+    real(rp) :: fl
+    logical :: dev
+    integer(ip), pointer :: fown(:), fpid(:), pbc(:), npb(:)
+    real(rp),    pointer :: fsf(:,:), cvol(:), Ub(:,:), Uc(:,:), ppv(:)
 
     nc = self%mesh%n_cells
-    allocate(bconst(nc), source=0.0_rp)
-    do ib = 1, self%n_nonperiodic_bfaces
-      f_glob = self%mesh%n_int_faces + self%nonperiodic_bfaces(ib)
-      o = self%mesh%face_owner_soa(f_glob)
-      q = self%mesh%face_patch_id_soa(f_glob)
-      if (o < 1 .or. o > nc .or. q < 1 .or. q > self%mesh%n_patches) cycle
-      select case (self%mesh%patch_bc_id_soa(q))
+    dev = self%on_device .and. self%cproj%staged
+    nbf = self%n_nonperiodic_bfaces
+    nint = self%mesh%n_int_faces
+    npatch = self%mesh%n_patches
+    fown => self%mesh%face_owner_soa;  fpid => self%mesh%face_patch_id_soa;  pbc => self%mesh%patch_bc_id_soa
+    fsf => self%mesh%face_sf_soa;  cvol => self%mesh%cell_volume_soa
+    npb => self%nonperiodic_bfaces;  Ub => self%U_bnd;  Uc => self%U;  ppv => self%outlet_pb
+    allocate(bconst(nc))
+    !$acc enter data create(bconst) if(dev)
+    !$acc parallel loop if(dev) default(present)
+    do o = 1, nc
+      bconst(o) = 0.0_rp
+    end do
+    !$acc parallel loop if(dev) default(present) private(f_glob, o, q, fl)
+    do ib = 1, nbf
+      f_glob = nint + npb(ib)
+      o = fown(f_glob)
+      q = fpid(f_glob)
+      if (o < 1 .or. o > nc .or. q < 1 .or. q > npatch) cycle
+      select case (pbc(q))
       case (BC_WALL_NOSLIP, BC_WALL_MODEL, BC_WALL_VELOCITY, BC_SLIP, BC_SYMMETRY)
         continue
       case (BC_OUTLET)
         ! Dirichlet pressure acts on the outlet cell as the boundary-face force -p_b Sf / V.
-        self%U(:, o) = self%U(:, o) - dt * self%patch_p_val(q) * self%mesh%face_sf_soa(:, f_glob) &
-                                          / self%mesh%cell_volume_soa(o)
+        fl = dt * ppv(npb(ib)) / cvol(o)
+        !$acc atomic update
+        Uc(1, o) = Uc(1, o) - fl * fsf(1, f_glob)
+        !$acc atomic update
+        Uc(2, o) = Uc(2, o) - fl * fsf(2, f_glob)
+        !$acc atomic update
+        Uc(3, o) = Uc(3, o) - fl * fsf(3, f_glob)
       case default
-        bconst(o) = bconst(o) + sum(self%U_bnd(:, self%nonperiodic_bfaces(ib)) * self%mesh%face_sf_soa(:, f_glob))
+        fl = Ub(1, npb(ib)) * fsf(1, f_glob) + Ub(2, npb(ib)) * fsf(2, f_glob) + Ub(3, npb(ib)) * fsf(3, f_glob)
+        !$acc atomic update
+        bconst(o) = bconst(o) + fl
       end select
     end do
-    call self%cproj%project(self%U, bconst, cproj_precond, self%params%cell_projection_tol, 100_ip, n_it)
+    call self%cproj%project(self%U, bconst, cproj_precond, self%params%cell_projection_tol, 100_ip, n_it, dev)
+    !$acc exit data delete(bconst) if(dev)
 
   contains
 
@@ -3232,7 +3279,7 @@ contains
       real(rp), intent(in)    :: r(:)
       real(rp), intent(inout) :: z(:)
       z = 0.0_rp
-      call pressure_solver_solve(self%psolver, r, z, tol=0.05_rp, max_iter=50_ip)
+      call pressure_solver_solve(self%psolver, r, z, tol=0.05_rp, max_iter=50_ip, on_device=dev)
     end subroutine cproj_precond
   end subroutine project_cells_exact
 
@@ -3252,7 +3299,8 @@ contains
     !$acc      self%grad_U, self%grad_T, self%face_flux, self%w_H_U, self%w_H_T, self%w_H_C, &
     !$acc      self%w_rhs_p, self%w_U0, self%w_T0, self%w_C0, self%w_conv_U, self%w_visc_U, &
     !$acc      self%w_conv_T, self%w_visc_T, self%w_flux_built, self%w_gp, self%w_gp_rc, &
-    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval, self%w_phi_it)
+    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval, self%w_phi_it, &
+    !$acc      self%outlet_pb)
     !$acc update device(self%U_face, self%inv_vol)
     if (self%params%n_scalars > 0) then
       !$acc enter data copyin(self%C, self%C_bnd, self%grad_C, self%w_conv_C, self%w_visc_C, &
@@ -3301,7 +3349,8 @@ contains
     !$acc      self%grad_U, self%grad_T, self%face_flux, self%w_H_U, self%w_H_T, self%w_H_C, &
     !$acc      self%w_rhs_p, self%w_U0, self%w_T0, self%w_C0, self%w_conv_U, self%w_visc_U, &
     !$acc      self%w_conv_T, self%w_visc_T, self%w_flux_built, self%w_gp, self%w_gp_rc, &
-    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval, self%w_phi_it)
+    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval, self%w_phi_it, &
+    !$acc      self%outlet_pb)
     if (self%params%n_scalars > 0) then
       !$acc exit data delete(self%C, self%C_bnd, self%grad_C, self%w_conv_C, self%w_visc_C, &
       !$acc      self%w_Cs, self%w_Cs_bnd)
@@ -3336,6 +3385,7 @@ contains
     if (allocated(self%psolver%idx_color_perm)) then
       !$acc enter data copyin(self%psolver%idx_color_perm, self%psolver%color_offsets)
     end if
+    if (self%cproj_on) call self%cproj%to_device()
     self%static_on_device = .true.
 #endif
   end subroutine stage_static_on_device
@@ -3352,6 +3402,7 @@ contains
     if (allocated(self%psolver%idx_color_perm)) then
       !$acc exit data delete(self%psolver%idx_color_perm, self%psolver%color_offsets)
     end if
+    if (self%cproj_on) call self%cproj%leave_device()
     self%static_on_device = .false.
 #endif
   end subroutine release_static_on_device
@@ -3706,16 +3757,16 @@ contains
 
   end subroutine solver_divergence_metrics
 
-  !> CFL-based adaptive time step: per-cell sums of all face fluxes/diffusion, not per-face max.
-  real(rp) function solver_compute_dt(self) result(dt)
+  !> Global max convective and diffusive rates (1/s): CFL numbers are rate * dt. MPI-collective.
+  !> Per-cell sums of all face fluxes/diffusion, not per-face max.
+  subroutine solver_cfl_rates(self, conv_rate, diff_rate)
     class(FVSolver), intent(in), target :: self
+    real(rp),        intent(out)        :: conv_rate, diff_rate
     integer(ip) :: f, o, nb, ierr, nc, ntot, nf, n_patches, patch_id, bc_id
     real(rp)    :: cfl_max_local, cfl_max_global
     real(rp)    :: diff_max_local, diff_max_global, nu_eff, area, w, gc
-    real(rp)    :: dt_min, dt_conv, dt_diff
     real(rp)    :: u_face_use, sf1, sf2, sf3, nu_mol
     logical     :: have_uface, dev
-    real(rp), parameter :: diff_cfl_limit = 1.0_rp
     integer(ip), pointer :: fown(:), fnb(:), fpid(:), pbc(:)
     real(rp),    pointer :: fsf(:,:), gcs(:), dcf(:), cvol(:), U(:,:), Uf(:), nus(:)
 
@@ -3850,6 +3901,18 @@ contains
       cfl_max_global  = red_global(1)
       diff_max_global = red_global(2)
     end block
+    conv_rate = cfl_max_global
+    diff_rate = diff_max_global
+  end subroutine solver_cfl_rates
+
+  !> CFL-based adaptive time step from the convective and diffusive rates.
+  real(rp) function solver_compute_dt(self) result(dt)
+    class(FVSolver), intent(in), target :: self
+    real(rp)    :: cfl_max_global, diff_max_global
+    real(rp)    :: dt_min, dt_conv, dt_diff
+    real(rp), parameter :: diff_cfl_limit = 1.0_rp
+
+    call solver_cfl_rates(self, cfl_max_global, diff_max_global)
 
     ! Convective and diffusive dt limits; cfl_max and diff_cfl_limit are the margins, no extra safety factor.
     dt_conv = huge(1.0_rp)
@@ -3900,39 +3963,6 @@ contains
       hit_boundary = .true.
     end if
   end subroutine snap_dt_to_write_time
-
-  !> Global max convective CFL rate (1/s): CFL number = compute_cfl_rate() * dt.
-  !> MPI-collective; must be called by all ranks.
-  real(rp) function solver_compute_cfl_rate(self) result(cfl_max)
-    class(FVSolver), intent(in) :: self
-    integer(ip) :: f, o, nb, ierr
-    real(rp)    :: cfl_loc, cfl_max_local, u_face_use, sf(3), vol_min
-    logical     :: have_uface
-
-    cfl_max_local = 0.0_rp
-    have_uface = allocated(self%U_face) .and. self%u_face_ready
-
-    do f = 1, self%mesh%n_faces
-      o  = self%mesh%faces(f)%owner
-      nb = self%mesh%faces(f)%neighbour
-      if (nb >= 1 .and. nb <= self%mesh%n_cells) then
-        vol_min = min(self%mesh%cells(o)%volume, self%mesh%cells(nb)%volume)
-      else
-        vol_min = self%mesh%cells(o)%volume
-      end if
-      if (have_uface) then
-        u_face_use = self%U_face(f)
-      else
-        sf = self%mesh%faces(f)%sf
-        u_face_use = dot_product(self%U(:, o), sf)
-      end if
-      cfl_loc = abs(u_face_use) / (vol_min + SMALL)
-      cfl_max_local = max(cfl_max_local, cfl_loc)
-    end do
-
-    call MPI_Allreduce(cfl_max_local, cfl_max, 1, MPI_DOUBLE_PRECISION, &
-                       MPI_MAX, self%mesh%comm, ierr)
-  end function solver_compute_cfl_rate
 
   !> True when U and p are finite on every rank (a NaN/Inf anywhere poisons the sum). MPI-collective;
   !> reduces on the device when the fields live there, so no host sync is needed.
@@ -4386,6 +4416,7 @@ contains
     if (allocated(self%w_outlet_cell)) deallocate(self%w_outlet_cell)
     if (allocated(self%w_outlet_pval)) deallocate(self%w_outlet_pval)
     if (allocated(self%patch_p_val))   deallocate(self%patch_p_val)
+    if (allocated(self%outlet_pb))     deallocate(self%outlet_pb)
     if (allocated(self%w_Cs))          deallocate(self%w_Cs)
     if (allocated(self%w_Cs_bnd))      deallocate(self%w_Cs_bnd)
     if (allocated(self%w_pack_grad)) deallocate(self%w_pack_grad)

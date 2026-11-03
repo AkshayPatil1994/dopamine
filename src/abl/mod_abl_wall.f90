@@ -18,97 +18,134 @@ module mod_abl_wall
 
   public :: abl_wall_model
 
+  integer(ip), allocatable, save :: wm_fbnd(:)  ! boundary-face index of each wall-model face
+  real(rp),    allocatable, save :: wm_z0m(:), wm_z0h(:)  ! per-face roughness lengths
+  logical, save :: wm_staged = .false.
+
 contains
 
-  !> Compute MOST surface fluxes (u_star, T_star) at all wall-model faces.
-  subroutine abl_wall_model(U, T, msh, abl_cfg, bc_configs, tau_w_bnd, q_w_bnd, L_bnd, update_L)
+  !> Cache the wall-model boundary faces and their roughness; the mesh is static, so this runs once.
+  subroutine wm_build_faces(msh, abl_cfg, bc_configs, dev)
+    type(Mesh),      intent(in) :: msh
+    type(ABLConfig), intent(in) :: abl_cfg
+    type(BCConfig),  intent(in) :: bc_configs(:)
+    logical,         intent(in) :: dev
+    integer(ip) :: p, f, n
+    real(rp)    :: z0_m_p, z0_h_p
+
+    if (.not. allocated(wm_fbnd)) then
+      n = 0
+      do p = 1, msh%n_patches
+        if (msh%patches(p)%bc_id == BC_WALL_MODEL) n = n + msh%patches(p)%n_faces
+      end do
+      allocate(wm_fbnd(n), wm_z0m(n), wm_z0h(n))
+      n = 0
+      do p = 1, msh%n_patches
+        if (msh%patches(p)%bc_id /= BC_WALL_MODEL) cycle
+        ! Patch roughness overrides the global ABL value when set
+        call patch_roughness(bc_configs(p), abl_cfg, z0_m_p, z0_h_p)
+        do f = 1, msh%patches(p)%n_faces
+          n = n + 1
+          wm_fbnd(n) = msh%patches(p)%start_face + f - 1
+          wm_z0m(n)  = z0_m_p
+          wm_z0h(n)  = z0_h_p
+        end do
+      end do
+    end if
+    if (dev .and. .not. wm_staged) then
+      !$acc enter data copyin(wm_fbnd, wm_z0m, wm_z0h)
+      wm_staged = .true.
+    end if
+  end subroutine wm_build_faces
+
+  !> Compute MOST surface fluxes (u_star, T_star) at all wall-model faces; on_device: U, T and the outputs are resident.
+  subroutine abl_wall_model(U, T, msh, abl_cfg, bc_configs, tau_w_bnd, q_w_bnd, L_bnd, update_L, on_device)
     real(rp),         intent(in)    :: U(:,:)  ! (3, nc+ng)
     real(rp),         intent(in)    :: T(:)  ! (nc+ng)
-    type(Mesh),       intent(in)    :: msh
+    type(Mesh),       intent(in), target :: msh
     type(ABLConfig),  intent(inout) :: abl_cfg
     type(BCConfig),   intent(in)    :: bc_configs(:)  ! per-patch roughness
     real(rp),         intent(inout) :: tau_w_bnd(:,:)  ! (3, n_bnd_faces)
     real(rp),         intent(inout) :: q_w_bnd(:)  ! (n_bnd_faces)
     real(rp),         intent(inout) :: L_bnd(:)  ! (n_bnd_faces) per-face Obukhov length
     logical,          intent(in), optional :: update_L  ! reduce L once per step, not per RK stage
+    logical,          intent(in), optional :: on_device
 
-    integer(ip) :: p, f, f_bnd, f_global, o
-    real(rp)    :: n_hat(3), U_o(3), U_par(3), U_par_mag
-    real(rp)    :: T_o, y_w
-    real(rp)    :: u_star, T_star, L_new, L_guess
-    real(rp)    :: z0_m_p, z0_h_p
-    real(rp)    :: u_par_unit(3)
+    integer(ip) :: i, f_bnd, f_global, o, n_int, nwf
+    real(rp)    :: n1, n2, n3, y_w, un, up1, up2, up3, U_par_mag, T_o
+    real(rp)    :: u_star, T_star, L_new, L_guess, T_surf, L_cfg
     real(rp)    :: L_sum, rbuf(2), gbuf(2)
-    integer(ip) :: n_wall_faces, ierr
-    logical     :: do_update_L
+    integer(ip) :: ierr
+    logical     :: do_update_L, dev
+    integer(ip), pointer :: fown(:)
+    real(rp),    pointer :: fnorm(:,:), fcen(:,:), ccen(:,:)
 
     do_update_L = .true.
     if (present(update_L)) do_update_L = update_L
+    dev = .false.
+    if (present(on_device)) dev = on_device
+    call wm_build_faces(msh, abl_cfg, bc_configs, dev)
+    nwf = size(wm_fbnd)
+    n_int = msh%n_int_faces
+    T_surf = abl_cfg%T_surface
+    L_cfg = abl_cfg%L_obukhov
+    fown  => msh%face_owner_soa
+    fnorm => msh%face_normal_soa
+    fcen  => msh%face_centre_soa
+    ccen  => msh%cell_centroid_soa
     L_sum = 0.0_rp
-    n_wall_faces = 0
 
-    ! Loop over all boundary faces
-    do p = 1, msh%n_patches
-      ! Only process wall-model patches
-      if (msh%patches(p)%bc_id /= BC_WALL_MODEL) cycle
+    !$acc parallel loop if(dev) default(present) reduction(+:L_sum) &
+    !$acc      private(f_bnd, f_global, o, n1, n2, n3, y_w, un, up1, up2, up3, U_par_mag, T_o, &
+    !$acc              u_star, T_star, L_new, L_guess)
+    do i = 1, nwf
+      f_bnd    = wm_fbnd(i)
+      f_global = n_int + f_bnd
+      o        = fown(f_global)
+      n1 = fnorm(1, f_global);  n2 = fnorm(2, f_global);  n3 = fnorm(3, f_global)
 
-      ! Patch roughness overrides the global ABL value when set
-      call patch_roughness(bc_configs(p), abl_cfg, z0_m_p, z0_h_p)
+      ! Wall-normal distance from owner cell centroid to face
+      y_w = abs((fcen(1, f_global) - ccen(1, o)) * n1 + (fcen(2, f_global) - ccen(2, o)) * n2 &
+              + (fcen(3, f_global) - ccen(3, o)) * n3) + SMALL
 
-      do f = 1, msh%patches(p)%n_faces
-        f_bnd    = msh%patches(p)%start_face + f - 1
-        f_global = msh%n_int_faces + f_bnd
-        o        = msh%faces(f_global)%owner
-        n_hat    = msh%faces(f_global)%normal
+      T_o = T(o)
 
-        ! Wall-normal distance from owner cell centroid to face
-        y_w = abs(dot_product(msh%faces(f_global)%centre - msh%cells(o)%centroid, n_hat)) + SMALL
+      ! Tangential velocity (remove normal component)
+      un = U(1, o) * n1 + U(2, o) * n2 + U(3, o) * n3
+      up1 = U(1, o) - un * n1;  up2 = U(2, o) - un * n2;  up3 = U(3, o) - un * n3
+      U_par_mag = sqrt(up1 * up1 + up2 * up2 + up3 * up3)
 
-        ! Extract velocity and temperature
-        U_o = U(:, o)
-        T_o = T(o)
+      ! Normalized tangential direction
+      if (U_par_mag > SMALL) then
+        up1 = up1 / U_par_mag;  up2 = up2 / U_par_mag;  up3 = up3 / U_par_mag
+      else
+        up1 = 0.0_rp;  up2 = 0.0_rp;  up3 = 0.0_rp
+      end if
 
-        ! Tangential velocity (remove normal component)
-        U_par = U_o - dot_product(U_o, n_hat) * n_hat
-        U_par_mag = sqrt(dot_product(U_par, U_par))
+      ! Start from this face's own converged L; fall back to the config value on the first call.
+      L_guess = L_bnd(f_bnd)
+      if (abs(L_guess) < SMALL) L_guess = L_cfg
 
-        ! Normalized tangential direction
-        if (U_par_mag > SMALL) then
-          u_par_unit = U_par / U_par_mag
-        else
-          u_par_unit = 0.0_rp
-        end if
+      ! Solve coupled MOST system for u_star and T_star
+      call most_iterate(U_par_mag, T_o, T_surf, y_w, wm_z0m(i), wm_z0h(i), L_guess, u_star, T_star, L_new)
 
-        ! Start from this face's own converged L; fall back to the config value on the first call.
-        L_guess = L_bnd(f_bnd)
-        if (abs(L_guess) < SMALL) L_guess = abl_cfg%L_obukhov
+      ! Keep L local: a single domain mean is meaningless over heterogeneous surfaces.
+      L_bnd(f_bnd) = L_new
+      L_sum = L_sum + L_new
 
-        ! Solve coupled MOST system for u_star and T_star
-        call most_iterate(U_par_mag, T_o, abl_cfg%T_surface, y_w, &
-                          z0_m_p, z0_h_p, L_guess, &
-                          u_star, T_star, L_new)
+      ! Wall stress: tau_w = -u_star^2 * (U_par / |U_par|); the sign opposes the flow
+      tau_w_bnd(1, f_bnd) = -u_star * u_star * up1
+      tau_w_bnd(2, f_bnd) = -u_star * u_star * up2
+      tau_w_bnd(3, f_bnd) = -u_star * u_star * up3
 
-        ! Keep L local: a single domain mean is meaningless over heterogeneous surfaces.
-        L_bnd(f_bnd) = L_new
-        L_sum = L_sum + L_new
-        n_wall_faces = n_wall_faces + 1
-
-        ! Wall stress: tau_w = -rho * u_star^2 * (U_par / |U_par|)
-        ! Negative sign because stress opposes flow
-        tau_w_bnd(1, f_bnd) = -u_star * u_star * u_par_unit(1)
-        tau_w_bnd(2, f_bnd) = -u_star * u_star * u_par_unit(2)
-        tau_w_bnd(3, f_bnd) = -u_star * u_star * u_par_unit(3)
-
-        ! Heat flux: q_w = -rho * cp * u_star * T_star [K m/s kinematic heat flux]
-        q_w_bnd(f_bnd) = -u_star * T_star
-
-      end do
+      ! Kinematic heat flux [K m/s]
+      q_w_bnd(f_bnd) = -u_star * T_star
     end do
 
     ! Domain-mean Obukhov length: diagnostic and first-call seed only, the solve uses L_bnd.
     if (abl_cfg%compute_L .and. do_update_L) then
       rbuf(1) = L_sum
-      rbuf(2) = real(n_wall_faces, rp)
+      rbuf(2) = real(nwf, rp)
       call MPI_Allreduce(rbuf, gbuf, 2, MPI_DOUBLE_PRECISION, MPI_SUM, msh%comm, ierr)
       if (gbuf(2) > 0.0_rp) abl_cfg%L_obukhov = gbuf(1) / gbuf(2)
     end if
@@ -118,6 +155,7 @@ contains
   !> Coupled Newton iteration for u_star and T_star (Monin-Obukhov).
   subroutine most_iterate(U_par_mag, T_o, T_surface, y_w, z0_m, z0_h, L_init, &
                            u_star_out, T_star_out, L_out)
+    !$acc routine seq
     real(rp), intent(in)  :: U_par_mag, T_o, T_surface, y_w, z0_m, z0_h, L_init
     real(rp), intent(out) :: u_star_out, T_star_out, L_out
 
@@ -194,6 +232,7 @@ contains
 
   !> L = -u*^3 T/(kappa g <w'T'>) with <w'T'> = -u* T*, so the u* powers cancel to u*^2.
   pure real(rp) function L_from(u_star, T_star, T_ref) result(L)
+    !$acc routine seq
     real(rp), intent(in) :: u_star, T_star, T_ref
     if (abs(T_star) > SMALL) then
       L = u_star**2 * T_ref / (KAPPA * G_STD * T_star)
@@ -224,6 +263,7 @@ contains
 
   subroutine most_residuals(u_star, T_star, L, U_par_mag, T_o, T_surface, &
                             y_w, z0_m, z0_h, Fu, FT)
+    !$acc routine seq
     real(rp), intent(in)  :: u_star, T_star, L, U_par_mag, T_o, T_surface
     real(rp), intent(in)  :: y_w, z0_m, z0_h
     real(rp), intent(out) :: Fu, FT
