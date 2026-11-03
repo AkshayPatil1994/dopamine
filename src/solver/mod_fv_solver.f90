@@ -2411,8 +2411,8 @@ contains
     real(rp)    :: flux, coeff_rc, gc_f, d_o, d_nb, d_tot, w_blend, s_dot_dhat, d_on_len, cross, rdt, gc_w, d1, d2, d3
     real(rp)    :: sf(3), d_on(3), k_f(3), k_rc(3), Uf(3), Uf_plain(3), Uf_eps(3), gm(3)
     logical     :: incr, skip_no
-    real(rp)    :: min_cos_p
-    logical     :: rc_dual
+    real(rp)    :: min_cos_p, c_b
+    logical     :: rc_dual, cproj
     integer(ip) :: col, idx2, n_loops, lo, hi
     logical     :: use_color
     integer(c_int), pointer :: skip(:), fown_p(:)
@@ -2422,6 +2422,7 @@ contains
     logical,        pointer :: act_int(:), act_bnd(:), built(:)
     real(rp),       pointer :: k_int(:,:), k_bnd(:,:), gcs(:), pgcs(:), eps(:,:), skew(:), fsf(:,:), fdcf(:), pdcf(:)
     real(rp),       pointer :: fctr(:,:), cctr(:,:), U(:,:), gU(:,:,:), Ub(:,:), gprc(:,:), phi(:), gp(:,:), ff(:)
+    real(rp),       pointer :: fnrm(:,:), farea(:), pval(:)
 
     nc = self%mesh%n_cells
     ntot = nc + self%mesh%n_ghost
@@ -2480,6 +2481,10 @@ contains
     Ub => self%U_bnd
     gprc => self%w_gp_rc
     phi => self%phi_prev
+    fnrm => self%mesh%face_normal_soa
+    farea => self%mesh%face_area_soa
+    pval => self%outlet_pb
+    cproj = self%cproj_on
     gp => self%w_gp
     ff => self%face_flux
     built => self%w_flux_built
@@ -2493,7 +2498,7 @@ contains
       perm => fmi  ! placeholder, unused when not colored (idx is taken directly)
     end if
 
-    !$acc data copyin(U, gU, Ub, gprc, phi, gp) copyout(ff, built, rhs_p)
+    !$acc data copyin(U, gU, Ub, gprc, phi, gp, pval) copyout(ff, built, rhs_p)
     !$acc parallel loop default(present)
     do c = 1, nc
       rhs_p(c) = 0.0_rp
@@ -2610,7 +2615,7 @@ contains
     end do
 
     ! Non-periodic boundary faces contribute only to their owner cell (atomics: faces share owners).
-    !$acc parallel loop default(present) private(f_bnd, f_glob, o, q, flux, d1, d2, d3)
+    !$acc parallel loop default(present) private(f_bnd, f_glob, o, q, flux, d1, d2, d3, c_b)
     do ib = 1, n_nper
       f_bnd = nper(ib)
       f_glob = n_int + f_bnd
@@ -2634,6 +2639,14 @@ contains
             flux = (U(1, o) + gU(1, 1, o)*d1 + gU(2, 1, o)*d2 + gU(3, 1, o)*d3) * fsf(1, f_glob) &
                  + (U(2, o) + gU(1, 2, o)*d1 + gU(2, 2, o)*d2 + gU(3, 2, o)*d3) * fsf(2, f_glob) &
                  + (U(3, o) + gU(1, 3, o)*d1 + gU(2, 3, o)*d2 + gU(3, 3, o)*d3) * fsf(3, f_glob)
+          end if
+          if (cproj) then
+            d1 = fctr(1, f_glob) - cctr(1, o)
+            d2 = fctr(2, f_glob) - cctr(2, o)
+            d3 = fctr(3, f_glob) - cctr(3, o)
+            c_b = farea(f_glob) / max(abs(d1*fnrm(1, f_glob) + d2*fnrm(2, f_glob) + d3*fnrm(3, f_glob)), SMALL)
+            ! EXACT: compact old-pressure term, as on interior faces, so p_new = p_b on the outlet.
+            flux = flux - dt * c_b * (pval(f_bnd) - phi(o))
           end if
         end if
       end select
