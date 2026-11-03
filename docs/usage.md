@@ -232,7 +232,7 @@ accepted names (aliases separated by `/`) are:
 | `patch_type` | Treatment |
 |---|---|
 | `velocity` / `inlet` / `fixedValue` | Dirichlet velocity inlet |
-| `outlet` / `fixedPressure` / `outflow` | Outflow with pressure anchoring |
+| `outlet` / `fixedPressure` / `outflow` | Pressure outlet; `patch_outlet_mode = 'convective'` adds the advective velocity condition and backflow traction (recommended behind an `ablInlet`) |
 | `zeroGradient` | Homogeneous Neumann on all fields |
 | `noSlip` | Stationary no-slip wall |
 | `movingWall` / `wallVelocity` | No-slip wall with prescribed wall velocity |
