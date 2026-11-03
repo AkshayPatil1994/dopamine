@@ -30,6 +30,15 @@ if(DOPAMINE_GMSH)
 endif()
 set_tests_properties(regression_amd_np1 PROPERTIES ENVIRONMENT "${_env}" LABELS regression PROCESSORS 1 TIMEOUT 900)
 
+# EXACT projection: the written mean pressure must stay pinned by the Dirichlet outlet (no gauge drift).
+foreach(_np 1 2)
+  add_test(NAME regression_outlet_gauge_np${_np}
+           COMMAND "${_regression_dir}/check_mean_p.sh" outlet_gauge ${_np} "${_regression_work}" 0.5)
+  set(_env "DOPAMINE_BIN=$<TARGET_FILE:dopamine>" "MPIRUN=${MPIEXEC_EXECUTABLE}")
+  set_tests_properties(regression_outlet_gauge_np${_np} PROPERTIES
+    ENVIRONMENT "${_env}" LABELS regression PROCESSORS ${_np} TIMEOUT 900 SKIP_RETURN_CODE 77)
+endforeach()
+
 # Unit test of the divergence-free synthetic eddy kernel (no mesh, serial).
 add_executable(test_sem_dfsem unit/test_sem_dfsem.f90)
 target_link_options(test_sem_dfsem PRIVATE -Wl,--no-as-needed)

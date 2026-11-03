@@ -22,6 +22,7 @@ being restructured (e.g. the GPU port); they are not validation cases.
 | `inflow` | same mesh | divergence-free SEM (`sem_type = 'dfsem'`, the default) `ablInlet` at x0, outlet at xL, periodic y, slip z, CDS: eddies wrap across the periodic seam; the result must not depend on the rank count (np 1, 2, 3 agree to 1e-14) |
 | `inflow_jarrin` | same mesh | as `inflow` with the original tent-kernel SEM (`sem_type = 'jarrin'`) |
 | `inflow_backflow` | unskewed 10^3 box, 60% intensity `sem_profile_file` | as `inflow` but eddies reverse the flow at the outlet; the convective outlet (`patch_outlet_mode = 'convective'`, backflow traction on by default) must run 800 steps, np 1 and 2 identical. The default outlet diverges at step ~550 on the same input |
+| `outlet_gauge` | unskewed 12^3 box (`mk_box_mesh.py`) | `cell_projection = 'EXACT'`, steady flow to a Dirichlet outlet: the mean of the written pressure must stay below 0.5 Pa after 600 steps (`check_mean_p.sh`; it fell by about 34 Pa without the outlet compact-pressure term); skipped without python netCDF4 |
 | `amd` | as `channel` | AMD SGS (`sgs_model = 'AMD'`) with the log-law wall-cell gradient, and the adaptive wall-model filter (`wall_model_filter_tf_fac = 1`); np 1 only |
 
 Every other case pins `rhie_chow_dual`, `cell_projection` and `pressure_min_cos_theta` in its input (mostly `.false.`, `'LS'`, `0`, the numerics of the original references), so a change of defaults cannot move their references.
