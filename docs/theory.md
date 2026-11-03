@@ -304,7 +304,7 @@ are fixed data of $$B$$. Walls carry zero flux, which also balances the body for
 Cost and availability: the projection runs on the host only (OpenACC builds warn and use `'LS'`), costs about 1.4 to 3 times the step time, and is not skipped on orthogonal meshes, where `'LS'` is already an orthogonal projector on a uniform Cartesian grid and cheaper.
 
 Limits: the two pressures differ. The compact solution drives the face flux and is what is written, and it is
-noisier than with `'LS'` (an offset of the mean and a lag of order the projection residual divided by $$\Delta t$$). The
+noisier than with `'LS'` (a lag of order the projection residual divided by $$\Delta t$$). Outlet faces carry the same compact old-pressure term as interior faces, $$-\Delta t\,c_b\,(p_b-\phi^{k-1/2}_o)$$ with $$c_b=A_f/|(\mathbf{x}_f-\mathbf{x}_o)\cdot\mathbf{n}_f|$$ (the coefficient of the Dirichlet row), so the pressure solved for is the total pressure with $$p=p_b$$ on the outlet and the mean of the written pressure does not drift. The
 interpolation weights of $$B$$ are the geometric gc weights, so the adjoint gradient is first-order accurate for a
 linear pressure across a size jump (relative error $$(h_+ + h_- - 2h_c)/(4h_c)$$ for a 1D graded mesh); smooth
 grading and uniform meshes are second order. It does not make the advection scheme conservative: `CENTRAL`
