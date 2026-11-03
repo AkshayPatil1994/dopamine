@@ -49,6 +49,7 @@ if [[ ! -f "$mesh" ]]; then
 fi
 
 cp "$case_dir/case.input" "$workdir/case.input"
+for f in "$case_dir"/*.dat; do [[ -f "$f" ]] && cp "$f" "$workdir/"; done
 ln -sf "$mesh" "$workdir/mesh.msh"
 rm -f "$workdir/case_stats.csv"
 
