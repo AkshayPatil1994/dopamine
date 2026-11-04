@@ -484,6 +484,7 @@ contains
     call check_nc(nf90_put_var(obj%ncid, obj%var_t, t, start=(/1, tidx/), count=(/obj%n_points, 1/)), 'nf90_put_var(T)')
     call check_nc(nf90_put_var(obj%ncid, obj%var_nu_sgs, nu_sgs, start=(/1, tidx/), count=(/obj%n_points, 1/)), &
         'nf90_put_var(nu_sgs)')
+    call check_nc(nf90_sync(obj%ncid), 'nf90_sync')
 
     obj%samples_written = tidx
   end subroutine write_object_sample
