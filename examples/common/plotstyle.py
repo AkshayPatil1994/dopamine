@@ -57,6 +57,15 @@ def apply():
     })
 
 
+def vorticity_cmap():
+    """Diverging map for signed vorticity: cool blues for negative, the magma_r cream-to-purple ramp for positive."""
+    from matplotlib.colors import LinearSegmentedColormap
+
+    colors = ["#16224f", "#2c68a3", "#7fb3d5", "#d9e8ef", "#fbf3e4", "#fdd9a5", "#f68f5c", "#d1426d", "#7a1f7d",
+              "#2a0a4d"]
+    return LinearSegmentedColormap.from_list("vorticity", colors, N=256)
+
+
 def run_style(label, k):
     """Return dict(label, color, ls, marker) for a run label; k is the run index for the fallback."""
     if label in RUN_STYLES:

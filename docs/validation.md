@@ -23,7 +23,7 @@ nondimensional.
 | Case | Physics | Reference | Grid | Result |
 |---|---|---|---|---|
 | [Advection order](#advection-order-of-accuracy) | 1D periodic advection | Exact solution | N = 20 to 320 | Observed order 2.0 (CDS, KEP, QUICK), 1.6 to 1.7 (TVD limiters); RK1/2 orders 1.0/2.0 |
-| [Taylor-Green vortex](#taylor-green-vortex-re--1600) | Decaying vortex, Re = 1600 | 512^3 DNS (Dairay et al. 2017) | 64^3 to 384^3 | Peak dissipation error -6% at 384^3; E(t) relative L2 error 1.2% |
+| [Taylor-Green vortex](#taylor-green-vortex-re--1600) | Decaying vortex, Re = 1600 | 512^3 DNS (Dairay et al. 2017) | 64^3 to 384^3 | Peak -dE/dt error -1.3% at 384^3; E(t) relative L2 error 1.2% |
 | [Lid-driven cavity](#lid-driven-cavity-re--1000) | Re = 1000 | Centreline reference profiles | 40^3, 60^3, 100^3 | RMS error 0.017 (u) and 0.011 (w) at 100^3 |
 | [Channel, Re_tau = 395](#wall-modelled-channel-re_tau--395) | Wall-modelled LES | MKM DNS (1999) | 48 x 48 x 32 | Mean velocity within 3% for y+ > 30; stresses within 7% on average |
 | [Half channel, Re_tau = 2000](#wall-modelled-half-channel-re_tau--2000) | Wall-modelled LES, AMD | Lee & Moser DNS (2015) | 64^3 | U+ error within 0.9 (4%) everywhere, about 0.7 for y/delta > 0.05 |
@@ -75,30 +75,44 @@ python3 examples/convergence_test/plot_validation.py --data <dir with spatial_co
 
 Decay of the Taylor-Green vortex in a periodic $$(2\pi)^3$$ box, $$\nu = 6.25\times10^{-4}$$, with `KEP` advection
 and the default (Vreman) SGS model, on four grids. The reference is the 512^3 spectral-quality DNS of Dairay et al. (2017),
-`TGV_Re1600.dat`. The dissipation is the solver's volume-averaged $$\epsilon$$; the DNS $$\epsilon$$ is column 4
-of the reference file.
+`TGV_Re1600.dat`, whose dissipation $$\epsilon=-\mathrm{d}E_k/\mathrm{d}t$$ is column 3 of the file.
+
+The dissipation rate is shown two ways. The solver's `eps` statistic is gradient based,
+$$\epsilon = 2(\nu+\nu_\mathrm{sgs})\langle S_{ij}S_{ij}\rangle$$, evaluated from the reconstructed cell gradients
+(`src/stats/mod_stats.f90`). It measures the explicitly modelled viscous and SGS dissipation only. The total
+rate of energy loss, $$-\mathrm{d}E_k/\mathrm{d}t$$, taken from the energy history, also contains the
+dissipation of the numerical scheme, and is the quantity the DNS reports. A comparison of a coarse-grid solver
+with the DNS should therefore use $$-\mathrm{d}E_k/\mathrm{d}t$$.
 
 ![Taylor-Green validation]({{ site.baseurl }}/assets/validation/taylor_green/tgv_validation.png)
 
-*Figure 2. (a) Volume-averaged kinetic energy and (b) dissipation rate against time for 64^3, 128^3, 256^3 and
-384^3 cells (symbols) and the 512^3 DNS (line).*
+*Figure 2. (a) Volume-averaged kinetic energy, (b) dissipation rate from the energy history
+$$-\mathrm{d}E_k/\mathrm{d}t$$ (central differences of the per-step energy, averaged over 0.2 time units) and
+(c) the gradient-based dissipation $$\epsilon$$ reported by the solver, for 64^3, 128^3, 256^3 and 384^3 cells
+(symbols) and the 512^3 DNS (line).*
 
-| Grid | Peak dissipation ($$\times10^{3}$$) | Error vs DNS | Time of peak | E(t) relative L2 error |
-|---|---|---|---|---|
-| DNS 512^3 | 12.85 | | 8.98 | |
-| 384^3 | 12.05 | -6.2% | 9.01 | 1.2% |
-| 256^3 | 10.72 | -16.6% | 9.01 | 3.2% |
-| 128^3 | 10.70 | -16.7% | 8.41 | 6.0% |
-| 64^3 | 4.99 | -61.1% | 6.57 | 19.6% |
+| Grid | Peak $$-\mathrm{d}E_k/\mathrm{d}t$$ ($$\times10^{3}$$) | Error vs DNS | Time of peak | Peak gradient-based $$\epsilon$$ ($$\times10^{3}$$) | Error vs DNS | E(t) relative L2 error |
+|---|---|---|---|---|---|---|
+| DNS 512^3 | 12.86 | | 8.98 | 12.85 | | |
+| 384^3 | 12.69 | -1.3% | 9.02 | 12.05 | -6.2% | 1.2% |
+| 256^3 | 11.77 | -8.5% | 9.01 | 10.72 | -16.6% | 3.2% |
+| 128^3 | 13.29 | +3.4% | 8.55 | 10.70 | -16.7% | 6.0% |
+| 64^3 | 9.93 | -22.7% | 8.54 | 4.99 | -61.1% | 19.6% |
 
-The kinetic energy converges monotonically. The dissipation peak, which is the sensitive quantity, approaches the
-DNS from below and is still 6% low at 384^3; this is the expected signature of numerical plus SGS dissipation on
-an under-resolved transition. Peak values are taken from the per-step statistics of each run; the 128^3 and 256^3
-peaks are nearly equal, so the peak is not monotone in the grid size between those two runs.
+The kinetic energy converges monotonically and tracks the DNS well from 256^3 on. The dissipation rate from the
+energy history follows the DNS closely at 384^3 (peak -1.3%, correct peak time and decay), while the
+gradient-based $$\epsilon$$ is 6% low at the same grid and 17% low at 128^3 and 256^3. The under-prediction in
+panel (c) is therefore largely a property of how $$\epsilon$$ is computed rather than of the energy decay itself.
+The gradient-based estimate leaves out the numerical dissipation of the scheme and is evaluated from gradients that
+are under-resolved on coarse grids; this reading is consistent with the figure, but the split between the
+contributions was not measured separately. The peak of $$-\mathrm{d}E_k/\mathrm{d}t$$ is not monotone in the grid
+size: 128^3 overshoots the DNS peak by 3% and peaks about 0.4 time units early, and 256^3 is 8% low. Peak values
+come from the smoothed energy-history derivative of each run and depend somewhat on the averaging window.
 
-<img src="{{ site.baseurl }}/assets/validation/taylor_green/tgv_vorticity.gif" alt="Vorticity magnitude on the z = pi plane" style="max-width:100%">
+<img src="{{ site.baseurl }}/assets/validation/taylor_green/tgv_vorticity.gif" alt="Vorticity on two sections of the Taylor-Green vortex" style="max-width:100%">
 
-*Animation. Vorticity magnitude on the $$z=\pi$$ plane, 128^3 run, t = 1 to 20.*
+*Animation. Out-of-plane vorticity on (a) the $$z=L/2$$ plane and (b) the $$y=0.375L$$ plane, 128^3 run, t = 1 to 20,
+$$L=2\pi$$.*
 
 Reproduce:
 
@@ -131,9 +145,9 @@ of two from 40^3 to 60^3 and then flatten: the remaining difference at 100^3 is 
 profile, around $$z\approx0.6$$, rather than an extremum error, and is not removed by refinement. The cause has
 not been isolated.
 
-<img src="{{ site.baseurl }}/assets/validation/cavity/cavity_midplane.gif" alt="Cavity mid-plane velocity magnitude" style="max-width:100%">
+<img src="{{ site.baseurl }}/assets/validation/cavity/cavity_vorticity.gif" alt="Vorticity on two sections of the lid-driven cavity" style="max-width:100%">
 
-*Animation. Velocity magnitude on the $$y=0.5$$ plane during spin-up, 60^3 run.*
+*Animation. Out-of-plane vorticity on (a) the $$y=L/2$$ plane and (b) the $$z=0.85L$$ plane during spin-up, 60^3 run.*
 
 Reproduce:
 
@@ -256,8 +270,9 @@ the time-averaged statistics.
 
 ## Known limitations
 
-- The Taylor-Green dissipation peak is under-predicted at all grids tested; refinement beyond 384^3 or a
-  different SGS setting was not tested.
+- The gradient-based dissipation statistic `eps` under-predicts the DNS dissipation on all grids tested because it
+  excludes numerical dissipation; use $$-\mathrm{d}E_k/\mathrm{d}t$$ for comparisons with DNS. Refinement beyond
+  384^3 was not tested, and the split between numerical and SGS dissipation was not measured.
 - The cavity reference file is a tabulated profile without a recorded citation; it is used as a visual and RMS
   benchmark only.
 - Channel statistics at Re_tau = 395 are averaged over a finite window and one realisation; the wall-normal stress

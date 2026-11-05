@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Validation animations in the shared manuscript style (structured-grid cases, NetCDF input).
 
-  --case tgv      vorticity magnitude |omega| on the z = pi plane (Taylor-Green, Re = 1600)
-  --case cavity   velocity magnitude |U|/U_lid on the y = 0.5 mid-plane (lid-driven cavity)
+  --case tgv      out-of-plane vorticity on two sections of the Taylor-Green vortex (z = L/2 and y = 3L/8)
+  --case cavity   out-of-plane vorticity on two sections of the lid-driven cavity (y = 0.5 and z = 0.85)
   --case channel  streamwise fluctuation u'/u_tau on a wall-parallel plane (channel, Re_tau = 395)
 
   animate_slices.py --case tgv --nc tgv.nc --out docs/assets/validation/taylor_green/tgv_vorticity.gif
@@ -22,7 +22,7 @@ from gifutil import frames_to_gif  # noqa: E402
 
 
 def grid_index(nc):
-    """Return (ix, iy, iz, shape): the structured index of every cell from its centroid."""
+    """Return (ix, iy, iz, shape, axes): the structured index of every cell from its centroid."""
     co, off, cn = nc["coords"][:], nc["offsets"][:], nc["connectivity"][:]
     n = np.diff(off)
     c = np.stack([np.add.reduceat(co[cn, k], off[:-1]) / n for k in range(3)], axis=1)
@@ -41,6 +41,10 @@ def to_grid(f, idx, shape):
     return g
 
 
+def nearest(a, v):
+    return int(np.abs(a - v).argmin())
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--case", required=True, choices=("tgv", "cavity", "channel"))
@@ -51,6 +55,7 @@ def main():
     ap.add_argument("--fps", type=int, default=10)
     ap.add_argument("--width", type=int, default=720)
     ap.add_argument("--layer", type=int, default=1, help="channel: wall-normal cell layer to show")
+    ap.add_argument("--pct", type=float, default=99.0, help="percentile of |omega| that sets the colour limit")
     args = ap.parse_args()
 
     import netCDF4
@@ -62,58 +67,83 @@ def main():
     plotstyle.apply()
     import matplotlib.pyplot as plt
 
+    L = 2 * np.pi
     if args.case == "tgv":
         dx = [a[1] - a[0] for a in ax]
-        kmid = int(np.abs(ax[2] - np.pi).argmin())
-        cmap, label, vmax, vmin, extent = "viridis", r"$|\omega|\,L/U_0$", None, 0.0, None
-        xl, yl, xs = r"$x/L$", r"$y/L$", 1 / (2 * np.pi)
-        ext = (0, 2 * np.pi * xs, 0, 2 * np.pi * xs)
+        kz, jy = nearest(ax[2], 0.5 * L), nearest(ax[1], 0.375 * L)
+        cmap, sym = plotstyle.vorticity_cmap(), True
+        label = r"$\omega\,L/U_0$"
+        panels = [dict(ext=(0, 1, 0, 1), xl=r"$x/L$", yl=r"$y/L$", txt=r"$\omega_z$, $z=L/2$"),
+                  dict(ext=(0, 1, 0, 1), xl=r"$x/L$", yl=r"$z/L$", txt=rf"$\omega_y$, $y={ax[1][jy] / L:.3f}L$")]
+        scale = L
 
         def frame(i):
             u = [to_grid(nc["U"][i][:, k], idx, shape) for k in range(3)]
             d = lambda f, a: (np.roll(f, -1, a) - np.roll(f, 1, a)) / (2 * dx[a])
-            wx = d(u[2], 1) - d(u[1], 2)
-            wy = d(u[0], 2) - d(u[2], 0)
-            wz = d(u[1], 0) - d(u[0], 1)
-            return np.sqrt(wx**2 + wy**2 + wz**2)[:, :, kmid].T
+            wz = (d(u[1], 0) - d(u[0], 1))[:, :, kz].T
+            wy = (d(u[0], 2) - d(u[2], 0))[:, jy, :].T
+            return [wz, wy]
     elif args.case == "cavity":
-        jmid = int(np.abs(ax[1] - 0.5).argmin())
-        cmap, label, vmax, vmin = "viridis", r"$|\mathbf{U}|/U_{\mathrm{lid}}$", 1.0, 0.0
-        xl, yl = r"$x/L$", r"$z/L$"
-        ext = (0, 1, 0, 1)
+        jy, kz = nearest(ax[1], 0.5), nearest(ax[2], 0.85)
+        cmap, sym = plotstyle.vorticity_cmap(), True
+        label = r"$\omega\,L/U_{\mathrm{lid}}$"
+        panels = [dict(ext=(0, 1, 0, 1), xl=r"$x/L$", yl=r"$z/L$", txt=r"$\omega_y$, $y=L/2$"),
+                  dict(ext=(0, 1, 0, 1), xl=r"$x/L$", yl=r"$y/L$", txt=rf"$\omega_z$, $z={ax[2][kz]:.2f}L$")]
+        scale = 1.0
 
         def frame(i):
-            u = [to_grid(nc["U"][i][:, k], idx, shape) for k in (0, 2)]
-            return np.sqrt(u[0] ** 2 + u[1] ** 2)[:, jmid, :].T
+            u = [to_grid(nc["U"][i][:, k], idx, shape) for k in range(3)]
+            g = lambda f, a: np.gradient(f, ax[a], axis=a)
+            wy = (g(u[0], 2) - g(u[2], 0))[:, jy, :].T
+            wz = (g(u[1], 0) - g(u[0], 1))[:, :, kz].T
+            return [wy, wz]
     else:
-        cmap, label, vmax, vmin = "RdBu_r", r"$u'/u_\tau$", 5.0, -5.0
-        xl, yl = r"$x/h$", r"spanwise coordinate$/h$"
-        ext = (ax[0][0], ax[0][-1], ax[1][0], ax[1][-1])
+        cmap, sym = "RdBu_r", True
+        label = r"$u'/u_\tau$"
+        panels = [dict(ext=(ax[0][0], ax[0][-1], ax[1][0], ax[1][-1]), xl=r"$x/h$", yl=r"spanwise coordinate$/h$",
+                       txt=None)]
 
         def frame(i):
             u = to_grid(nc["U"][i][:, 0], idx, shape)
-            return (u[:, :, args.layer] - u.mean(axis=(0, 1))[args.layer]).T
+            return [(u[:, :, args.layer] - u.mean(axis=(0, 1))[args.layer]).T]
 
     fields = [frame(i) for i in frames]
-    if vmax is None:
-        vmax = float(np.percentile(np.stack(fields), 99.5))
-    aspect = (ext[1] - ext[0]) / (ext[3] - ext[2])
-    h = 3.4 if aspect < 1.5 else 2.6
+    if args.case == "channel":
+        vmax = 5.0
+    else:
+        vmax = float(np.percentile(np.abs(np.stack([np.stack(f) for f in fields])), args.pct))
+    npan = len(panels)
+    wide = args.case == "channel"
     with tempfile.TemporaryDirectory() as tmp:
-        for k, (i, f) in enumerate(zip(frames, fields)):
-            fig, a = plt.subplots(figsize=(h * min(aspect, 3.0) + 1.3, h), constrained_layout=True)
-            im = a.imshow(f, origin="lower", extent=ext, cmap=cmap, vmin=vmin, vmax=vmax, aspect="equal",
-                          interpolation="bilinear")
-            a.set_xlabel(xl)
-            a.set_ylabel(yl)
-            a.text(0.02, 0.96, rf"$t={t[i]:.1f}$", transform=a.transAxes, ha="left", va="top",
-                   bbox=dict(fc="white", ec="none", alpha=0.8, pad=1.5))
-            fig.colorbar(im, ax=a, pad=0.02, label=label)
+        for k, (i, fl) in enumerate(zip(frames, fields)):
+            if wide:
+                fig, axs = plt.subplots(1, 1, figsize=(7.0, 2.8), constrained_layout=True)
+                axs = [axs]
+            else:
+                fig, axs = plt.subplots(1, npan, figsize=(7.4, 3.9), constrained_layout=True)
+            for a, f, p in zip(axs, fl, panels):
+                im = a.imshow(f, origin="lower", extent=p["ext"], cmap=cmap, vmin=-vmax, vmax=vmax, aspect="equal",
+                              interpolation="bilinear")
+                a.set_xlabel(p["xl"])
+                a.set_ylabel(p["yl"])
+                if p["txt"]:
+                    a.text(0.03, 0.97, p["txt"], transform=a.transAxes, ha="left", va="top",
+                           bbox=dict(fc="white", ec="none", alpha=0.85, pad=1.5))
+            if not wide:
+                for a, tag in zip(axs, "ab"):
+                    plotstyle.panel_label(a, f"({tag})")
+                axs[1].set_ylabel("")
+                fig.colorbar(im, ax=axs, orientation="horizontal", pad=0.04, shrink=0.7, aspect=40, label=label)
+                fig.text(0.99, 0.985, rf"$t={t[i]:.1f}$", ha="right", va="top")
+            else:
+                axs[0].text(0.02, 0.96, rf"$t={t[i]:.1f}$", transform=axs[0].transAxes, ha="left", va="top",
+                            bbox=dict(fc="white", ec="none", alpha=0.8, pad=1.5))
+                fig.colorbar(im, ax=axs[0], pad=0.02, label=label)
             fig.savefig(os.path.join(tmp, f"f_{k:04d}.png"), dpi=130)
             plt.close(fig)
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         frames_to_gif(os.path.join(tmp, "f_%04d.png"), args.out, fps=args.fps, width=args.width)
-    print(f"{args.out}: {len(frames)} frames, {os.path.getsize(args.out) / 1e6:.2f} MB")
+    print(f"{args.out}: {len(frames)} frames, vmax={vmax:.3g}, {os.path.getsize(args.out) / 1e6:.2f} MB")
 
 
 if __name__ == "__main__":
