@@ -35,7 +35,7 @@ jekyll_to_pandoc() {
   '
 }
 
-for page in installation usage preprocessing input-reference theory examples tools development; do
+for page in installation usage preprocessing input-reference theory validation examples tools development; do
   strip_front_matter "$ROOT_DIR/$page.md" | jekyll_to_pandoc >> "$TMP_MD"
   printf "\n\n" >> "$TMP_MD"
 done

@@ -28,6 +28,7 @@ contents.
   diffusion methods, SGS/wall modeling, atmospheric boundary layer (MOST,
   SEM, Davies relaxation), mesh partitioning, and pressure backend details
   with method-specific citations.
+- `validation.md`: Benchmark results (advection order, Taylor-Green, cavity, channel Re_tau 395 and 2000, Michelstadt in progress) with figures, animations, error tables and reproduction commands; assets in `assets/validation/`.
 - `usage.md`: Running, restart, GPU runs, boundary condition types, outputs,
   advection naming, recommended numerics, ABL setup (MOST wall model, SEM
   inflow, nudging), and long-time stability checks.
@@ -39,7 +40,7 @@ contents.
   by processing this file.
 - `references.bib`: DOI-backed bibliography used by Pandoc citeproc.
 - `build.sh`: Concatenates installation, usage, pre-processing, input
-  reference, theory, examples, tools and development pages (front matter stripped) behind a single title block, then renders HTML and
+  reference, theory, validation, examples, tools and development pages (front matter stripped) behind a single title block, then renders HTML and
   PDF with table of contents and citation processing via Pandoc.
 - `pdf-code-wrap.lua`, `pdf-header.tex`: PDF-only helpers that let inline code and code blocks wrap.
 - `_config.yml`, `_includes/head_custom.html`: Jekyll/just-the-docs

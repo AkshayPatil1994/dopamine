@@ -26,6 +26,7 @@ optional OpenACC/CUDA offload, and NetCDF/XDMF output.
 | Look up an input parameter, default or unit | [Input Reference](input-reference) |
 | Set up an atmospheric boundary layer or urban case | [Usage: ABL module](usage#atmospheric-boundary-layer-abl-module) |
 | Understand the numerics and models | [Theory](theory) |
+| See the benchmark and DNS comparisons | [Validation](validation) |
 | Use the helper executables and scripts | [Tools](tools) |
 | Change or extend the code | [Development](development) |
 | Find the literature | [References](references) |

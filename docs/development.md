@@ -1,6 +1,6 @@
 ---
 title: Development
-nav_order: 9
+nav_order: 10
 ---
 
 <!-- SPDX-FileCopyrightText: 2026 DOPAMINE contributors -->
@@ -121,7 +121,9 @@ existing one and register it in `tests/CMakeLists.txt`.
 `examples/` holds runnable cases used for physical validation beyond unit
 tests (Taylor-Green vortex, channel flow at Re_τ=395, lid-driven cavity, ABL
 SEM-driven channel, etc. — see [examples/README.md](https://github.com/AkshayPatil1994/dopamine/blob/main/examples/README.md)).
-There is no CI workflow running these automatically today; validating a
+The figures on the [Validation](validation.md) page come from the `plot_validation.py` scripts in these
+directories (shared style in `examples/common/plotstyle.py`); rerun them after any change that moves a
+validation result and update the tables on that page. There is no CI workflow running these automatically today; validating a
 numerics or physics change against the relevant example case before opening a
 PR is a manual step. Each example directory carries its own analysis scripts
 (for example `examples/channelAMDvalidation/postprocess.py` and

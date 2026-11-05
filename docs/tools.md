@@ -1,6 +1,6 @@
 ---
 title: Tools
-nav_order: 8
+nav_order: 9
 ---
 
 <!-- SPDX-FileCopyrightText: 2026 DOPAMINE contributors -->
@@ -54,6 +54,7 @@ lattice for the generator. Workflow: [Usage: Inflow-plane databases](usage.md#in
 | Script | Purpose |
 |---|---|
 | `examples/channelAMDvalidation/postprocess.py` | Compare AMD/Vreman channel runs against reference profiles |
+| `examples/*/plot_validation.py`, `examples/common/animate_slices.py` | Validation figures and animations for [Validation](validation.md); shared style in `examples/common/plotstyle.py` |
 | `examples/convergence_test/run_convergence.py`, `plot_convergence.py` | Run and plot the spatial convergence study |
 | `examples/convergence_test/run_advection.py`, `plot_advection.py` | Advection-scheme accuracy study |
 | `examples/lid_driven_cavity/compare_grids.py`, `animate_cavity.py` | Cavity grid comparison and animation |
