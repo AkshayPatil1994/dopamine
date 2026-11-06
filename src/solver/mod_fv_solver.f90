@@ -2813,7 +2813,7 @@ contains
     gp => self%w_gp
     have_pair = allocated(self%mesh%periodic_pair)
 
-    !$acc data copyin(p, gp) copy(ff)
+    !$acc data copyin(p, gp, pval) copy(ff)
     ! idx <-> f_mesh is a bijection over the assembled faces: each idx writes a distinct
     ! face_flux(f_mesh), so unlike the rhs_p scatter-adds this loop is race-free as-is.
 #ifdef _OPENACC
@@ -2992,7 +2992,7 @@ contains
       perm => fmi  ! placeholder, unused when not colored (idx is taken directly)
     end if
 
-    !$acc data copyin(p, gp, Tcell) copy(gpc, U)
+    !$acc data copyin(p, gp, Tcell, pval) copy(gpc, U)
     !$acc parallel loop default(present)
     do c = 1, nc
       gpc(1, c) = 0.0_rp
