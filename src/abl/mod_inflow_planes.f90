@@ -39,6 +39,8 @@ module mod_inflow_planes
     integer(ip) :: ckey_seg(NCACHE) = -1, ckey_it(NCACHE) = -1, clast(NCACHE) = 0
     integer(ip) :: tick = 0
     real(rp), allocatable :: cdata(:,:,:,:)    ! (ny, nz, 3, NCACHE)
+    integer(ip) :: gkey_seg(NCACHE) = -1, gkey_it(NCACHE) = -1, gkey_shift(NCACHE) = 0, glast(NCACHE) = 0
+    real(rp), allocatable :: gdata(:,:,:,:)    ! (nuy, nz, 3, NCACHE) frames after the spanwise interpolation
   end type InflowPlanes
 
   public :: inflow_planes_open, inflow_planes_bind, inflow_planes_eval, inflow_planes_close
@@ -152,6 +154,7 @@ contains
     call inflow_db_close(fp%db)
     fp%ready = .false.
     if (allocated(fp%cdata)) deallocate(fp%cdata)
+    if (allocated(fp%gdata)) deallocate(fp%gdata)
     if (allocated(fp%sched_seg)) deallocate(fp%sched_seg)
     fp%n_sched = 0
   end subroutine inflow_planes_close
@@ -407,6 +410,9 @@ contains
 
       frac_y = real(count([(fp%jm(fp%uy(i)) >= 0, i = 1, nf)]), rp) / real(max(nf, 1_ip), rp)
       frac_z = real(count([(fp%zn(fp%uz(i)) == 1, i = 1, nf)]), rp) / real(max(nf, 1_ip), rp)
+      if (allocated(fp%gdata)) deallocate(fp%gdata)
+      allocate(fp%gdata(fp%nuy, nz, 3, NCACHE))
+      fp%gkey_seg = -1; fp%gkey_it = -1; fp%gkey_shift = 0; fp%glast = 0
     end associate
     fp%ready = .true.
 
@@ -511,16 +517,15 @@ contains
     slot = oldest
   end function frame_slot
 
-  !> The cubic-in-time plane of stream (seg) at local time tau, shifted by `shift` nodes, before
-  !> spatial interpolation: out(ny, nz, 3) in the profile frame.
-  subroutine inflow_planes_time_field(fp, seg, tau, out)
-    type(InflowPlanes), intent(inout) :: fp
-    integer(ip),        intent(in)    :: seg
-    real(rp),           intent(in)    :: tau
-    real(rp),           intent(out)   :: out(:,:,:)
+  !> First frame index and Catmull-Rom weights of the 4-frame stencil at local time tau.
+  subroutine time_stencil(fp, tau, i0, w)
+    type(InflowPlanes), intent(in)  :: fp
+    real(rp),           intent(in)  :: tau
+    integer(ip),        intent(out) :: i0
+    real(rp),           intent(out) :: w(4)
 
-    integer(ip) :: i0, c, it, slot, nt
-    real(rp) :: x, th, w(4)
+    integer(ip) :: nt
+    real(rp) :: x, th
 
     nt = fp%db%h%nt
     x = min(max(tau, 0.0_rp), fp%T_seg) / fp%db%h%dt_p
@@ -530,6 +535,21 @@ contains
       i0 = nt - 1_ip; th = 1.0_rp
     end if
     call inflow_catmull_rom(th, w)
+  end subroutine time_stencil
+
+  !> The cubic-in-time plane of stream (seg) at local time tau, shifted by `shift` nodes, before
+  !> spatial interpolation: out(ny, nz, 3) in the profile frame.
+  subroutine inflow_planes_time_field(fp, seg, tau, out)
+    type(InflowPlanes), intent(inout) :: fp
+    integer(ip),        intent(in)    :: seg
+    real(rp),           intent(in)    :: tau
+    real(rp),           intent(out)   :: out(:,:,:)
+
+    integer(ip) :: i0, c, it, slot, nt
+    real(rp) :: w(4)
+
+    nt = fp%db%h%nt
+    call time_stencil(fp, tau, i0, w)
     out = 0.0_rp
     do c = 1, 4
       it = min(max(i0 + c - 2_ip, 1_ip), nt)
@@ -538,20 +558,60 @@ contains
     end do
   end subroutine inflow_planes_time_field
 
-  !> Spatially interpolate a time-field plane to the faces, applying a spanwise shift of `shift`
-  !> nodes; result in the profile frame.
-  subroutine plane_to_faces(fp, plane, shift, ul)
+  !> Cache slot holding frame (seg, it) already interpolated along the span for `shift`.
+  integer(ip) function g_slot(fp, seg, it, shift) result(slot)
+    type(InflowPlanes), intent(inout) :: fp
+    integer(ip),        intent(in)    :: seg, it, shift
+    integer(ip) :: c, oldest, raw
+
+    fp%tick = fp%tick + 1
+    do c = 1, NCACHE
+      if (fp%gkey_seg(c) == seg .and. fp%gkey_it(c) == it .and. fp%gkey_shift(c) == shift) then
+        slot = c; fp%glast(c) = fp%tick; return
+      end if
+    end do
+    oldest = 1
+    do c = 2, NCACHE
+      if (fp%glast(c) < fp%glast(oldest)) oldest = c
+    end do
+    raw = frame_slot(fp, seg, it)
+    call plane_to_g(fp, fp%cdata(:, :, :, raw), shift, fp%gdata(:, :, :, oldest))
+    fp%gkey_seg(oldest) = seg; fp%gkey_it(oldest) = it; fp%gkey_shift(oldest) = shift; fp%glast(oldest) = fp%tick
+    slot = oldest
+  end function g_slot
+
+  !> As inflow_planes_time_field, but on the span-interpolated frames: out(nuy, nz, 3).
+  subroutine time_field_g(fp, seg, shift, tau, out)
+    type(InflowPlanes), intent(inout) :: fp
+    integer(ip),        intent(in)    :: seg, shift
+    real(rp),           intent(in)    :: tau
+    real(rp),           intent(out)   :: out(:,:,:)
+
+    integer(ip) :: i0, c, it, slot, nt
+    real(rp) :: w(4)
+
+    nt = fp%db%h%nt
+    call time_stencil(fp, tau, i0, w)
+    out = 0.0_rp
+    do c = 1, 4
+      it = min(max(i0 + c - 2_ip, 1_ip), nt)
+      slot = g_slot(fp, seg, it, shift)
+      out = out + w(c) * fp%gdata(:, :, :, slot)
+    end do
+  end subroutine time_field_g
+
+  !> Interpolate a plane along the span to the unique face offsets, shifted by `shift` nodes: g(nuy, nz, 3).
+  subroutine plane_to_g(fp, plane, shift, g)
     type(InflowPlanes), intent(in)  :: fp
     real(rp),           intent(in)  :: plane(:,:,:)
     integer(ip),        intent(in)  :: shift
-    real(rp),           intent(out) :: ul(:,:)
+    real(rp),           intent(out) :: g(:,:,:)
 
-    integer(ip) :: u, j, k, c, ny, nz, i, n, s0, jj
-    real(rp), allocatable :: g(:,:,:)
+    integer(ip) :: u, j, k, c, ny, nz, s
     real(rp) :: acc
 
     ny = fp%db%h%ny; nz = fp%db%h%nz
-    allocate(g(fp%nuy, nz, 3))
+    s = modulo(shift, ny)
     do c = 1, 3
       do k = 1, nz
         do u = 1, fp%nuy
@@ -559,15 +619,28 @@ contains
             g(u, k, c) = plane(modulo(fp%jm(u) + shift, ny) + 1, k, c)
           else
             acc = 0.0_rp
-            do j = 0, ny - 1
-              jj = modulo(j + shift, ny) + 1
-              acc = acc + fp%wy(j + 1, u) * plane(jj, k, c)
+            do j = 0, ny - s - 1
+              acc = acc + fp%wy(j + 1, u) * plane(j + s + 1, k, c)
+            end do
+            do j = ny - s, ny - 1
+              acc = acc + fp%wy(j + 1, u) * plane(j + s - ny + 1, k, c)
             end do
             g(u, k, c) = acc
           end if
         end do
       end do
     end do
+  end subroutine plane_to_g
+
+  !> Interpolate span-interpolated planes g(nuy, nz, 3) to the faces along the height; result in the profile frame.
+  subroutine g_to_faces(fp, g, ul)
+    type(InflowPlanes), intent(in)  :: fp
+    real(rp),           intent(in)  :: g(:,:,:)
+    real(rp),           intent(out) :: ul(:,:)
+
+    integer(ip) :: u, k, c, i, n, s0
+    real(rp) :: acc
+
     do i = 1, fp%nf
       u = fp%uz(i); n = fp%zn(u); s0 = fp%zs0(u)
       do c = 1, 3
@@ -578,7 +651,7 @@ contains
         ul(c, i) = acc
       end do
     end do
-  end subroutine plane_to_faces
+  end subroutine g_to_faces
 
   !> Fluctuation (global axes) at the mapped faces at physical time t.
   subroutine inflow_planes_eval(fp, t, fluc)
@@ -588,23 +661,23 @@ contains
 
     integer(ip) :: m, seg, shift, i, c
     real(rp) :: te, tau, th, wn, wo
-    real(rp), allocatable :: pl(:,:,:), ua(:,:), ub(:,:)
+    real(rp), allocatable :: g(:,:,:), ua(:,:), ub(:,:)
 
     if (.not. fp%ready) error stop 'inflow_planes_eval: faces are not bound'
     te = max(t + fp%t_offset, 0.0_rp)
     m = int(floor(te / fp%P), ip)
     tau = te - real(m, rp) * fp%P
 
-    allocate(pl(fp%db%h%ny, fp%db%h%nz, 3), ua(3, fp%nf))
+    allocate(g(fp%nuy, fp%db%h%nz, 3), ua(3, fp%nf))
     call inflow_stream(fp, m, seg, shift)
-    call inflow_planes_time_field(fp, seg, tau, pl)
-    call plane_to_faces(fp, pl, shift, ua)
+    call time_field_g(fp, seg, shift, tau, g)
+    call g_to_faces(fp, g, ua)
 
     if (m >= 1 .and. tau < fp%T_x) then
       allocate(ub(3, fp%nf))
       call inflow_stream(fp, m - 1_ip, seg, shift)
-      call inflow_planes_time_field(fp, seg, tau + fp%P, pl)
-      call plane_to_faces(fp, pl, shift, ub)
+      call time_field_g(fp, seg, shift, tau + fp%P, g)
+      call g_to_faces(fp, g, ub)
       th = 0.5_rp * PI * tau / fp%T_x
       wn = sin(th); wo = cos(th)
       ua = wn * ua + wo * ub
