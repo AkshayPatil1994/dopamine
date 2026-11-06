@@ -63,6 +63,8 @@ program dopamine_main
   t_setup(0) = MPI_Wtime()
   call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
   call MPI_Comm_size(MPI_COMM_WORLD, nranks, ierr)
+  if (limit_threads_per_rank(nranks) .and. rank == 0) &
+    write(*, '(A)') ' OMP_NUM_THREADS is not set: using 1 thread per rank (set it to run hybrid MPI + OpenMP)'
 
   ! Parse command line
   if (command_argument_count() < 1) then

@@ -30,7 +30,7 @@ module mod_parameters
   real(rp), parameter, public :: VSMALL = 1.0e-200_rp
   real(rp), parameter, public :: GREAT  = 1.0e15_rp
 
-  public :: threaded_face_loops
+  public :: threaded_face_loops, limit_threads_per_rank
 
   ! Face type flags
   integer(ip), parameter, public :: FACE_INTERNAL  = 0
@@ -89,5 +89,25 @@ contains
     threaded_face_loops = .false.
 #endif
   end function threaded_face_loops
+
+  !> Several ranks without OMP_NUM_THREADS would each start one thread per core: use one thread per rank. True if it did.
+  logical function limit_threads_per_rank(nranks)
+#if defined(_OPENMP)
+    use omp_lib, only: omp_set_num_threads
+#endif
+    integer(ip), intent(in) :: nranks
+#if defined(_OPENMP)
+    integer :: env_len
+#endif
+
+    limit_threads_per_rank = .false.
+#if defined(_OPENMP)
+    call get_environment_variable('OMP_NUM_THREADS', length=env_len)
+    if (nranks > 1 .and. env_len == 0) then
+      call omp_set_num_threads(1)
+      limit_threads_per_rank = .true.
+    end if
+#endif
+  end function limit_threads_per_rank
 
 end module mod_parameters
