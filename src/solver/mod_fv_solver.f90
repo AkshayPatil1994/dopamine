@@ -192,8 +192,7 @@ module mod_fv_solver
     integer(ip) :: n_wallmodel_patches = 0
     integer(ip) :: n_periodic_bfaces = 0
     integer(ip) :: n_nonperiodic_bfaces = 0
-    logical,  allocatable :: w_outlet_cell(:)   ! (nc) precomputed outlet cell mask
-    real(rp), allocatable :: w_outlet_pval(:)   ! (nc) reference pressure per outlet cell
+    integer(ip) :: n_outlet_global = 0          ! global count of outlet boundary faces
     real(rp), allocatable :: patch_p_val(:)     ! (n_patches) bc_configs(:)%p_val, flat for device kernels
     real(rp), allocatable :: outlet_pb(:)       ! (n_bnd_faces) outlet face pressure: p_val less the backflow traction
     !> Static projection operator arrays (psolver indices/coefficients, non-orthogonal caches,
@@ -310,7 +309,7 @@ contains
 
     integer(ip) :: nc, ng, nbnd, s, c
     logical     :: want_planes
-    integer(ip) :: q_out, f_loc_out, f_bnd_out, f_glob_out, ocell_out
+    integer(ip) :: q_out, f_loc_out, n_out_local, ierr_out
 
     self%mesh    => msh
     call copy_solver_params(self%params, params)
@@ -405,25 +404,12 @@ contains
     end do
     call build_patch_classification(self)
 
-    ! Precompute outlet cell mask once so anchor_pressure_to_outlet avoids per-call allocation.
-    allocate(self%w_outlet_cell(nc), source=.false.)
-    allocate(self%w_outlet_pval(nc), source=0.0_rp)
+    ! Whether any outlet exists is static; anchor_pressure_to_outlet needs only this global count.
+    n_out_local = 0
     do q_out = 1, msh%n_patches
-      if (bc_configs(q_out)%bc_id /= BC_OUTLET) cycle
-      associate(patch_out => msh%patches(q_out))
-        do f_loc_out = 1, patch_out%n_faces
-          f_bnd_out  = patch_out%start_face + f_loc_out - 1
-          f_glob_out = msh%n_int_faces + f_bnd_out
-          ocell_out  = msh%faces(f_glob_out)%owner
-          if (ocell_out >= 1 .and. ocell_out <= nc) then
-            if (.not. self%w_outlet_cell(ocell_out)) then
-              self%w_outlet_cell(ocell_out) = .true.
-              self%w_outlet_pval(ocell_out) = bc_configs(q_out)%p_val
-            end if
-          end if
-        end do
-      end associate
+      if (bc_configs(q_out)%bc_id == BC_OUTLET) n_out_local = n_out_local + msh%patches(q_out)%n_faces
     end do
+    call MPI_Allreduce(n_out_local, self%n_outlet_global, 1, MPI_INTEGER, MPI_SUM, msh%comm, ierr_out)
 
     ! Initialize boundary face values after BC configurations are available.
     call apply_all_bc(self)
@@ -893,7 +879,7 @@ contains
       end block
     end if
 
-    call anchor_pressure_to_outlet(self%p(1:nc), self%mesh, self%w_outlet_cell, self%w_outlet_pval, self%on_device)
+    call anchor_pressure_to_outlet(self%p(1:nc), self%mesh, self%n_outlet_global, self%V_total_global, self%on_device)
     call self%mesh%exchange_halos_scalar(self%p)
     call correct_face_fluxes(self, dt_use, p_is_total=.true.)  ! phi is the whole pressure here
     self%U_face(:) = self%face_flux(:)  ! persist divergence-free flux for advection
@@ -1584,7 +1570,7 @@ contains
       do c = 1, nc
         p(c) = p(c) + p_old(c)
       end do
-      call anchor_pressure_to_outlet(self%p(1:nc), self%mesh, self%w_outlet_cell, self%w_outlet_pval, self%on_device)
+      call anchor_pressure_to_outlet(self%p(1:nc), self%mesh, self%n_outlet_global, self%V_total_global, self%on_device)
       call self%mesh%begin_halos_scalar(self%p)
       call apply_pressure_bc_o2(self)
       call self%mesh%end_halos_scalar(self%p)
@@ -3312,7 +3298,7 @@ contains
     !$acc      self%grad_U, self%grad_T, self%face_flux, self%w_H_U, self%w_H_T, self%w_H_C, &
     !$acc      self%w_rhs_p, self%w_U0, self%w_T0, self%w_C0, self%w_conv_U, self%w_visc_U, &
     !$acc      self%w_conv_T, self%w_visc_T, self%w_flux_built, self%w_gp, self%w_gp_rc, &
-    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval, self%w_phi_it, &
+    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_phi_it, &
     !$acc      self%outlet_pb)
     !$acc update device(self%U_face, self%inv_vol)
     if (self%params%n_scalars > 0) then
@@ -3362,7 +3348,7 @@ contains
     !$acc      self%grad_U, self%grad_T, self%face_flux, self%w_H_U, self%w_H_T, self%w_H_C, &
     !$acc      self%w_rhs_p, self%w_U0, self%w_T0, self%w_C0, self%w_conv_U, self%w_visc_U, &
     !$acc      self%w_conv_T, self%w_visc_T, self%w_flux_built, self%w_gp, self%w_gp_rc, &
-    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_outlet_cell, self%w_outlet_pval, self%w_phi_it, &
+    !$acc      self%w_gp_cell, self%w_p_tot, self%w_p_tot_bnd, self%w_phi_it, &
     !$acc      self%outlet_pb)
     if (self%params%n_scalars > 0) then
       !$acc exit data delete(self%C, self%C_bnd, self%grad_C, self%w_conv_C, self%w_visc_C, &
@@ -3620,78 +3606,35 @@ contains
     end do
   end subroutine cell_velocity_divergence
 
-  !> Shift pressure so the mean at outlet cells equals p_ref (MPI-consistent).
-  subroutine anchor_pressure_to_outlet(p, msh, outlet_cell, outlet_pval, dev)
+  !> Remove the volume-weighted mean pressure when no outlet fixes the level (MPI-consistent).
+  subroutine anchor_pressure_to_outlet(p, msh, n_outlet_global, vol_global, dev)
     real(rp),    intent(inout) :: p(:)  ! pressure array (n_cells)
     type(Mesh),  intent(in), target :: msh
-    logical,     intent(in)    :: outlet_cell(:)  ! (n_cells) precomputed outlet mask
-    real(rp),    intent(in)    :: outlet_pval(:)  ! (n_cells) reference pressure per outlet cell
-    logical,     intent(in)    :: dev  ! p/outlet arrays are device-resident
+    integer(ip), intent(in)    :: n_outlet_global  ! global outlet face count
+    real(rp),    intent(in)    :: vol_global  ! global domain volume
+    logical,     intent(in)    :: dev  ! p/volume arrays are device-resident
 
-    integer(ip) :: ocell, nc
-    real(rp)    :: p_sum, p_ref_sum, p_ref, p_shift
-    integer(ip) :: n_out, n_ref
-    integer(ip) :: ierr
-    real(rp)    :: buf(2)
+    integer(ip) :: c, nc, ierr
+    real(rp)    :: pmean_local, pmean_global, p_shift
     real(rp), pointer :: cvol(:)
+
+    ! A Dirichlet outlet fixes the level through the phi = 0 boundary rows; no shift is applied.
+    if (n_outlet_global > 0) return
 
     nc = msh%n_cells
     cvol => msh%cell_volume_soa
-    p_sum = 0.0_rp;  n_out = 0
-    p_ref_sum = 0.0_rp
-    p_ref = 0.0_rp
-
-    !$acc parallel loop if(dev) default(present) reduction(+:p_sum, p_ref_sum, n_out)
-    do ocell = 1, nc
-      if (outlet_cell(ocell)) then
-        p_sum     = p_sum     + p(ocell)
-        p_ref_sum = p_ref_sum + outlet_pval(ocell)
-        n_out     = n_out     + 1
-      end if
+    pmean_local = 0.0_rp
+    !$acc parallel loop if(dev) default(present) reduction(+:pmean_local)
+    do c = 1, nc
+      pmean_local = pmean_local + p(c) * cvol(c)
     end do
-
-    ! Global sum across MPI ranks; n_out reduced as integer to avoid FP precision issues.
-    buf(1) = p_sum
-    buf(2) = p_ref_sum
-    call MPI_Allreduce(MPI_IN_PLACE, buf, 2, MPI_DOUBLE_PRECISION, &
+    call MPI_Allreduce(pmean_local, pmean_global, 1, MPI_DOUBLE_PRECISION, &
                        MPI_SUM, msh%comm, ierr)
-    call MPI_Allreduce(MPI_IN_PLACE, n_out, 1, MPI_INTEGER, &
-                       MPI_SUM, msh%comm, ierr)
-    p_sum = buf(1)
-    p_ref_sum = buf(2)
-    n_ref = n_out
-
-    if (n_out > 0 .and. n_ref > 0) then
-      ! A Dirichlet outlet fixes the level through the phi = 0 boundary rows; re-anchoring the mean
-      ! outlet-cell pressure to the mean p_val would erase any difference between outlet patches.
-      p_ref = p_ref_sum / real(n_ref, rp)
-      p_shift = 0.0_rp
-    else
-      ! pure-Neumann case (no outlet anywhere) - pressure is determined
-      ! only up to a constant. Anchor by subtracting the global volume-weighted mean.
-      block
-        real(rp) :: vol_local, vol_global, pmean_local, pmean_global, gbuf(2)
-        integer(ip) :: c
-        vol_local   = 0.0_rp
-        pmean_local = 0.0_rp
-        !$acc parallel loop if(dev) default(present) reduction(+:vol_local, pmean_local)
-        do c = 1, nc
-          vol_local   = vol_local   + cvol(c)
-          pmean_local = pmean_local + p(c) * cvol(c)
-        end do
-        gbuf(1) = vol_local
-        gbuf(2) = pmean_local
-        call MPI_Allreduce(MPI_IN_PLACE, gbuf, 2, MPI_DOUBLE_PRECISION, &
-                           MPI_SUM, msh%comm, ierr)
-        vol_global   = gbuf(1)
-        pmean_global = gbuf(2)
-        p_shift = 0.0_rp
-        if (vol_global > 0.0_rp) p_shift = pmean_global / vol_global
-      end block
-    end if
+    p_shift = 0.0_rp
+    if (vol_global > 0.0_rp) p_shift = pmean_global / vol_global
     !$acc parallel loop if(dev) default(present)
-    do ocell = 1, size(p)
-      p(ocell) = p(ocell) - p_shift
+    do c = 1, size(p)
+      p(c) = p(c) - p_shift
     end do
   end subroutine anchor_pressure_to_outlet
 
@@ -4426,8 +4369,6 @@ contains
     if (allocated(self%recon_Tinv)) deallocate(self%recon_Tinv)
     if (allocated(self%cell_is_refine)) deallocate(self%cell_is_refine)
     if (allocated(self%w_gp_prev))  deallocate(self%w_gp_prev)
-    if (allocated(self%w_outlet_cell)) deallocate(self%w_outlet_cell)
-    if (allocated(self%w_outlet_pval)) deallocate(self%w_outlet_pval)
     if (allocated(self%patch_p_val))   deallocate(self%patch_p_val)
     if (allocated(self%outlet_pb))     deallocate(self%outlet_pb)
     if (allocated(self%w_Cs))          deallocate(self%w_Cs)
