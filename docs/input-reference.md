@@ -133,6 +133,8 @@ Raw PETSc options injected into the PETSc options database before `KSPSetFromOpt
 | `n_petsc_options` | `0` | Number of entries used in `petsc_options_tmp` (maximum 32). |
 | `petsc_options_tmp(i)` | none | One PETSc option string per entry, exactly as on the command line, e.g. `'-pc_hypre_boomeramg_strong_threshold 0.6'`. Multi-GPU settings: [Usage: Multi-GPU](usage.md#multi-gpu-one-mpi-rank-per-gpu). |
 
+The pressure solve is the largest share of the step on CPU (about 60-65% for a periodic 64^3 box, 1-8 MPI ranks). On that case `'-pc_hypre_boomeramg_agg_nl 1'` with `'-pc_hypre_boomeramg_strong_threshold 0.25'` cut the pressure time by about 26-40% at the same `p_tol` (more CG iterations, cheaper V-cycles). These are not defaults: with `cell_projection = 'EXACT'` they change results at the 1e-5 level, because the cell projection iterates against a loose pressure solve. Keep the smoother symmetric (the default) with CG; `l1-gauss-seidel` raised the iteration count about sixfold.
+
 ## &dopamine_stats
 
 Cadence of the on-screen/CSV monitor and default cadence of the sampling objects. A value of `0` disables.
