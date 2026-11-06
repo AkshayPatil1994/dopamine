@@ -5,6 +5,7 @@ module mod_parameters
   use mod_kinds
   implicit none
   private
+  public :: threaded_face_loops, limit_threads_per_rank
 
   ! Mathematical constants
   real(rp), parameter, public :: PI    = 3.14159265358979323846_rp
@@ -29,8 +30,6 @@ module mod_parameters
   real(rp), parameter, public :: SMALL  = 1.0e-30_rp
   real(rp), parameter, public :: VSMALL = 1.0e-200_rp
   real(rp), parameter, public :: GREAT  = 1.0e15_rp
-
-  public :: threaded_face_loops, limit_threads_per_rank
 
   ! Face type flags
   integer(ip), parameter, public :: FACE_INTERNAL  = 0
