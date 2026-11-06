@@ -42,7 +42,8 @@ without it every rank would start one thread per core and oversubscribe the node
 
 Use one MPI rank per physical core and no OpenMP threads. This is the best-tested configuration; every number below
 was measured with `OMP_NUM_THREADS=1`, `mpirun -np N --bind-to core` and at most 8 ranks on one node (the 4.56M-cell
-case also ran on 8 ranks). Multi-threaded and multi-node runs were not tested.
+case also ran on 8 ranks). The speed of multi-threaded and multi-node runs was not measured; the threaded path is
+covered for correctness by the `regression_*_omp4` tests.
 
 - **Launch.** `mpirun -np N --bind-to core ./build/dopamine case.input` with N up to the number of physical cores
   (do not place two ranks on the two hardware threads of one core). Leave `OMP_NUM_THREADS` unset or set to `1`.
@@ -161,7 +162,8 @@ inflow, and the PETSc interface when the backend cannot take device pointers.
 The MOST wall model and `cell_projection = 'EXACT'` run on the device; `'EXACT'`
 is single-rank on the GPU and falls back to `'LS'` with a warning on more ranks.
 Its PCG stops at a loose tolerance, so GPU results differ from the CPU at about
-1e-5 (use `REGRESSION_RTOL=1e-4` for the `*_exact` regression cases). A
+1e-5 (use `REGRESSION_RTOL=1e-3` for the regression cases on the GPU; the at-rest `hydro_exact` check, whose `Umax` is
+about 2e-3, differs from the CPU reference by up to 4%, with or without the pressure-solver tuning of the performance section). A
 single-GPU timing run is `tests/bench/run_bench.sh <N> <workdir>`. See [Installation: OpenACC build](installation.md#openacc-nvfortran-build)
 for the build recipe (`build-acc26/`).
 
