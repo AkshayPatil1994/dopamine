@@ -733,7 +733,8 @@ contains
       ch = achar(int(iand(int(bytes(pos), int32), int(z'FF', int32))))
       if (ch /= '(') error stop 'foam_read_faces_binary: expected opening paren in list'
       pos = pos + 1
-      call foam_skip_ws_bytes(bytes, pos)
+      ! Binary payload starts immediately after '(': do NOT skip whitespace, the first label's
+      ! low byte can equal ' ', \t, \n or \r and would be swallowed.
 
       n_faces = n_offsets - 1
       allocate(face_offset(n_faces + 1))
@@ -868,8 +869,9 @@ contains
     list_close_pos = foam_rfind_char(bytes, ')')
     if (list_close_pos <= list_open_pos) error stop trim(context)//': could not find list closing parenthesis'
 
+    ! Binary data begins immediately after '(': skipping whitespace here would swallow a first
+    ! value whose leading byte happens to be ' ', \t, \n or \r.
     data_pos = list_open_pos + 1
-    call foam_skip_ws_bytes(bytes, data_pos)
   end subroutine foam_binary_locate_list
 
   subroutine foam_skip_ws_bytes(bytes, pos)
