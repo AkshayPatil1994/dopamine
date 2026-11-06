@@ -189,7 +189,7 @@ contains
     real(rp)       :: p_tol            = 1.0e-10_rp
     integer(ip)    :: p_max_iter       = 1000
     real(rp)       :: p_target_divU    = 1.0e-08_rp
-    character(32)  :: pressure_solver  = 'boomeramg'  ! boomeramg | gamg
+    character(32)  :: pressure_solver  = 'auto'  ! auto (gamg on CPU, boomeramg on GPU) | boomeramg | gamg
     logical        :: use_rotational_projection = .true.
     logical        :: use_sgs = .true.
     integer(ip)    :: gg_iterations = 2
@@ -245,9 +245,9 @@ contains
       call input_fatal('sgs_model', sgs_model, 'VREMAN, SMAGORINSKY, DYNAMIC_SMAG, AMD')
     end select
     select case (trim(pressure_solver))
-    case ('boomeramg', 'gamg')
+    case ('auto', 'boomeramg', 'gamg')
     case default
-      call input_fatal('pressure_solver', pressure_solver, 'boomeramg, gamg')
+      call input_fatal('pressure_solver', pressure_solver, 'auto, boomeramg, gamg')
     end select
 
     associate(p => config%params)

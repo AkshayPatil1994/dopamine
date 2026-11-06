@@ -71,7 +71,7 @@ module mod_fv_solver
     real(rp)    :: p_tol        = 1.0e-10_rp
     integer(ip) :: p_max_iter   = 1000
     real(rp)    :: p_target_divU = 1.0e-8_rp  ! parsed but unused; atol comes from a fixed floor (see p_atol_factor)
-    character(32) :: pressure_solver = 'boomeramg'  ! boomeramg | gamg
+    character(32) :: pressure_solver = 'auto'  ! auto (gamg on CPU, boomeramg on GPU) | boomeramg | gamg
     logical     :: boussinesq   = .false.
     logical     :: adapt_dt     = .false.
     integer(ip) :: n_scalars = 0

@@ -40,6 +40,10 @@ module mod_pressure_solver
       character(kind=c_char), intent(in) :: solver_name(*)
     end subroutine
 
+    integer(c_int) function fvm_petsc_gpu_backend_active() bind(C)
+      use iso_c_binding
+    end function
+
     integer(c_int) function fvm_petsc_device_io_supported() bind(C)
       use iso_c_binding
     end function
@@ -113,6 +117,7 @@ contains
     real(rp) :: pair_dcf
     real(rp) :: d_on_vec(3), d_ortho, cos_floor
     integer(ip) :: rank, nranks
+    character(len=16) :: solver_name
 
     if (fvm_petsc_backend_available() == 0_c_int) then
       error stop 'pressure_solver_init: PETSc backend unavailable'
@@ -124,13 +129,19 @@ contains
       petsc_runtime_active = .true.
     end if
 
-    ! Set preconditioner before any KSP is created. Supported: 'boomeramg' | 'gamg' | 'gmres'.
+    ! Set preconditioner before any KSP is created. Supported: 'auto' | 'boomeramg' | 'gamg' | 'gmres'.
     if (present(solver_type)) then
-      if (trim(solver_type) == 'gmres') then
+      solver_name = trim(solver_type)
+      if (solver_name == 'auto') then
+        solver_name = 'gamg'
+        if (fvm_petsc_gpu_backend_active() /= 0_c_int) solver_name = 'boomeramg'
+        if (msh%rank == 0) write(*, '(A)') ' Pressure solver: auto -> ' // trim(solver_name)
+      end if
+      if (solver_name == 'gmres') then
         ! GMRES matrix-free: use ASM preconditioner
         call fvm_petsc_set_pressure_solver('gmres'//c_null_char)
       else
-        call fvm_petsc_set_pressure_solver(trim(solver_type)//c_null_char)
+        call fvm_petsc_set_pressure_solver(trim(solver_name)//c_null_char)
       end if
     else
       call fvm_petsc_set_pressure_solver('boomeramg'//c_null_char)

@@ -103,6 +103,11 @@ static int fvm_petsc_gpu_backend_enabled(void) {
 #endif
 }
 
+/* 1 when PETSc runs on the GPU (GAMG setup needs far more device memory than BoomerAMG there). */
+int fvm_petsc_gpu_backend_active(void) {
+  return fvm_petsc_gpu_backend_enabled();
+}
+
 static int fvm_petsc_gpu_aware_mpi_enabled(void) {
 #if defined(PETSC_HAVE_CUDA)
   const char *env = getenv("DOPAMINE_PETSC_USE_GPU_AWARE_MPI");
