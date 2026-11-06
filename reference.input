@@ -185,15 +185,18 @@
 
   ! Pressure preconditioner.
   !
-  !   'boomeramg' (default) - hypre BoomerAMG algebraic multigrid.
-  !       Best choice for large meshes and high MPI rank counts.
+  !   'auto' (default)      - 'gamg' on CPU runs, 'boomeramg' when the PETSc GPU backend is active
+  !       (GAMG needs far more device memory in its setup). The choice is printed at startup.
+  !
+  !   'gamg'                - PETSc native smoothed-aggregation AMG. Fastest tested option on CPU:
+  !       about 30-45% less time per step than 'boomeramg' on the urban LES meshes and the periodic box,
+  !       and no hypre needed. See "Pressure Projection and Linear Solve" in docs/usage.md.
+  !
+  !   'boomeramg'           - hypre BoomerAMG algebraic multigrid; the GPU choice.
   !       Requires PETSc built with --download-hypre=1 (DOPAMINE_PETSC_WITH_HYPRE=ON).
   !
-  !   'gamg'                - PETSc native smoothed-aggregation AMG.
-  !       Good for small/medium meshes or when hypre is unavailable.
-  !
   ! Either solver can be further tuned via &dopamine_PetscParams below.
-  pressure_solver = 'boomeramg'
+  pressure_solver = 'auto'
 
   ! Gradient reconstruction scheme for velocity, temperature, and scalar fields.
   !   'LEAST_SQUARES' (default) - weighted least-squares; accurate on skewed meshes.

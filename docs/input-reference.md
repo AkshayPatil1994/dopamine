@@ -92,7 +92,7 @@ Discretisation, time stepping, pressure solve and SGS model. Theory: [theory.md]
 
 | Parameter | Default | Meaning / how to use |
 |--------------------------|----------|------------------------------------------|
-| `pressure_solver` | `'boomeramg'` | `'boomeramg'` (hypre AMG; needs PETSc built with hypre) or `'gamg'` (PETSc native AMG). Tune further with [`&dopamine_PetscParams`](#dopamine_petscparams). |
+| `pressure_solver` | `'auto'` | `'auto'`: `'gamg'` on CPU runs, `'boomeramg'` when the PETSc GPU backend is active (the choice is printed at startup). `'gamg'` (PETSc native AMG; fastest tested on CPU) or `'boomeramg'` (hypre AMG; needs PETSc built with hypre; the GPU choice). Tune further with [`&dopamine_PetscParams`](#dopamine_petscparams). |
 | `p_tol` | `1.0e-10` | Poisson relative residual tolerance. |
 | `p_max_iter` | `1000` | Maximum Krylov iterations per solve. |
 | `p_target_divU` | `1.0e-8` | Parsed but currently has no effect. |
@@ -133,7 +133,7 @@ Raw PETSc options injected into the PETSc options database before `KSPSetFromOpt
 | `n_petsc_options` | `0` | Number of entries used in `petsc_options_tmp` (maximum 32). |
 | `petsc_options_tmp(i)` | none | One PETSc option string per entry, exactly as on the command line, e.g. `'-pc_hypre_boomeramg_strong_threshold 0.6'`. Multi-GPU settings: [Usage: Multi-GPU](usage.md#multi-gpu-one-mpi-rank-per-gpu). |
 
-The pressure solve is the largest share of the step on CPU (about 60-65% for a periodic 64^3 box, 1-8 MPI ranks). On that case `'-pc_hypre_boomeramg_agg_nl 1'` with `'-pc_hypre_boomeramg_strong_threshold 0.25'` cut the pressure time by about 26-40% at the same `p_tol` (more CG iterations, cheaper V-cycles). These are not defaults: with `cell_projection = 'EXACT'` they change results at the 1e-5 level, because the cell projection iterates against a loose pressure solve. Keep the smoother symmetric (the default) with CG; `l1-gauss-seidel` raised the iteration count about sixfold.
+The pressure solve is the largest share of the step on CPU. The default `pressure_solver = 'auto'` already uses the fastest tested option (`'gamg'`), and the other GAMG and BoomerAMG options tried here gave no further gain or were slower; the full list with timings and the fidelity check is in [Usage: Tested solver options](usage.md#tested-solver-options). Do not combine the non-symmetric `l1-gauss-seidel` smoother with CG.
 
 ## &dopamine_stats
 

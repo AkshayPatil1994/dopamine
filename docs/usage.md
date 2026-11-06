@@ -34,6 +34,43 @@ export OMP_NUM_THREADS=4
 mpirun -np 8 ./build/dopamine examples/channel_flow_retau395/channel_retau395.input
 ```
 
+With several ranks and `OMP_NUM_THREADS` unset, DOPAMINE uses one OpenMP thread per rank and prints a note at startup;
+without it every rank would start one thread per core and oversubscribe the node. Setting `OMP_NUM_THREADS` yourself
+(as above) is always respected, and a single rank keeps all available threads.
+
+### Performance tuning for pure-MPI (non-threaded) runs
+
+Use one MPI rank per physical core and no OpenMP threads. This is the best-tested configuration; every number below
+was measured with `OMP_NUM_THREADS=1`, `mpirun -np N --bind-to core` and at most 8 ranks on one node (the 4.56M-cell
+case also ran on 8 ranks). Multi-threaded and multi-node runs were not tested.
+
+- **Launch.** `mpirun -np N --bind-to core ./build/dopamine case.input` with N up to the number of physical cores
+  (do not place two ranks on the two hardware threads of one core). Leave `OMP_NUM_THREADS` unset or set to `1`.
+- **Face colouring.** Colouring the faces (needed only to run the face loops race-free on several threads or on a
+  GPU) is built only when OpenACC or more than one OpenMP thread is in use. One-thread ranks traverse the faces in mesh
+  order instead, which was 17% faster per step on a 1.6M-cell snappyHexMesh case at 8 ranks (the right-hand-side
+  transport term 3.3x faster, the pressure phase 21% faster) with identical monitor values.
+- **How far it scales.** Periodic 64^3 box (262k cells), 1/2/4/8 ranks: 1.50/0.89/0.55/0.33 s per step (efficiency 85%,
+  68%, 57%). Urban case with 1.6M cells, 2/4/8 ranks: 11.5/6.6/4.5 s per step (87% at 4 ranks, 64% at 8 ranks, both
+  relative to 2 ranks). Efficiency falls as ranks are added on one node; the AMG pressure solve scales worst (4.05x from
+  1 to 8 ranks on the box, against 5.35x for the right-hand-side assembly). The smallest size tested was 33k cells per
+  rank (the box at 8 ranks); the urban cases ran at 200k to 570k cells per rank.
+- **Read the Performance Snapshot** printed every 1000 steps and at the end of the run: `step_total` is split into `rhs`, `predictor`
+  (`pred_bc` is the boundary and inflow update), `pressure` (the explicit pressure solves) and `projection` (the
+  `EXACT` cell projection, which applies one pressure solve per CG iteration). `max` and `avg` are over ranks, so a
+  gap between them is load imbalance; the step total differed by less than 0.1% between ranks on the cases tested
+  (individual phases by up to about 5%). `p_iters/solve` is the Krylov
+  iteration count of one pressure solve. Halo exchange and boundary conditions (`halo+bc`) were 0.2% of the step or less, so
+  communication volume is not what limits a single node.
+- **Where the time goes on LES meshes.** On the urban cases `pressure` plus `projection` is 70-90% of the step, so
+  the solver choice matters most (`pressure_solver`, below); the right-hand side, SGS and inflow updates are each a
+  few percent. For a PETSc breakdown set `PETSC_OPTIONS="-log_view"` in the environment (the same option in
+  `&dopamine_PetscParams` is read too late and aborts at exit).
+- **Settings that did not change the speed** (details in the table below): `solver_stats_frequency` (1 vs 50),
+  `n_nonortho_corr` (auto vs 2), the GAMG smoother, threshold and coarse-grid options, link-time optimisation.
+- **GPU runs** are tuned separately (see [GPU (CUDA) Run](#gpu-cuda-run)); `pressure_solver = 'auto'` keeps BoomerAMG
+  there.
+
 ## Checkpoint and Restart
 
 **Enable checkpoint writing:**
@@ -708,6 +745,62 @@ Practical settings:
   via `&dopamine_PetscParams` should stick to hypre's GPU-supported values
   (`ext+i`/`PMIS`) when GPU mode is active; host-only choices segfault against a
   device-resident matrix.
+- `pressure_solver = 'auto'` (the default) picks `'gamg'` on CPU runs and `'boomeramg'` when the PETSc GPU backend is
+  active, and prints the choice at startup. Set `'boomeramg'` or `'gamg'` explicitly to force one.
+
+### Tested solver options
+
+All timings are seconds per step on one node with `OMP_NUM_THREADS=1`, `--bind-to core`, 8 ranks, at the input's
+`p_tol` (unless stated). "Coarse" is the 1.6M-cell snappyHexMesh urban case (neutral ABL, `KEP`, `AMD`, inflow planes,
+`cell_projection = 'EXACT'`), "fine" the 4.56M-cell version, "box" a periodic 64^3 Taylor-Green box (`LS` projection).
+Single short runs on a shared machine drift by a few percent, so differences under about 5% are not significant.
+
+| Option | Case | Time per step | Verdict |
+|---|---|---|---|
+| `pressure_solver = 'gamg'` vs `'boomeramg'` | coarse | 6.05 vs 10.72 (-44%) | **default on CPU** |
+| same | fine | 22.6 vs 42.7 (-47%) | **default on CPU** |
+| same | box | 0.241 vs 0.338 (-29%) | **default on CPU** |
+| BoomerAMG `agg_nl 1`, `strong_threshold 0.25` | coarse / box | 7.19 vs 10.72 (-33%) / -26% | opt-in only: slower than GAMG, and the mean wall shear was 5.9% from the converged answer against 3.6% for default BoomerAMG |
+| GAMG `-pc_gamg_threshold 0.01` | coarse | 5.92 vs 6.05 (-2%) | no gain, not adopted |
+| GAMG `-mg_levels_ksp_max_it 1` | coarse | 5.86 (-3%) | within noise |
+| GAMG Richardson/SOR smoother | coarse / box | +7% / +5% | not recommended |
+| GAMG coarse-equation limit 1000 | coarse | 6.03 vs 6.05 (0%) | no gain |
+| GAMG coarse-equation limit 500 | box | +27% to +49% (two runs) | not recommended |
+| GAMG threshold 0.05 / 0.1 | box | +15% / +29% | not recommended |
+| GAMG without smoothing (`agg_nsmooths 0`) | box | +39% (30 iterations against 10) | not recommended |
+| GAMG W-cycle | box | +29% to +42% (two runs) | not recommended |
+| BoomerAMG `l1-gauss-seidel` smoother (with the tuned options) | box | 68 iterations against 14 | never with CG (non-symmetric) |
+| BoomerAMG `P_max 2` | box | +25% | not recommended |
+| Fixed 1, 2, 3 CG iterations instead of a solve to 0.05 as preconditioner of the `EXACT` projection (prototype, removed) | coarse | projection 1.45 / 2.04 / 2.55 against 1.57 | no gain |
+| `solver_stats_frequency` 50 instead of 1 | coarse | 6.05 vs 6.04 | no effect |
+| `n_nonortho_corr = 2` instead of auto (4) | coarse | 5.93 vs 6.04 (-2%) | no effect |
+| Link-time optimisation (`DOPAMINE_ENABLE_LTO=ON`) | coarse | 4.46 vs 4.45 | no effect |
+| Stable intra-rank cell order in the partitioner (prototype, removed) | coarse | 4.32 vs 4.45 (-3%) | not adopted: moves results at 5e-5 and every 2-rank reference |
+| Face colouring off for one-thread ranks | coarse | 4.37 vs 5.28 (-17%) | **default** (identical monitor values) |
+| Inflow-plane span interpolation once per cached frame | fine | `pred_bc` 0.25 vs 5.48 (step -17%) | **default** (identical monitor values) |
+
+Fidelity. A faster default is only accepted if its result is as close to the converged answer as the old one. The
+reference is the same run with `p_tol = 1e-12`, `cell_projection_tol = 1e-6` and a large `p_max_iter`; the converged
+runs of BoomerAMG and GAMG agreed with each other to every printed digit. Maximum relative deviation from the converged
+run over the monitored steps:
+
+| Case (steps) | Solver | E | Umax | Ub | tauw | dt |
+|---|---|---|---|---|---|---|
+| coarse (8) | `boomeramg` | 5.5e-4 | 1.9e-6 | 5.5e-4 | 3.6e-2 | 5.5e-4 |
+| coarse (8) | `gamg` | 5.6e-4 | 1.9e-6 | 2.1e-4 | 2.1e-2 | 2.1e-4 |
+| coarse (8) | `boomeramg` tuned | 5.6e-4 | 1.9e-6 | 4.4e-4 | 5.9e-2 | 4.4e-4 |
+
+| Case (steps) | Solver | E | Umax | Ub |
+|---|---|---|---|---|
+| skewed box, `EXACT` (20) | `boomeramg` / `gamg` | 1.8e-5 / 1.4e-5 | 1.2e-4 / 1.1e-4 | 0 / 0 |
+| duct with outlet, `EXACT` (20) | `boomeramg` / `gamg` | 4.0e-5 / 3.9e-5 | 1.2e-3 / 1.2e-3 | 2.0e-5 / 2.0e-5 |
+
+The deviations are set by the loose tolerances of the pressure and cell-projection solves, not by the choice of
+solver. The divergence diagnostics stay between 1e-11 and 1e-14 for both solvers: `max|divU|` at the last step was
+4.8e-11 (BoomerAMG) against 3.9e-11 (GAMG) on the coarse case and 4.0e-11 against 7.6e-12 on the duct, but 4.5e-12
+against 1.6e-11 on the skewed box. Cases that use `cell_projection = 'LS'` change by at most 3e-6 with the solver (most stay
+within the regression tolerance of 1e-6); cases with `'EXACT'` shift by 5e-5 to 3e-4 (the at-rest `hydro_exact` check by about 1e-5 in
+absolute `Umax`). The regression inputs pin `pressure_solver = 'boomeramg'` so their stored references stay valid.
 
 ## Long-Time Stability Checklist
 
