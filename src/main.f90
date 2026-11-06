@@ -213,11 +213,11 @@ program dopamine_main
   end block
 
   ! Coloring only pays off when the face loops are threaded; serial loops lose cache locality to it.
-  if (THREADED_FACE_LOOPS) call mesh_local%build_face_coloring()
+  if (threaded_face_loops()) call mesh_local%build_face_coloring()
 
   ! Every colored !$acc/!$omp face loop falls back to silent single-thread host execution when
   ! use_color is false; catch that here instead of it quietly showing up as a huge slowdown.
-  if (mesh_local%n_faces > 0 .and. mesh_local%n_colors <= 0) then
+  if (threaded_face_loops() .and. mesh_local%n_faces > 0 .and. mesh_local%n_colors <= 0) then
     call warn_log_message('[mesh]      ', 'face coloring unavailable: colored kernels ' // &
       '(gradients, advection, viscous) will run single-threaded on host, not on GPU/OpenMP')
   end if
@@ -227,7 +227,7 @@ program dopamine_main
   block
     integer(ip) :: n_uncolored_local, n_uncolored_global, ierr_col
     character(64) :: col_text
-    n_uncolored_local = merge(1_ip, 0_ip, mesh_local%n_faces > 0 .and. mesh_local%n_colors <= 0)
+    n_uncolored_local = merge(1_ip, 0_ip, threaded_face_loops() .and. mesh_local%n_faces > 0 .and. mesh_local%n_colors <= 0)
     call MPI_Allreduce(n_uncolored_local, n_uncolored_global, 1, MPI_INTEGER, MPI_SUM, MPI_COMM_WORLD, ierr_col)
     if (n_uncolored_global > 0 .and. n_uncolored_global < nranks) then
       write(col_text, '(I0,A,I0,A)') n_uncolored_global, ' of ', nranks, ' ranks lack face coloring'

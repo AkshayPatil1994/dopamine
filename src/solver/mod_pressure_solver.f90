@@ -3,7 +3,7 @@
 !> Pressure Poisson solver with PETSc backend
 module mod_pressure_solver
   use mod_kinds
-  use mod_parameters, only: BC_OUTLET, BC_PERIODIC, SMALL, THREADED_FACE_LOOPS
+  use mod_parameters, only: BC_OUTLET, BC_PERIODIC, SMALL, threaded_face_loops
   use mod_mesh
   use mod_bc, only: BCConfig
   use mod_warn_log, only: warn_log_bump, warn_log_message, WARN_PSOLVER_RESIDUAL
@@ -448,7 +448,7 @@ contains
       end block
     end if
 
-    if (THREADED_FACE_LOOPS) call build_psolver_face_coloring(handle, nc + msh%n_ghost)
+    if (threaded_face_loops()) call build_psolver_face_coloring(handle, nc + msh%n_ghost)
   end subroutine pressure_solver_init
 
   !> Greedy face coloring over the handle's idx-space (mirrors mesh_build_face_coloring).

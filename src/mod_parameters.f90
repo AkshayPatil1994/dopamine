@@ -30,8 +30,7 @@ module mod_parameters
   real(rp), parameter, public :: VSMALL = 1.0e-200_rp
   real(rp), parameter, public :: GREAT  = 1.0e15_rp
 
-  ! Builds mesh face coloring so mod_advection/mod_viscous OpenMP loops run race-free in parallel.
-  logical, parameter, public :: THREADED_FACE_LOOPS = .true.
+  public :: threaded_face_loops
 
   ! Face type flags
   integer(ip), parameter, public :: FACE_INTERNAL  = 0
@@ -74,5 +73,21 @@ module mod_parameters
   real(rp), parameter, public :: OUTLET_COURANT_WARN = 2.0_rp
   !> Backflow switch width of the outlet traction as a fraction of the patch mean speed.
   real(rp), parameter, public :: OUTLET_BACKFLOW_DELTA = 0.05_rp
+
+contains
+
+  !> True when face coloring is needed (OpenACC, or OpenMP with more than one thread); one-thread ranks keep the face order.
+  logical function threaded_face_loops()
+#if defined(_OPENMP) && !defined(_OPENACC)
+    use omp_lib, only: omp_get_max_threads
+#endif
+#if defined(_OPENACC)
+    threaded_face_loops = .true.
+#elif defined(_OPENMP)
+    threaded_face_loops = omp_get_max_threads() > 1
+#else
+    threaded_face_loops = .false.
+#endif
+  end function threaded_face_loops
 
 end module mod_parameters
