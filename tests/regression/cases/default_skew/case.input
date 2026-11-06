@@ -4,7 +4,6 @@
   mesh_type = 'gmsh'
 /
 &dopamine_numerics
-  pressure_solver = 'boomeramg'
   advection_scheme = 'KEP'
   time_integrator  = 'RK3W'
   use_sgs          = .false.

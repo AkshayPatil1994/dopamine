@@ -9,8 +9,9 @@ being restructured (e.g. the GPU port); they are not validation cases.
 | `tgv` | 32^3 periodic box | QUICK advection, Green-Gauss gradients, periodic-only BCs |
 | `tgv_skew` | 16^3 periodic box skewed by about 45 degrees (`mk_box_mesh.py`, no gmsh) | KEP Taylor-Green vortex that diverges within 20 steps without `rhie_chow_dual = .true.`; `cell_projection = 'LS'` |
 | `tgv_skew_chk` | same skewed box | `nonortho_check = .true.` with 5 correctors allowed: the corrector loop exits on the increment of the pressure |
-| `default_skew` | same skewed box | no numerics overrides: the defaults (`rhie_chow_dual`, `cell_projection = 'EXACT'`) |
+| `default_skew` | same skewed box | no numerics overrides: the defaults (`rhie_chow_dual`, `cell_projection = 'EXACT'`, `pressure_solver = 'auto'`, which resolves to GAMG on CPU) |
 | `tgv_skew_exact`, `hydro_exact`, `duct_exact` | as `tgv_skew`, `hydro`, `duct` | `cell_projection = 'EXACT'`: the cell velocity is the V-orthogonal projection (outlet pressure enters as a boundary force) |
+| `duct_exact_gamg`, `channel_gamg` | as `duct_exact`, `channel` | the same inputs with `pressure_solver = 'gamg'` set explicitly: GAMG with a Dirichlet outlet and with wall models |
 | `channel` | 32x16x16 (2pi x 2pi x 1, walls in z, Taylor-Green initial field) | KEP, Vreman SGS, log-law wall model, body force, passive scalar with a Dirichlet wall |
 | `rb` | 24x24x16 | Boussinesq buoyancy, fixed-temperature walls, van Leer TVD, least-squares gradients, rotational projection |
 | `duct` | 32x16x16 (4 x 1 x 1) | velocity inlet, fixed-pressure outlet, no-slip walls, CDS; the Dirichlet-pressure terms of the projection |
@@ -25,7 +26,7 @@ being restructured (e.g. the GPU port); they are not validation cases.
 | `outlet_gauge` | unskewed 12^3 box (`mk_box_mesh.py`) | `cell_projection = 'EXACT'`, steady flow to a Dirichlet outlet: the mean of the written pressure must stay below 0.5 Pa after 600 steps (`check_mean_p.sh`; it fell by about 34 Pa without the outlet compact-pressure term); skipped without python netCDF4 |
 | `amd` | as `channel` | AMD SGS (`sgs_model = 'AMD'`) with the log-law wall-cell gradient, and the adaptive wall-model filter (`wall_model_filter_tf_fac = 1`); np 1 only |
 
-Every other case pins `rhie_chow_dual`, `cell_projection` and `pressure_min_cos_theta` in its input (mostly `.false.`, `'LS'`, `0`, the numerics of the original references), so a change of defaults cannot move their references.
+Every other case pins `rhie_chow_dual`, `cell_projection`, `pressure_min_cos_theta` and `pressure_solver` in its input (mostly `.false.`, `'LS'`, `0`, the numerics of the original references), so a change of defaults cannot move their references.
 
 Run everything through CTest from a build tree (meshes are generated with gmsh on first use):
 
@@ -56,6 +57,8 @@ vertex-adjacent cells across partition cuts: step 1 of every case now agrees wit
 reference to machine precision (before, `eps` in `rb` differed by 2.5% and `nu_sgs_mean` in
 `channel` by 2e-3). The `dynsmag` references were regenerated again after the test filter
 started including periodic partners on single-rank meshes.
+
+The `default_skew` references were regenerated, and `duct_exact_gamg` and `channel_gamg` added, when the default `pressure_solver` became `'auto'` (GAMG on CPU); the other cases pin `'boomeramg'`, so their references did not move.
 
 The `pdrop` and `hydro` references were regenerated after the periodic seam stopped using the owner-only gradient in the deferred non-orthogonal flux (the np1 and np2 results now coincide); `inflow` is new. The `inflow` and `inflow_jarrin` references were regenerated when the analytic stress target changed from $-0.1u_*^2$ on $\overline{u'v'}$ to the momentum flux $\overline{u'w'}=-u_*^2$ (shared by both kernels).
 
