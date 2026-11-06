@@ -778,6 +778,10 @@ Single short runs on a shared machine drift by a few percent, so differences und
 | Stable intra-rank cell order in the partitioner (prototype, removed) | coarse | 4.32 vs 4.45 (-3%) | not adopted: moves results at 5e-5 and every 2-rank reference |
 | Face colouring off for one-thread ranks | coarse | 4.37 vs 5.28 (-17%) | **default** (identical monitor values) |
 | Inflow-plane span interpolation once per cached frame | fine | `pred_bc` 0.25 vs 5.48 (step -17%) | **default** (identical monitor values) |
+| same, OpenACC + CUDA PETSc build on one RTX 3060 | coarse | 2.44 vs 5.38 (`pred_bc` 0.02 vs 2.90) | **default** |
+| `pressure_solver = 'gamg'` on the CUDA PETSc backend | coarse, GPU | out of memory in the setup (peak above 11.4 GB against 5.2 GB for BoomerAMG on the 12 GB card) | `auto` uses BoomerAMG on GPU |
+| GAMG on GPU with `-pc_gamg_agg_nsmooths 0` | coarse, GPU | fits (6.0 GB) but 73 Krylov iterations against 22, 7.6 vs 3.0 s | not recommended |
+| GAMG on GPU with `-pc_gamg_aggressive_coarsening 2` | coarse, GPU | fits (6.9 GB); 2.49 vs 3.00 s in a 2-step run | lead only: not validated for fidelity |
 
 Fidelity. A faster default is only accepted if its result is as close to the converged answer as the old one. The
 reference is the same run with `p_tol = 1e-12`, `cell_projection_tol = 1e-6` and a large `p_max_iter`; the converged

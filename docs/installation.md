@@ -292,9 +292,14 @@ cmake -S . -B build-acc26 \
   -DDOPAMINE_PETSC_WITH_CUDA=ON \
   -DDOPAMINE_PETSC_USE_GPU_AWARE_MPI=ON \
   -DDOPAMINE_ENABLE_OPENACC=ON \
-  -DDOPAMINE_OPENACC_GPU_ARCH=cc86
+  -DDOPAMINE_OPENACC_GPU_ARCH=cc86 \
+  -DDOPAMINE_PETSC_CUDA_ARCH=86
 cmake --build build-acc26 --target dopamine -j
 ```
+
+`-DDOPAMINE_PETSC_CUDA_ARCH=86` (the same compute capability as `cc86`, without the `cc`) is needed with NVHPC 26.5
+and its CUDA 13.2 `nvcc`: without it the hypre build inside PETSc defaults to `compute_70` and stops with
+`nvcc fatal : Unsupported gpu architecture 'compute_70'`.
 
 (`cc86` targets an Ampere GPU, e.g. RTX 3060 — swap for your card's compute
 capability, or drop `-DDOPAMINE_OPENACC_GPU_ARCH` entirely to let `nvfortran`
