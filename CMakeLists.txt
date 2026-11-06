@@ -737,6 +737,7 @@ set_source_files_properties(
   src/solver/mod_fv_solver.f90
   src/mesh/mod_mesh.f90
   src/mod_device.f90
+  src/mod_parameters.f90
   src/io/mod_profiling.f90
   src/main.f90
   PROPERTIES Fortran_PREPROCESS ON)
