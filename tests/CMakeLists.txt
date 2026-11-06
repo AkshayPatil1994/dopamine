@@ -21,6 +21,21 @@ foreach(_case tgv tgv_skew tgv_skew_chk tgv_skew_exact default_skew hydro_exact 
   endforeach()
 endforeach()
 
+# One-thread runs skip the colored face loops, so run a few cases with 4 OpenMP threads against the np1 references.
+foreach(_case tgv duct_exact_gamg channel_gamg)
+  add_test(NAME regression_${_case}_np1_omp4
+           COMMAND "${_regression_dir}/check_case.sh" ${_case} 1 "${_regression_work}_omp4")
+  set(_env_omp "DOPAMINE_BIN=$<TARGET_FILE:dopamine>" "MPIRUN=${MPIEXEC_EXECUTABLE}" "OMP_NUM_THREADS=4")
+  if(DOPAMINE_GMSH)
+    list(APPEND _env_omp "GMSH=${DOPAMINE_GMSH}")
+  endif()
+  set_tests_properties(regression_${_case}_np1_omp4 PROPERTIES
+    ENVIRONMENT "${_env_omp}"
+    LABELS regression
+    PROCESSORS 4
+    TIMEOUT 900)
+endforeach()
+
 # AMD + adaptive wall-model filter, serial only (np 2 cannot be run on every host yet).
 add_test(NAME regression_amd_np1
          COMMAND "${_regression_dir}/check_case.sh" amd 1 "${_regression_work}")

@@ -28,6 +28,8 @@ being restructured (e.g. the GPU port); they are not validation cases.
 
 Every other case pins `rhie_chow_dual`, `cell_projection`, `pressure_min_cos_theta` and `pressure_solver` in its input (mostly `.false.`, `'LS'`, `0`, the numerics of the original references), so a change of defaults cannot move their references.
 
+`tgv`, `duct_exact_gamg` and `channel_gamg` also run as `regression_<case>_np1_omp4` with `OMP_NUM_THREADS=4` against the np1 references: one-thread runs skip the colored face loops, so these keep the threaded path covered.
+
 Run everything through CTest from a build tree (meshes are generated with gmsh on first use):
 
 ```sh
