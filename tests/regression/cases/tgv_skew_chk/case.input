@@ -4,6 +4,7 @@
   mesh_type = 'gmsh'
 /
 &dopamine_numerics
+  pressure_solver = 'boomeramg'
   cell_projection = 'LS'
   pressure_min_cos_theta = 0.0
   advection_scheme = 'KEP'

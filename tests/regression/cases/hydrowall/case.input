@@ -5,6 +5,7 @@
   mesh_type = 'gmsh'
 /
 &dopamine_numerics
+  pressure_solver = 'boomeramg'
   rhie_chow_dual = .false.
   cell_projection = 'LS'
   pressure_min_cos_theta = 0.0
